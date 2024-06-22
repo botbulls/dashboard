@@ -5,4 +5,4 @@ services:
     volumes:
       - ./config:/usr/src/futuresboard/config
     ports:
-      - "5000:5000"
+      - "80:5000"
