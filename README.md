@@ -4,7 +4,7 @@
 A python (3.7+) based scraper and dashboard to monitor the performance of your Binance or Bybit Futures account.<br>
 </p>
 <p align="center">
-<img alt="GitHub Pipenv locked Python version" src="https://img.shields.io/github/pipenv/locked/python-version/ecoppen/futuresboard"> 
+<img alt="GitHub Pipenv locked Python version" src="https://img.shields.io/github/pipenv/locked/python-version/ecoppen/futuresboard">
 <a href="https://github.com/ecoppen/futuresboard/blob/main/LICENSE"><img alt="License: GPL v3" src="https://img.shields.io/badge/License-GPLv3-blue.svg">
 <a href="https://app.fossa.com/projects/git%2Bgithub.com%2Fecoppen%2Ffuturesboard?ref=badge_shield"><img alt="FOSSA Status" src="https://app.fossa.com/api/projects/git%2Bgithub.com%2Fecoppen%2Ffreqdash.svg?type=shield"></a>
 <a href="https://codecov.io/gh/ecoppen/futuresboard"><img src="https://codecov.io/gh/ecoppen/futuresboard/branch/main/graph/badge.svg?token=4XCZZ6MFPH"/></a>
@@ -70,3 +70,5 @@ For example, setting `"NAVBAR_TITLE": "Custom title"` and `"NAVBAR_BG": "bg-prim
 ## Alternative dashboards
 - https://github.com/hoeckxer/exchanges_dashboard
 - https://github.com/SH-Stark/trading-dashboard
+
+MOD-caalma
