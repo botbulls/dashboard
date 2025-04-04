@@ -70,5 +70,3 @@ For example, setting `"NAVBAR_TITLE": "Custom title"` and `"NAVBAR_BG": "bg-prim
 ## Alternative dashboards
 - https://github.com/hoeckxer/exchanges_dashboard
 - https://github.com/SH-Stark/trading-dashboard
-
-MOD-caalma
