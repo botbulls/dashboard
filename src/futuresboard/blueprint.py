@@ -5,7 +5,7 @@ import os
 from datetime import date
 from datetime import datetime
 from datetime import timedelta
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import requests
 from flask import Blueprint
@@ -15,7 +15,6 @@ from flask import request
 from flask.helpers import url_for
 from flask import current_app
 from typing_extensions import TypedDict
-from flask_caching import Cache  # type: ignore
 
 from futuresboard import db
 
@@ -79,6 +78,12 @@ def average_down_target(posprice, posqty, currentprice, targetprice):
 
 
 # Cache instance initialised in app factory
+if TYPE_CHECKING:  # pragma: no cover
+    from flask_caching import Cache  # pylint: disable=ungrouped-imports
+else:
+    from importlib import import_module
+    Cache: Any = import_module("flask_caching").Cache  # type: ignore[attr-defined]
+
 cache: Cache | None = None
 
 
