@@ -98,6 +98,15 @@ def _get_cache():
     return cache
 
 
+def _scalar(row: Any, default: float = 0.0) -> float:  # noqa: D401
+    """Return first column of a SQLite row or *default* if row/col is None."""
+    try:
+        val = row[0]  # type: ignore[index]
+    except Exception:
+        return default
+    return float(val) if val is not None else default
+
+
 def get_coins() -> Coins:
     # Try to retrieve from cache first
     _cache = _get_cache()
@@ -124,7 +133,8 @@ def get_coins() -> Coins:
         remove_incomeTypes,
     )
 
-    balance = db.query("SELECT totalWalletBalance FROM account WHERE AID = 1", one=True)
+    balance_row = db.query("SELECT totalWalletBalance FROM account WHERE AID = 1", one=True)
+    wallet_balance: float = _scalar(balance_row)
 
     # Aggregate order counts for all symbols once
     orders_agg = db.query(
@@ -155,10 +165,10 @@ def get_coins() -> Coins:
 
         coins["active"][position[0]] = [buy_long, sell_long, pbr_long, buy_short, sell_short, pbr_short]
         if position[2] == 'LONG':
-            pbr_long = round(calc_pbr(position[3], position[1], position[2], float(balance[0])), 2)
+            pbr_long = round(calc_pbr(position[3], position[1], position[2], wallet_balance), 2)
             pbr_short = 0.0
         if position[2] == 'SHORT':
-            pbr_short = round(calc_pbr(position[3], position[1], position[2], float(balance[0])), 2)
+            pbr_short = round(calc_pbr(position[3], position[1], position[2], wallet_balance), 2)
             pbr_long = 0.0
 
         coins["active"][position[0]][0] = buy_long
@@ -184,7 +194,10 @@ def get_coins() -> Coins:
     coins["totals"]["pbr_long"] = format_dp(coins["totals"]["pbr_long"])
     coins["totals"]["pbr_short"] = format_dp(coins["totals"]["pbr_short"])
     if _cache is not None:
-        _cache.set("coins", coins, timeout=30)
+        try:
+            _cache.set("coins", coins, timeout=30)
+        except Exception:
+            pass
     return coins
 
 

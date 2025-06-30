@@ -64,6 +64,8 @@ def _ensure_indices():
         CREATE INDEX IF NOT EXISTS idx_orders_symbol               ON orders(symbol);
         CREATE INDEX IF NOT EXISTS idx_income_time                ON income(time);
         CREATE INDEX IF NOT EXISTS idx_income_type_time           ON income(incomeType, time);
+        CREATE INDEX IF NOT EXISTS idx_income_symbol_time          ON income(symbol, time);
+        CREATE INDEX IF NOT EXISTS idx_positions_symbol            ON positions(symbol);
         """
     )
     conn.commit()
