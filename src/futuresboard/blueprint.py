@@ -15,6 +15,7 @@ from flask import request
 from flask.helpers import url_for
 from flask import current_app
 from typing_extensions import TypedDict
+from flask_caching import Cache  # type: ignore
 
 from futuresboard import db
 
@@ -77,7 +78,25 @@ def average_down_target(posprice, posqty, currentprice, targetprice):
     return (posqty * (posprice - targetprice)) / (targetprice - currentprice)
 
 
+# Cache instance initialised in app factory
+cache: Cache | None = None
+
+
+def _get_cache():
+    global cache  # noqa: PLW0603
+    if cache is None:
+        cache = current_app.extensions.get("cache")  # type: ignore[attr-defined]
+    return cache
+
+
 def get_coins():
+    # Try to retrieve from cache first
+    _cache = _get_cache()
+    if _cache is not None:
+        cached = _cache.get("coins")
+        if cached is not None:
+            return cached
+
     coins: Coins = {
         "active": {},
         "inactive": [],
@@ -98,29 +117,29 @@ def get_coins():
 
     balance = db.query("SELECT totalWalletBalance FROM account WHERE AID = 1", one=True)
 
-    active_symbols = []
+    # Aggregate order counts for all symbols once
+    orders_agg = db.query(
+        """
+        SELECT symbol,
+               SUM(CASE WHEN side = 'BUY'  AND positionSide = 'LONG'  THEN 1 ELSE 0 END) AS buy_long,
+               SUM(CASE WHEN side = 'SELL' AND positionSide = 'LONG'  THEN 1 ELSE 0 END) AS sell_long,
+               SUM(CASE WHEN side = 'BUY'  AND positionSide = 'SHORT' THEN 1 ELSE 0 END) AS buy_short,
+               SUM(CASE WHEN side = 'SELL' AND positionSide = 'SHORT' THEN 1 ELSE 0 END) AS sell_short
+        FROM orders
+        GROUP BY symbol
+        """
+    )
+    orders_map: dict[str, tuple[int, int, int, int]] = {
+        row[0]: (int(row[1] or 0), int(row[2] or 0), int(row[3] or 0), int(row[4] or 0)) for row in orders_agg
+    }
+
+    active_symbols: list[str] = []
     pbr_long, pbr_short = 0.0, 0.0
 
     for position in all_active_positions:
         if position[0] not in active_symbols:
             coins["totals"]["active"] += 1
         active_symbols.append(position[0])
-
-        # Aggregate order counts for all symbols in one query to avoid N+1 pattern
-        orders_agg = db.query(
-            """
-            SELECT symbol,
-                   SUM(CASE WHEN side = 'BUY'  AND positionSide = 'LONG'  THEN 1 ELSE 0 END) AS buy_long,
-                   SUM(CASE WHEN side = 'SELL' AND positionSide = 'LONG'  THEN 1 ELSE 0 END) AS sell_long,
-                   SUM(CASE WHEN side = 'BUY'  AND positionSide = 'SHORT' THEN 1 ELSE 0 END) AS buy_short,
-                   SUM(CASE WHEN side = 'SELL' AND positionSide = 'SHORT' THEN 1 ELSE 0 END) AS sell_short
-            FROM orders
-            GROUP BY symbol
-            """
-        )
-        orders_map: dict[str, tuple[int, int, int, int]] = {
-            row[0]: (int(row[1] or 0), int(row[2] or 0), int(row[3] or 0), int(row[4] or 0)) for row in orders_agg
-        }
 
         # Fetch pre-computed order counts (defaults to zero if symbol has no orders)
         buy_long, sell_long, buy_short, sell_short = orders_map.get(position[0], (0, 0, 0, 0))
@@ -155,6 +174,8 @@ def get_coins():
     
     coins["totals"]["pbr_long"] = format_dp(coins["totals"]["pbr_long"])
     coins["totals"]["pbr_short"] = format_dp(coins["totals"]["pbr_short"])
+    if _cache is not None:
+        _cache.set("coins", coins, timeout=30)
     return coins
 
 
@@ -587,10 +608,13 @@ def positions_page():
             temp.append(position)
         allpositions = temp
 
-        # Fetch pre-computed order counts (defaults to zero if symbol has no orders)
-        buy_long, sell_long, buy_short, sell_short = orders_map.get(position[0], (0, 0, 0, 0))
+        # Compute order stats for this coin locally to avoid dependencies
+        buys_long = [o[2] for o in allorders if o[3] == 'BUY'  and o[4] == 'LONG']
+        sells_long = [o[2] for o in allorders if o[3] == 'SELL' and o[4] == 'LONG']
+        buys_short = [o[2] for o in allorders if o[3] == 'BUY'  and o[4] == 'SHORT']
+        sells_short = [o[2] for o in allorders if o[3] == 'SELL' and o[4] == 'SHORT']
 
-        stats = [buy_long, sell_long, buy_short, sell_short]
+        stats = [len(buys_long), len(sells_long), len(buys_short), len(sells_short)]
         if stats[0] == 0:
             stats.append("-")
             stats.append("-")

@@ -8,6 +8,7 @@ from flask import Flask
 from flask import redirect
 from flask import request
 from flask_compress import Compress  # type: ignore
+from flask_caching import Cache  # type: ignore
 
 import futuresboard.scraper
 from futuresboard import blueprint
@@ -37,6 +38,10 @@ def init_app(config: Config | None = None):
 
     # Instruct browsers to cache static assets for one year
     app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 31536000
+
+    # Simple in-memory caching; for production swap with Redis/Memcached
+    cache = Cache(app, config={"CACHE_TYPE": "SimpleCache", "CACHE_DEFAULT_TIMEOUT": 30})
+    app.extensions["cache"] = cache  # store for import-time access if needed
 
     if config.DISABLE_AUTO_SCRAPE is False:
         futuresboard.scraper.auto_scrape(app)

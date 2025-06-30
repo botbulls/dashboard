@@ -2,3 +2,4 @@ flask>=2.0.2
 requests>=2.26.0
 pydantic==1.10.11
 flask-compress>=1.13.0
+Flask-Caching>=2.1.0
