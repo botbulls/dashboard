@@ -15,12 +15,13 @@ from futuresboard import db
 from futuresboard.config import Config
 
 if TYPE_CHECKING:  # pragma: no cover
-    from flask_compress import Compress as _Compress
-    from flask_caching import Cache as _Cache
-else:  # runtime import with graceful fallback error
+    from flask_compress import Compress  # pylint: disable=ungrouped-imports
+    from flask_caching import Cache
+else:  # runtime import with graceful fallback (avoids mypy missing stubs)
     from importlib import import_module
-    Compress = import_module("flask_compress").Compress  # type: ignore
-    Cache = import_module("flask_caching").Cache  # type: ignore
+
+    Compress: Any = import_module("flask_compress").Compress  # type: ignore[attr-defined]
+    Cache: Any = import_module("flask_caching").Cache  # type: ignore[attr-defined]
 
 
 def clear_trailing():
