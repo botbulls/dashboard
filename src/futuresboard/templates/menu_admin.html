@@ -1,1 +1,28 @@
-<script>alert(1)</script>
+<nav class="menu_admin" id="menu_admin">
+    <div class="icono"><span>&#9881;</span></div>
+    <div name="respuesta"></div>
+    <ul>
+        <li class="grp"><span class="titulo">STOP</span></li>
+        <li class="btn"><button data-accion="stop_cu">Último ciclo</button></li>
+        <li class="btn"><button data-accion="stop_cs">Cierra y sale</button>
+            <span class="nota">Cierra todas las ordenes y sale. Pierde el UPNL negativo</span>
+        </li>
+        <li class="grp"><span class="titulo">START</span></li>
+        <li class="btn">
+            <small>CICLO</small> <span class="nota">(*)</span>
+            <input type="number" value="0" min="0" name="ciclos">
+            <button data-accion="start_rb" data-input="ciclos">Riesgo bajo</button>
+        </li>
+        <li class="btn">
+            <small>CICLO</small> <span class="nota">(*)</span>
+            <input type="number" value="0" min="0" name="ciclos">
+            <button data-accion="start_rm" data-input="ciclos">Riesgo medio</button>
+        </li>
+        <li class="btn">
+            <small>CICLO</small> <span class="nota">(*)</span>
+            <input type="number" value="0" min="0" name="ciclos">
+            <button data-accion="start_ra" data-input="ciclos">Riesgo alto</button>
+        </li>
+        <li class="btn"><span class="nota">(*): 0 es infinito</span></li>
+    </ul>
+</nav>

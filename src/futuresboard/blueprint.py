@@ -5,7 +5,7 @@ import os
 from datetime import date
 from datetime import datetime
 from datetime import timedelta
-from typing import Any
+from typing import Any, TYPE_CHECKING, Dict, Tuple
 
 import requests
 from flask import Blueprint
@@ -77,7 +77,44 @@ def average_down_target(posprice, posqty, currentprice, targetprice):
     return (posqty * (posprice - targetprice)) / (targetprice - currentprice)
 
 
-def get_coins():
+# Cache instance initialised in app factory
+if TYPE_CHECKING:  # pragma: no cover
+    try:
+        from flask_caching import Cache  # type: ignore  # noqa: F401
+    except ImportError:
+        # Stub for static analysis when flask_caching stubs are missing
+        from typing import Any as Cache  # type: ignore
+else:
+    from importlib import import_module
+    Cache: Any = import_module("flask_caching").Cache  # type: ignore[attr-defined]
+
+cache: Cache | None = None
+
+
+def _get_cache():
+    global cache  # noqa: PLW0603
+    if cache is None:
+        cache = current_app.extensions.get("cache")  # type: ignore[attr-defined]
+    return cache
+
+
+def _scalar(row: Any, default: float = 0.0) -> float:  # noqa: D401
+    """Return first column of a SQLite row or *default* if row/col is None."""
+    try:
+        val = row[0]  # type: ignore[index]
+    except Exception:
+        return default
+    return float(val) if val is not None else default
+
+
+def get_coins() -> Coins:
+    # Try to retrieve from cache first
+    _cache = _get_cache()
+    if _cache is not None:
+        cached = _cache.get("coins")
+        if cached is not None:
+            return cached
+
     coins: Coins = {
         "active": {},
         "inactive": [],
@@ -96,9 +133,26 @@ def get_coins():
         remove_incomeTypes,
     )
 
-    balance = db.query("SELECT totalWalletBalance FROM account WHERE AID = 1", one=True)
+    balance_row = db.query("SELECT totalWalletBalance FROM account WHERE AID = 1", one=True)
+    wallet_balance: float = _scalar(balance_row)
 
-    active_symbols = []
+    # Aggregate order counts for all symbols once
+    orders_agg = db.query(
+        """
+        SELECT symbol,
+               SUM(CASE WHEN side = 'BUY'  AND positionSide = 'LONG'  THEN 1 ELSE 0 END) AS buy_long,
+               SUM(CASE WHEN side = 'SELL' AND positionSide = 'LONG'  THEN 1 ELSE 0 END) AS sell_long,
+               SUM(CASE WHEN side = 'BUY'  AND positionSide = 'SHORT' THEN 1 ELSE 0 END) AS buy_short,
+               SUM(CASE WHEN side = 'SELL' AND positionSide = 'SHORT' THEN 1 ELSE 0 END) AS sell_short
+        FROM orders
+        GROUP BY symbol
+        """
+    )
+    orders_map: Dict[str, Tuple[int, int, int, int]] = {
+        row[0]: (int(row[1] or 0), int(row[2] or 0), int(row[3] or 0), int(row[4] or 0)) for row in orders_agg
+    }
+
+    active_symbols: list[str] = []
     pbr_long, pbr_short = 0.0, 0.0
 
     for position in all_active_positions:
@@ -106,50 +160,16 @@ def get_coins():
             coins["totals"]["active"] += 1
         active_symbols.append(position[0])
 
-        buy_long, sell_long, buy_short, sell_short,  = 0, 0, 0, 0
-
-        buyorders_long = db.query(
-            'SELECT COUNT(OID) FROM orders WHERE symbol = ? AND side = "BUY" AND positionSide = "LONG"',
-            [position[0]],
-            one=True,
-        )
-
-        buyorders_short = db.query(
-            'SELECT COUNT(OID) FROM orders WHERE symbol = ? AND side = "BUY" AND positionSide = "SHORT"',
-            [position[0]],
-            one=True,
-        )
-
-        sellorders_long = db.query(
-            'SELECT COUNT(OID) FROM orders WHERE symbol = ? AND side = "SELL" AND positionSide = "LONG"',
-            [position[0]],
-            one=True,
-        )
-
-        sellorders_short = db.query(
-            'SELECT COUNT(OID) FROM orders WHERE symbol = ? AND side = "SELL" AND positionSide = "SHORT"',
-            [position[0]],
-            one=True,
-        )
+        # Fetch pre-computed order counts (defaults to zero if symbol has no orders)
+        buy_long, sell_long, buy_short, sell_short = orders_map.get(position[0], (0, 0, 0, 0))
 
         coins["active"][position[0]] = [buy_long, sell_long, pbr_long, buy_short, sell_short, pbr_short]
         if position[2] == 'LONG':
-            pbr_long = round(calc_pbr(position[3], position[1], position[2], float(balance[0])), 2)
+            pbr_long = round(calc_pbr(position[3], position[1], position[2], wallet_balance), 2)
             pbr_short = 0.0
         if position[2] == 'SHORT':
-            pbr_short = round(calc_pbr(position[3], position[1], position[2], float(balance[0])), 2)
+            pbr_short = round(calc_pbr(position[3], position[1], position[2], wallet_balance), 2)
             pbr_long = 0.0
-
-        if buyorders_long is not None:
-            buy_long = int(buyorders_long[0])
-        if sellorders_long is not None:
-            sell_long = int(sellorders_long[0])
-        if buyorders_short is not None:
-            buy_short = int(buyorders_short[0])
-        if sellorders_short is not None:
-            sell_short = int(sellorders_short[0])
-        if buy_long == 0 and sell_long == 0 and buy_short == 0 and sell_short == 0:
-            coins["warning"] = True
 
         coins["active"][position[0]][0] = buy_long
         coins["active"][position[0]][1] = sell_long
@@ -173,6 +193,11 @@ def get_coins():
     
     coins["totals"]["pbr_long"] = format_dp(coins["totals"]["pbr_long"])
     coins["totals"]["pbr_short"] = format_dp(coins["totals"]["pbr_short"])
+    if _cache is not None:
+        try:
+            _cache.set("coins", coins, timeout=30)
+        except Exception:
+            pass
     return coins
 
 
@@ -605,24 +630,12 @@ def positions_page():
             temp.append(position)
         allpositions = temp
 
-        temp = []
-        buys_long = []
-        sells_long = []
-        buys_short = []
-        sells_short = []
-        for order in allorders:
-            order = list(order)
-            order[7] = datetime.fromtimestamp(order[7] / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
-            if order[3] == "BUY" and order[4] == "LONG":
-                buys_long.append(order[2])
-            elif order[3] == "SELL" and order[4] == "LONG":
-                sells_long.append(order[2])
-            elif order[3] == "BUY" and order[4] == "SHORT":
-                buys_short.append(order[2])
-            elif order[3] == "SELL" and order[4] == "SHORT":
-                sells_short.append(order[2])
-            temp.append(order)
-        allorders = temp
+        # Compute order stats for this coin locally to avoid dependencies
+        buys_long = [o[2] for o in allorders if o[3] == 'BUY'  and o[4] == 'LONG']
+        sells_long = [o[2] for o in allorders if o[3] == 'SELL' and o[4] == 'LONG']
+        buys_short = [o[2] for o in allorders if o[3] == 'BUY'  and o[4] == 'SHORT']
+        sells_short = [o[2] for o in allorders if o[3] == 'SELL' and o[4] == 'SHORT']
+
         stats = [len(buys_long), len(sells_long), len(buys_short), len(sells_short)]
         if stats[0] == 0:
             stats.append("-")

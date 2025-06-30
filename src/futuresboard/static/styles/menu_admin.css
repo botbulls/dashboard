@@ -1,0 +1,107 @@
+/* Menu Admin Styles extracted from base.html to reduce inline CSS */
+* {
+    font-family: "Roboto", sans;
+}
+.menu_admin {
+    position: fixed;
+    right: 3px;
+    top: 3px;
+    max-width: 280px;
+    z-index: 10000;
+    text-align: left;
+}
+nav#menu_admin * {
+    text-align: left;
+}
+.menu_admin .icono {
+    text-align: right;
+}
+.menu_admin .icono span {
+    background: #154568;
+    color: #fff;
+    padding: 7px;
+    border-radius: 5px;
+    display: inline-block;
+}
+.menu_admin ul {
+    display: none;
+    box-shadow: 0 5px 15px rgba(0,0,0,0.6);
+}
+.menu_admin:hover .icono {
+    display: none;
+}
+.menu_admin:hover ul {
+    display: block;
+}
+.menu_admin ul{
+    margin: 0;
+    padding: 10px;
+    background: #333;
+    border-radius: 3px;
+}
+.menu_admin ul * {
+    color: #fff;
+}
+.menu_admin ul li {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+.menu_admin ul li .titulo {
+    font-weight: bold;
+}
+.menu_admin ul li.grp {
+    margin-top: 20px;
+    padding: 3px;
+    color: #aaa;
+}
+.menu_admin ul li.btn {
+    margin: 5px;
+    padding: 3px;
+    border-top: 1px solid #888;
+}
+.menu_admin ul li.btn button {
+    background: #1e6396;
+    color: #fff;
+    border: none;
+    padding: 5px 10px;
+    border: 1px solid #3d96d8;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+}
+.menu_admin ul li.btn button:hover {
+    background: #154568;
+}
+
+.menu_admin ul li.btn input {
+    background: #eee;
+    color: #333;
+    border: none;
+    padding: 3px;
+    border-radius: 4px;
+    cursor: pointer;
+}
+.menu_admin ul li.btn input[type=number] {
+    width: 40px;
+}
+
+.menu_admin .nota {
+    font-style: italic;
+    font-size: 0.8em;
+    color: #ff6;
+}
+
+[name=respuesta] p {
+    padding: 9px;
+    margin: 0;
+    border: 1px solid #fff;
+    border-radius: 9px;
+    text-align: center;
+}
+[name=respuesta].bien p {
+    background: #2f3;
+}
+[name=respuesta].error p {
+    background: #f32;
+}
