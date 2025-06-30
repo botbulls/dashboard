@@ -106,31 +106,24 @@ def get_coins():
             coins["totals"]["active"] += 1
         active_symbols.append(position[0])
 
-        buy_long, sell_long, buy_short, sell_short,  = 0, 0, 0, 0
-
-        buyorders_long = db.query(
-            'SELECT COUNT(OID) FROM orders WHERE symbol = ? AND side = "BUY" AND positionSide = "LONG"',
-            [position[0]],
-            one=True,
+        # Aggregate order counts for all symbols in one query to avoid N+1 pattern
+        orders_agg = db.query(
+            """
+            SELECT symbol,
+                   SUM(CASE WHEN side = 'BUY'  AND positionSide = 'LONG'  THEN 1 ELSE 0 END) AS buy_long,
+                   SUM(CASE WHEN side = 'SELL' AND positionSide = 'LONG'  THEN 1 ELSE 0 END) AS sell_long,
+                   SUM(CASE WHEN side = 'BUY'  AND positionSide = 'SHORT' THEN 1 ELSE 0 END) AS buy_short,
+                   SUM(CASE WHEN side = 'SELL' AND positionSide = 'SHORT' THEN 1 ELSE 0 END) AS sell_short
+            FROM orders
+            GROUP BY symbol
+            """
         )
+        orders_map: dict[str, tuple[int, int, int, int]] = {
+            row[0]: (int(row[1] or 0), int(row[2] or 0), int(row[3] or 0), int(row[4] or 0)) for row in orders_agg
+        }
 
-        buyorders_short = db.query(
-            'SELECT COUNT(OID) FROM orders WHERE symbol = ? AND side = "BUY" AND positionSide = "SHORT"',
-            [position[0]],
-            one=True,
-        )
-
-        sellorders_long = db.query(
-            'SELECT COUNT(OID) FROM orders WHERE symbol = ? AND side = "SELL" AND positionSide = "LONG"',
-            [position[0]],
-            one=True,
-        )
-
-        sellorders_short = db.query(
-            'SELECT COUNT(OID) FROM orders WHERE symbol = ? AND side = "SELL" AND positionSide = "SHORT"',
-            [position[0]],
-            one=True,
-        )
+        # Fetch pre-computed order counts (defaults to zero if symbol has no orders)
+        buy_long, sell_long, buy_short, sell_short = orders_map.get(position[0], (0, 0, 0, 0))
 
         coins["active"][position[0]] = [buy_long, sell_long, pbr_long, buy_short, sell_short, pbr_short]
         if position[2] == 'LONG':
@@ -139,17 +132,6 @@ def get_coins():
         if position[2] == 'SHORT':
             pbr_short = round(calc_pbr(position[3], position[1], position[2], float(balance[0])), 2)
             pbr_long = 0.0
-
-        if buyorders_long is not None:
-            buy_long = int(buyorders_long[0])
-        if sellorders_long is not None:
-            sell_long = int(sellorders_long[0])
-        if buyorders_short is not None:
-            buy_short = int(buyorders_short[0])
-        if sellorders_short is not None:
-            sell_short = int(sellorders_short[0])
-        if buy_long == 0 and sell_long == 0 and buy_short == 0 and sell_short == 0:
-            coins["warning"] = True
 
         coins["active"][position[0]][0] = buy_long
         coins["active"][position[0]][1] = sell_long
@@ -605,25 +587,10 @@ def positions_page():
             temp.append(position)
         allpositions = temp
 
-        temp = []
-        buys_long = []
-        sells_long = []
-        buys_short = []
-        sells_short = []
-        for order in allorders:
-            order = list(order)
-            order[7] = datetime.fromtimestamp(order[7] / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
-            if order[3] == "BUY" and order[4] == "LONG":
-                buys_long.append(order[2])
-            elif order[3] == "SELL" and order[4] == "LONG":
-                sells_long.append(order[2])
-            elif order[3] == "BUY" and order[4] == "SHORT":
-                buys_short.append(order[2])
-            elif order[3] == "SELL" and order[4] == "SHORT":
-                sells_short.append(order[2])
-            temp.append(order)
-        allorders = temp
-        stats = [len(buys_long), len(sells_long), len(buys_short), len(sells_short)]
+        # Fetch pre-computed order counts (defaults to zero if symbol has no orders)
+        buy_long, sell_long, buy_short, sell_short = orders_map.get(position[0], (0, 0, 0, 0))
+
+        stats = [buy_long, sell_long, buy_short, sell_short]
         if stats[0] == 0:
             stats.append("-")
             stats.append("-")
