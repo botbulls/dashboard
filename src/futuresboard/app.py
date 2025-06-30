@@ -19,11 +19,8 @@ if TYPE_CHECKING:  # pragma: no cover
     from flask_caching import Cache as _Cache
 else:  # runtime import with graceful fallback error
     from importlib import import_module
-    _Compress = import_module("flask_compress").Compress  # type: ignore
-    _Cache = import_module("flask_caching").Cache  # type: ignore
-
-Compress: Any = _Compress  # alias for actual class
-Cache: Any = _Cache
+    Compress = import_module("flask_compress").Compress  # type: ignore
+    Cache = import_module("flask_caching").Cache  # type: ignore
 
 
 def clear_trailing():
