@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import pathlib
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from flask import Flask
 from flask import redirect
@@ -15,12 +15,15 @@ from futuresboard import db
 from futuresboard.config import Config
 
 if TYPE_CHECKING:  # pragma: no cover
-    from flask_compress import Compress
-    from flask_caching import Cache
-else:  # runtime lazy import to avoid missing stubs during type-checking
+    from flask_compress import Compress as _Compress
+    from flask_caching import Cache as _Cache
+else:  # runtime import with graceful fallback error
     from importlib import import_module
-    Compress = import_module("flask_compress").Compress  # type: ignore
-    Cache = import_module("flask_caching").Cache  # type: ignore
+    _Compress = import_module("flask_compress").Compress  # type: ignore
+    _Cache = import_module("flask_caching").Cache  # type: ignore
+
+Compress: Any = _Compress  # alias for actual class
+Cache: Any = _Cache
 
 
 def clear_trailing():
