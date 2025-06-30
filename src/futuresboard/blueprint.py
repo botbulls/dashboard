@@ -5,7 +5,7 @@ import os
 from datetime import date
 from datetime import datetime
 from datetime import timedelta
-from typing import Any, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, Dict, Tuple
 
 import requests
 from flask import Blueprint
@@ -79,7 +79,11 @@ def average_down_target(posprice, posqty, currentprice, targetprice):
 
 # Cache instance initialised in app factory
 if TYPE_CHECKING:  # pragma: no cover
-    from flask_caching import Cache  # pylint: disable=ungrouped-imports
+    try:
+        from flask_caching import Cache  # type: ignore  # noqa: F401
+    except ImportError:
+        # Stub for static analysis when flask_caching stubs are missing
+        from typing import Any as Cache  # type: ignore
 else:
     from importlib import import_module
     Cache: Any = import_module("flask_caching").Cache  # type: ignore[attr-defined]
@@ -94,7 +98,7 @@ def _get_cache():
     return cache
 
 
-def get_coins():
+def get_coins() -> Coins:
     # Try to retrieve from cache first
     _cache = _get_cache()
     if _cache is not None:
@@ -134,7 +138,7 @@ def get_coins():
         GROUP BY symbol
         """
     )
-    orders_map: dict[str, tuple[int, int, int, int]] = {
+    orders_map: Dict[str, Tuple[int, int, int, int]] = {
         row[0]: (int(row[1] or 0), int(row[2] or 0), int(row[3] or 0), int(row[4] or 0)) for row in orders_agg
     }
 
