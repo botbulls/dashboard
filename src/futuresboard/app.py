@@ -7,6 +7,7 @@ import pathlib
 from flask import Flask
 from flask import redirect
 from flask import request
+from flask_compress import Compress  # type: ignore
 
 import futuresboard.scraper
 from futuresboard import blueprint
@@ -30,6 +31,12 @@ def init_app(config: Config | None = None):
     db.init_app(app)
     app.before_request(clear_trailing)
     app.register_blueprint(blueprint.app)
+
+    # Enable gzip / brotli compression for all eligible responses
+    Compress(app)
+
+    # Instruct browsers to cache static assets for one year
+    app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 31536000
 
     if config.DISABLE_AUTO_SCRAPE is False:
         futuresboard.scraper.auto_scrape(app)
