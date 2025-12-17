@@ -77,7 +77,15 @@
                 <div class="card text-center h-100">
                   <div class="card-body">
                     <h5 class="card-title mb-2" style="font-size: 2rem; font-weight: 700; color: var(--warning-color, #f59e0b);">${{ totals[7][0] }}</h5>
-	            <p class="card-text mb-0" style="font-size: 1.25rem; color: var(--text-secondary, #64748b);">&nbsp;</p>
+	            <p class="card-text mb-0" style="font-size: 1.25rem; color: var(--text-secondary, #64748b);">
+                        {% set unrealised = totals[7][0]|replace('$', '')|replace(',', '')|float %}
+                        {% set balance = totals[7][1]|replace('$', '')|replace(',', '')|float %}
+                        {% if balance > 0 %}
+                            {{ "%.2f"|format((unrealised / balance) * 100) }}%
+                        {% else %}
+                            -
+                        {% endif %}
+                    </p>
                   </div>
                   <div class="card-footer text-muted" style="font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px;">
                     Unrealised PnL
