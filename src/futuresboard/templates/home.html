@@ -2,8 +2,9 @@
 {% block autoreload %}<meta http-equiv="refresh" content="60">{% endblock %}
 {% block title %}Dashboard{% endblock %}
 {% block content %}
-    <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
-        <h3><i class="fas fa-tachometer-alt"></i></h3> <span class="badge bg-secondary"><i class="far fa-clock"></i> LAST ORDER: {{ lastupdate }}</span>
+    <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-4 border-bottom">
+        <h3 class="mb-0" style="color: var(--text-primary); font-weight: 700;"><i class="fas fa-tachometer-alt"></i> Dashboard</h3> 
+        <span class="badge bg-secondary" style="font-size: 0.875rem; padding: 0.625rem 1rem;"><i class="far fa-clock"></i> LAST ORDER: {{ lastupdate }}</span>
         <div class="btn-toolbar mb-2 mb-md-0">
             <div class="btn-group me-2">
                 <form method="GET" name="daterangeform">
@@ -20,77 +21,77 @@
     </div>
     <div class="row">
         <div class="col-sm-2">
-            <a href="{{ url_for("main.dashboard_page", start=timeranges[0][0], end=timeranges[0][1]) }}">
-                <div class="card text-center">
+            <a href="{{ url_for("main.dashboard_page", start=timeranges[0][0], end=timeranges[0][1]) }}" style="text-decoration: none;">
+                <div class="card text-center h-100">
                   <div class="card-body">
-                    <h5 class="card-title">{{ totals[6][0] }}%</h5>
-                    <p class="card-text">${{ totals[1] }}</p>
+                    <h5 class="card-title mb-2" style="font-size: 2rem; font-weight: 700; color: var(--success-color, #10b981);">{{ totals[6][0] }}%</h5>
+                    <p class="card-text mb-0" style="font-size: 1.25rem; color: var(--text-secondary, #64748b);">${{ totals[1] }}</p>
                   </div>
-                  <div class="card-footer text-muted">
+                  <div class="card-footer text-muted" style="font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px;">
                     Profit today
                   </div>
                 </div>
             </a>
         </div>
         <div class="col-sm-2">
-            <a href="{{ url_for("main.dashboard_page", start=timeranges[2][0], end=timeranges[2][1]) }}">
-                <div class="card text-center">
+            <a href="{{ url_for("main.dashboard_page", start=timeranges[2][0], end=timeranges[2][1]) }}" style="text-decoration: none;">
+                <div class="card text-center h-100">
                   <div class="card-body">
-                    <h5 class="card-title">{{ totals[6][1] }}%</h5>
-                    <p class="card-text">${{ totals[2] }}</p>
+                    <h5 class="card-title mb-2" style="font-size: 2rem; font-weight: 700; color: var(--info-color, #3b82f6);">{{ totals[6][1] }}%</h5>
+                    <p class="card-text mb-0" style="font-size: 1.25rem; color: var(--text-secondary, #64748b);">${{ totals[2] }}</p>
                   </div>
-                  <div class="card-footer text-muted">
+                  <div class="card-footer text-muted" style="font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px;">
                     Profit from Monday
                   </div>
                 </div>
             </a>
         </div>
         <div class="col-sm-2">
-             <a href="{{ url_for("main.dashboard_page", start=timeranges[4][0], end=timeranges[4][1]) }}">
-                <div class="card text-center">
+             <a href="{{ url_for("main.dashboard_page", start=timeranges[4][0], end=timeranges[4][1]) }}" style="text-decoration: none;">
+                <div class="card text-center h-100">
                   <div class="card-body">
-                    <h5 class="card-title">{{ totals[6][2] }}%</h5>
-                    <p class="card-text">${{ totals[3] }}</p>
+                    <h5 class="card-title mb-2" style="font-size: 2rem; font-weight: 700; color: var(--secondary-color, #8b5cf6);">{{ totals[6][2] }}%</h5>
+                    <p class="card-text mb-0" style="font-size: 1.25rem; color: var(--text-secondary, #64748b);">${{ totals[3] }}</p>
                   </div>
-                  <div class="card-footer text-muted">
+                  <div class="card-footer text-muted" style="font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px;">
                     Profit in {{ totals[8] }}
                   </div>
                 </div>
             </a>
         </div>
         <div class="col-sm-2">
-           <a href="{{ url_for("main.dashboard_page", start=timeranges[8][0], end=timeranges[8][1]) }}">
-                <div class="card text-center">
+           <a href="{{ url_for("main.dashboard_page", start=timeranges[8][0], end=timeranges[8][1]) }}" style="text-decoration: none;">
+                <div class="card text-center h-100">
                   <div class="card-body">
-                    <h5 class="card-title">{{ totals[6][3] }}%</h5>
-                    <p class="card-text">${{ totals[0] }}</p>
+                    <h5 class="card-title mb-2" style="font-size: 2rem; font-weight: 700; color: var(--primary-color, #6366f1);">{{ totals[6][3] }}%</h5>
+                    <p class="card-text mb-0" style="font-size: 1.25rem; color: var(--text-secondary, #64748b);">${{ totals[0] }}</p>
                   </div>
-                  <div class="card-footer text-muted">
+                  <div class="card-footer text-muted" style="font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px;">
                     Total profit
                   </div>
                 </div>
             </a>
         </div>
         <div class="col-sm-2">
-            <a href="{{ url_for("main.positions_page") }}">
-                <div class="card text-center">
+            <a href="{{ url_for("main.positions_page") }}" style="text-decoration: none;">
+                <div class="card text-center h-100">
                   <div class="card-body">
-                    <h5 class="card-title">${{ totals[7][0] }}</h5>
-	            <p class="card-text">&nbsp;</p>
+                    <h5 class="card-title mb-2" style="font-size: 2rem; font-weight: 700; color: var(--warning-color, #f59e0b);">${{ totals[7][0] }}</h5>
+	            <p class="card-text mb-0" style="font-size: 1.25rem; color: var(--text-secondary, #64748b);">&nbsp;</p>
                   </div>
-                  <div class="card-footer text-muted">
+                  <div class="card-footer text-muted" style="font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px;">
                     Unrealised PnL
                   </div>
                 </div>
             </a>
         </div>
         <div class="col-sm-2">
-            <div class="card text-center">
+            <div class="card text-center h-100">
               <div class="card-body">
-                <h5 class="card-title">${{ totals[7][1] }}</h5>
-                <p class="card-text">&nbsp;</p>
+                <h5 class="card-title mb-2" style="font-size: 2rem; font-weight: 700; color: var(--success-color, #10b981);">${{ totals[7][1] }}</h5>
+                <p class="card-text mb-0" style="font-size: 1.25rem; color: var(--text-secondary, #64748b);">&nbsp;</p>
               </div>
-              <div class="card-footer text-muted">
+              <div class="card-footer text-muted" style="font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px;">
                 Wallet balance
               </div>
             </div>
