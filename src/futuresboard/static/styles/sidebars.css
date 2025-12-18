@@ -110,7 +110,7 @@ main {
 }
 
 .btn-toggle-nav table tr:hover {
-  background: rgba(102, 126, 234, 0.05);
+  background: var(--table-row-hover-bg);
 }
 
 .scrollarea {
