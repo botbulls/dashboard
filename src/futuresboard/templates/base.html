@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="auto">
+<html lang="en" data-theme="auto" data-default-theme="{{ session.get('theme_default', 'auto') }}">
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -8,6 +8,7 @@
             (function () {
                 const STORAGE_KEY = 'futuresboard.theme';
                 const THEMES = ['auto', 'light', 'dark'];
+                const SERVER_DEFAULT_THEME = document.documentElement.dataset.defaultTheme || 'auto';
 
                 function normalizeTheme(value) {
                     return THEMES.includes(value) ? value : 'auto';
@@ -15,9 +16,11 @@
 
                 function getStoredTheme() {
                     try {
-                        return normalizeTheme(localStorage.getItem(STORAGE_KEY));
+                        const stored = localStorage.getItem(STORAGE_KEY);
+                        if (!stored) return normalizeTheme(SERVER_DEFAULT_THEME);
+                        return normalizeTheme(stored);
                     } catch (e) {
-                        return 'auto';
+                        return normalizeTheme(SERVER_DEFAULT_THEME);
                     }
                 }
 
@@ -185,6 +188,13 @@
 	</div>
 
         <div class="user_controls">
+            {% if session.get('username') %}
+                <a class="btn btn-sm btn-outline-light user_controls__user" href="{{ url_for('auth.settings_page') }}" aria-label="Account settings" title="Account settings">
+                    <i class="fas fa-user-cog" aria-hidden="true"></i>
+                    <span class="user_controls__user_text">{{ session.get('username') }}</span>
+                </a>
+            {% endif %}
+
             <div class="btn-group theme-switcher me-2" role="group" aria-label="Theme switcher">
                 <button type="button" class="btn btn-sm btn-outline-light" data-theme-value="auto" title="Auto">
                     <i class="fas fa-adjust"></i>
@@ -197,8 +207,15 @@
                 </button>
             </div>
 
+            <button type="button" class="btn btn-sm btn-outline-light theme_toggle_mobile" id="themeToggleMobile" aria-label="Theme toggle" title="Theme">
+                <i class="fas fa-adjust" aria-hidden="true"></i>
+            </button>
+
             {% if session.get('username') %}
-                <a class="btn btn-sm btn-outline-light user_controls__logout" href="{{ url_for('auth.logout_page') }}">Logout</a>
+                <a class="btn btn-sm btn-outline-light user_controls__logout" href="{{ url_for('auth.logout_page') }}" aria-label="Logout" title="Logout">
+                    <i class="fas fa-sign-out-alt" aria-hidden="true"></i>
+                    <span class="user_controls__logout_text">Logout</span>
+                </a>
             {% endif %}
         </div>
 
@@ -307,8 +324,22 @@
 		</script>
         <script>
             (function () {
-                const themeButtons = document.querySelectorAll('[data-theme-value]');
-                if (themeButtons.length === 0 || !window.FbTheme) return;
+                const themeButtons = document.querySelectorAll('.theme-switcher [data-theme-value]');
+                const mobileToggle = document.getElementById('themeToggleMobile');
+                if ((themeButtons.length === 0 && !mobileToggle) || !window.FbTheme) return;
+
+                const setToggleIcon = (theme) => {
+                    if (!mobileToggle) return;
+                    const icon = mobileToggle.querySelector('i');
+                    if (!icon) return;
+
+                    icon.classList.remove('fa-adjust', 'fa-sun', 'fa-moon');
+                    if (theme === 'light') icon.classList.add('fa-sun');
+                    else if (theme === 'dark') icon.classList.add('fa-moon');
+                    else icon.classList.add('fa-adjust');
+
+                    mobileToggle.title = theme === 'auto' ? 'Theme: Auto' : `Theme: ${theme.charAt(0).toUpperCase()}${theme.slice(1)}`;
+                };
 
                 const sync = () => {
                     const currentTheme = window.FbTheme.get();
@@ -319,6 +350,7 @@
                             btn.classList.remove('active');
                         }
                     });
+                    setToggleIcon(currentTheme);
                 };
 
                 sync();
@@ -329,6 +361,14 @@
                         window.FbTheme.set(theme);
                     });
                 });
+
+                if (mobileToggle) {
+                    mobileToggle.addEventListener('click', () => {
+                        const currentTheme = window.FbTheme.get();
+                        const nextTheme = currentTheme === 'dark' ? 'light' : 'dark';
+                        window.FbTheme.set(nextTheme);
+                    });
+                }
 
                 window.addEventListener('fb-theme-changed', sync);
             })();
@@ -448,6 +488,64 @@
          }
          .user_controls__logout {
              margin-right: 0;
+         }
+
+         .theme_toggle_mobile {
+             display: none;
+         }
+
+         @media (max-width: 575.98px) {
+             .theme-switcher {
+                 display: none;
+             }
+             .theme_toggle_mobile {
+                 display: inline-flex;
+                 align-items: center;
+                 justify-content: center;
+                 width: 34px;
+                 height: 34px;
+                 padding: 0;
+             }
+             .user_controls {
+                 gap: 6px;
+             }
+             .user_controls__logout_text {
+                 display: none;
+             }
+             .user_controls__user_text {
+                 display: none;
+             }
+             .user_controls__user {
+                 width: 34px;
+                 height: 34px;
+                 padding: 0;
+                 display: inline-flex;
+                 align-items: center;
+                 justify-content: center;
+             }
+             .user_controls__user i {
+                 margin: 0;
+             }
+             .user_controls__logout {
+                 width: 34px;
+                 height: 34px;
+                 padding: 0;
+                 display: inline-flex;
+                 align-items: center;
+                 justify-content: center;
+             }
+             .user_controls__logout i {
+                 margin: 0;
+             }
+         }
+
+         @media (min-width: 576px) {
+             .user_controls__logout i {
+                 margin-right: 6px;
+             }
+             .user_controls__user i {
+                 margin-right: 6px;
+             }
          }
 
 

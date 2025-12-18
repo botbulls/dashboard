@@ -494,6 +494,34 @@ table.dataTable {
   color: var(--text-primary);
 }
 
+/* Home dashboard: keep chart cards aligned to the same height */
+.dashboard_charts_row .dashboard_chart_card {
+  display: flex;
+  flex-direction: column;
+}
+
+.dashboard_charts_row .dashboard_chart_header {
+  min-height: 52px;
+  gap: 0.75rem;
+}
+
+.dashboard_charts_row .dashboard_chart_title {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dashboard_charts_row .dashboard_chart_header_spacer {
+  width: 92px; /* approximate width of the Projection button to keep headers equal */
+}
+
+.dashboard_charts_row canvas {
+  display: block;
+  width: 100% !important;
+}
+
 table.dataTable thead th,
 table.dataTable thead td {
   border-bottom-color: var(--border-color) !important;
@@ -509,6 +537,53 @@ div.dataTables_wrapper .dataTables_paginate,
 div.dataTables_wrapper .dataTables_length,
 div.dataTables_wrapper .dataTables_filter {
   color: var(--text-secondary) !important;
+}
+
+/* Positions page: ensure DataTable is readable in dark theme (avoid white background from vendor CSS) */
+.positions_datatable div.dataTables_wrapper {
+  color: var(--text-primary);
+}
+
+.positions_datatable table.positions_table {
+  --bs-table-bg: var(--bg-card);
+  --bs-table-color: var(--text-primary);
+  --bs-table-striped-color: var(--text-primary);
+  --bs-table-striped-bg: rgba(255, 255, 255, 0.02);
+  --bs-table-hover-color: var(--text-primary);
+  --bs-table-hover-bg: var(--table-row-hover-bg);
+
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+.positions_datatable table.positions_table thead th {
+  background: rgba(99, 102, 241, 0.22);
+  color: var(--text-primary);
+}
+
+.positions_datatable table.positions_table tbody tr {
+  background: transparent;
+}
+
+.positions_datatable table.positions_table tbody tr:hover {
+  background: var(--table-row-hover-bg);
+}
+
+.positions_datatable table.positions_table.table-bordered > :not(caption) > * {
+  border-color: var(--border-color);
+}
+
+.positions_datatable div.dataTables_wrapper .dataTables_filter input,
+.positions_datatable div.dataTables_wrapper .dataTables_length select {
+  background: var(--input-bg) !important;
+  color: var(--input-text) !important;
+  border: 1px solid var(--border-color) !important;
+  border-radius: 6px;
+  padding: 0.25rem 0.5rem;
+}
+
+.positions_datatable div.dataTables_wrapper .dataTables_filter input::placeholder {
+  color: var(--input-placeholder);
 }
 
 /* Mobile Responsive Styles */
