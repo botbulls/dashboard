@@ -185,11 +185,17 @@
 	</div>
 
         <div class="user_controls">
-            <select class="form-select form-select-sm theme_select" id="themeSelect" aria-label="Theme">
-                <option value="auto">Auto</option>
-                <option value="light">Light</option>
-                <option value="dark">Dark</option>
-            </select>
+            <div class="btn-group theme-switcher me-2" role="group" aria-label="Theme switcher">
+                <button type="button" class="btn btn-sm btn-outline-light" data-theme-value="auto" title="Auto">
+                    <i class="fas fa-adjust"></i>
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-light" data-theme-value="light" title="Light">
+                    <i class="fas fa-sun"></i>
+                </button>
+                <button type="button" class="btn btn-sm btn-outline-light" data-theme-value="dark" title="Dark">
+                    <i class="fas fa-moon"></i>
+                </button>
+            </div>
 
             {% if session.get('username') %}
                 <a class="btn btn-sm btn-outline-light user_controls__logout" href="{{ url_for('auth.logout_page') }}">Logout</a>
@@ -301,15 +307,29 @@
 		</script>
         <script>
             (function () {
-                const select = document.getElementById('themeSelect');
-                if (!select || !window.FbTheme) return;
+                const themeButtons = document.querySelectorAll('[data-theme-value]');
+                if (themeButtons.length === 0 || !window.FbTheme) return;
 
                 const sync = () => {
-                    select.value = window.FbTheme.get();
+                    const currentTheme = window.FbTheme.get();
+                    themeButtons.forEach(btn => {
+                        if (btn.getAttribute('data-theme-value') === currentTheme) {
+                            btn.classList.add('active');
+                        } else {
+                            btn.classList.remove('active');
+                        }
+                    });
                 };
 
                 sync();
-                select.addEventListener('change', () => window.FbTheme.set(select.value));
+
+                themeButtons.forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        const theme = btn.getAttribute('data-theme-value');
+                        window.FbTheme.set(theme);
+                    });
+                });
+
                 window.addEventListener('fb-theme-changed', sync);
             })();
         </script>
@@ -417,30 +437,19 @@
 
          .user_controls {
              position: fixed;
-             top: 3px;
+             top: 8px;
              right: 56px; /* leave space for the admin menu button */
              z-index: 9999;
              display: flex;
-             flex-direction: column;
-             align-items: flex-end;
-             gap: 4px;
+             flex-direction: row;
+             align-items: center;
+             gap: 10px;
              padding: 0;
          }
          .user_controls__logout {
              margin-right: 0;
          }
 
-         .theme_select {
-             width: 110px;
-             border-color: rgba(255, 255, 255, 0.35);
-             background-color: rgba(255, 255, 255, 0.14);
-             color: #ffffff;
-             --bs-form-select-bg-img: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='white' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e");
-         }
-         .theme_select:focus {
-             border-color: rgba(255, 255, 255, 0.6);
-             box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.18);
-         }
 
          [name=respuesta] p {
              padding: 9px;
