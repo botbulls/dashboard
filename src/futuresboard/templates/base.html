@@ -612,6 +612,23 @@
              btns: undefined,
              respuesta: undefined,
              accesos: undefined,
+             serverIp: {{ server_ip|tojson }},
+             // Check if hostname is a domain (contains letters) or an IP address
+             isDomain: (hostname) => {
+                 // IP addresses contain only digits and dots
+                 // Domains contain letters
+                 return /[a-zA-Z]/.test(hostname);
+             },
+             // Get the host to use for API requests
+             getApiHost: () => {
+                 const hostname = window.location.hostname;
+                 // If using a domain, use the server IP instead
+                 if (MA.isDomain(hostname)) {
+                     return MA.serverIp;
+                 }
+                 // If already using an IP, use it directly
+                 return hostname;
+             },
              activar: () => {
                  MA.el = document.getElementById('menu_admin');
                  const icon = MA.el ? MA.el.querySelector('.icono') : undefined;
@@ -656,7 +673,8 @@
              },
              obtener_accesos: (fn_ok= ()=>{}, fn_er= ()=>{})=>{
                  let data = {};
-                 let url = window.location.protocol + '//' + window.location.host + ':9009/slctdaeo';
+                 const apiHost = MA.getApiHost();
+                 let url = window.location.protocol + '//' + apiHost + ':9009/slctdaeo';
                  console.log(url); 
                  let xhr = new XMLHttpRequest();
                  xhr.open('GET', url, true);
@@ -675,7 +693,8 @@
                      fd = new FormData();
 
                  Object.keys(data).forEach( k => { if(k !== 'url') fd.append(k, data[k]) });
-                 xhr.open('POST', window.location.protocol + '//' + window.location.host + ':9009' + data.url, true);
+                 const apiHost = MA.getApiHost();
+                 xhr.open('POST', window.location.protocol + '//' + apiHost + ':9009' + data.url, true);
                  xhr.send(fd);
                  xhr.onload = () => {
                      if(xhr.status === 200) {
