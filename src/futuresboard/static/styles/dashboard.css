@@ -586,6 +586,132 @@ div.dataTables_wrapper .dataTables_filter {
   color: var(--input-placeholder);
 }
 
+/* DateRangePicker dark theme styling */
+html[data-theme="dark"] .daterangepicker,
+html[data-theme="auto"] .daterangepicker {
+  background-color: var(--bg-card) !important;
+  border-color: var(--border-color) !important;
+  box-shadow: var(--shadow-lg) !important;
+}
+
+html[data-theme="dark"] .daterangepicker .calendar-table,
+html[data-theme="auto"] .daterangepicker .calendar-table {
+  background-color: var(--bg-card) !important;
+  color: var(--text-primary) !important;
+}
+
+html[data-theme="dark"] .daterangepicker .calendar-table th,
+html[data-theme="auto"] .daterangepicker .calendar-table th {
+  color: var(--text-primary) !important;
+  background-color: var(--bg-card) !important;
+}
+
+html[data-theme="dark"] .daterangepicker .calendar-table td,
+html[data-theme="auto"] .daterangepicker .calendar-table td {
+  color: var(--text-primary) !important;
+  background-color: var(--bg-card) !important;
+}
+
+html[data-theme="dark"] .daterangepicker .calendar-table td.available:hover,
+html[data-theme="auto"] .daterangepicker .calendar-table td.available:hover {
+  background-color: var(--table-row-hover-bg) !important;
+  color: var(--text-primary) !important;
+}
+
+html[data-theme="dark"] .daterangepicker .calendar-table td.in-range,
+html[data-theme="auto"] .daterangepicker .calendar-table td.in-range {
+  background-color: rgba(99, 102, 241, 0.2) !important;
+  color: var(--text-primary) !important;
+}
+
+html[data-theme="dark"] .daterangepicker .calendar-table td.active,
+html[data-theme="auto"] .daterangepicker .calendar-table td.active,
+html[data-theme="dark"] .daterangepicker .calendar-table td.start-date,
+html[data-theme="auto"] .daterangepicker .calendar-table td.start-date,
+html[data-theme="dark"] .daterangepicker .calendar-table td.end-date,
+html[data-theme="auto"] .daterangepicker .calendar-table td.end-date {
+  background-color: var(--primary-color) !important;
+  color: #ffffff !important;
+}
+
+html[data-theme="dark"] .daterangepicker .calendar-table td.off,
+html[data-theme="auto"] .daterangepicker .calendar-table td.off {
+  color: var(--text-muted) !important;
+  background-color: var(--bg-card) !important;
+}
+
+html[data-theme="dark"] .daterangepicker .drp-selected,
+html[data-theme="auto"] .daterangepicker .drp-selected {
+  color: var(--text-primary) !important;
+}
+
+html[data-theme="dark"] .daterangepicker .ranges li,
+html[data-theme="auto"] .daterangepicker .ranges li {
+  color: var(--text-primary) !important;
+  background-color: transparent !important;
+}
+
+html[data-theme="dark"] .daterangepicker .ranges li:hover,
+html[data-theme="auto"] .daterangepicker .ranges li:hover {
+  background-color: var(--table-row-hover-bg) !important;
+  color: var(--text-primary) !important;
+}
+
+html[data-theme="dark"] .daterangepicker .ranges li.active,
+html[data-theme="auto"] .daterangepicker .ranges li.active {
+  background-color: var(--primary-color) !important;
+  color: #ffffff !important;
+}
+
+html[data-theme="dark"] .daterangepicker .drp-buttons,
+html[data-theme="auto"] .daterangepicker .drp-buttons {
+  border-top-color: var(--border-color) !important;
+}
+
+html[data-theme="dark"] .daterangepicker .drp-buttons .btn,
+html[data-theme="auto"] .daterangepicker .drp-buttons .btn {
+  background-color: var(--input-bg) !important;
+  color: var(--text-primary) !important;
+  border-color: var(--border-color) !important;
+}
+
+html[data-theme="dark"] .daterangepicker .drp-buttons .btn:hover,
+html[data-theme="auto"] .daterangepicker .drp-buttons .btn:hover {
+  background-color: var(--table-row-hover-bg) !important;
+  color: var(--text-primary) !important;
+}
+
+html[data-theme="dark"] .daterangepicker .drp-buttons .btn.btn-primary,
+html[data-theme="auto"] .daterangepicker .drp-buttons .btn.btn-primary {
+  background-color: var(--primary-color) !important;
+  color: #ffffff !important;
+  border-color: var(--primary-color) !important;
+}
+
+html[data-theme="dark"] .daterangepicker select.monthselect,
+html[data-theme="auto"] .daterangepicker select.monthselect,
+html[data-theme="dark"] .daterangepicker select.yearselect,
+html[data-theme="auto"] .daterangepicker select.yearselect {
+  background-color: var(--input-bg) !important;
+  color: var(--text-primary) !important;
+  border-color: var(--border-color) !important;
+}
+
+html[data-theme="dark"] .daterangepicker .calendar-table .prev,
+html[data-theme="auto"] .daterangepicker .calendar-table .prev,
+html[data-theme="dark"] .daterangepicker .calendar-table .next,
+html[data-theme="auto"] .daterangepicker .calendar-table .next {
+  color: var(--text-primary) !important;
+}
+
+html[data-theme="dark"] .daterangepicker .calendar-table .prev:hover,
+html[data-theme="auto"] .daterangepicker .calendar-table .prev:hover,
+html[data-theme="dark"] .daterangepicker .calendar-table .next:hover,
+html[data-theme="auto"] .daterangepicker .calendar-table .next:hover {
+  background-color: var(--table-row-hover-bg) !important;
+  color: var(--text-primary) !important;
+}
+
 /* Mobile Responsive Styles */
 @media (max-width: 767.98px) {
   .sidebar-container {
