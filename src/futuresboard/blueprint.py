@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 from datetime import date
 from datetime import datetime
@@ -12,6 +13,7 @@ from flask import Blueprint
 from flask import redirect
 from flask import render_template
 from flask import request
+from flask import Response
 from flask.helpers import url_for
 from flask import current_app
 from typing_extensions import TypedDict
@@ -1412,6 +1414,124 @@ def projection_page():
         data=projections,
         custom=current_app.config["CUSTOM"],
     )
+
+
+# Cache for admin service URL to avoid repeated lookups
+_admin_service_url_cache = None
+
+
+def _get_admin_service_url():
+    """Get the admin service URL (port 9009), automatically detecting public IP if needed."""
+    global _admin_service_url_cache
+    
+    # Return cached value if available
+    if _admin_service_url_cache is not None:
+        return _admin_service_url_cache
+    
+    # Try to get from environment variable first
+    admin_url = os.environ.get('FUTURESBOARD_ADMIN_URL')
+    if admin_url:
+        _admin_service_url_cache = admin_url.rstrip('/')
+        return _admin_service_url_cache
+    
+    # Get server IP (public or private)
+    # Try to get from environment variable
+    public_ip = os.environ.get('FUTURESBOARD_PUBLIC_IP')
+    if public_ip:
+        _admin_service_url_cache = f'http://{public_ip.strip()}:9009'
+        return _admin_service_url_cache
+    
+    # Automatically detect public IP from external services
+    import socket
+    services = [
+        'https://api.ipify.org',
+        'https://ifconfig.me/ip',
+        'https://icanhazip.com',
+        'https://checkip.amazonaws.com',
+    ]
+    
+    current_app.logger.info("Detecting public IP address for admin service...")
+    for service in services:
+        try:
+            response = requests.get(service, timeout=3)
+            if response.status_code == 200:
+                ip = response.text.strip()
+                try:
+                    socket.inet_aton(ip)
+                    _admin_service_url_cache = f'http://{ip}:9009'
+                    current_app.logger.info(f"Detected public IP: {ip}, admin service URL: {_admin_service_url_cache}")
+                    return _admin_service_url_cache
+                except socket.error:
+                    continue
+        except Exception as e:
+            current_app.logger.debug(f"Failed to get IP from {service}: {e}")
+            continue
+    
+    # Fallback: try to get from socket (may be private IP in Docker)
+    current_app.logger.warning("Could not detect public IP from external services, using local network IP")
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1)
+        try:
+            s.connect(('8.8.8.8', 80))
+            ip = s.getsockname()[0]
+        except Exception:
+            ip = '127.0.0.1'
+        finally:
+            s.close()
+        _admin_service_url_cache = f'http://{ip}:9009'
+        current_app.logger.warning(f"Using local IP: {ip}, admin service URL: {_admin_service_url_cache}")
+        return _admin_service_url_cache
+    except Exception:
+        _admin_service_url_cache = 'http://127.0.0.1:9009'
+        return _admin_service_url_cache
+
+
+@app.route("/api/admin/slctdaeo", methods=["GET"])
+def admin_proxy_slctdaeo():
+    """Proxy endpoint to get admin access configuration."""
+    try:
+        admin_url = _get_admin_service_url()
+        response = requests.get(f'{admin_url}/slctdaeo', timeout=5)
+        return Response(
+            response.content,
+            status=response.status_code,
+            mimetype=response.headers.get('Content-Type', 'application/json')
+        )
+    except Exception as e:
+        current_app.logger.error(f"Error proxying admin request: {e}")
+        return Response(
+            json.dumps({"error": str(e)}),
+            status=500,
+            mimetype='application/json'
+        )
+
+
+@app.route("/api/admin/<path:endpoint>", methods=["POST"])
+def admin_proxy_post(endpoint):
+    """Proxy endpoint for POST requests to admin service."""
+    try:
+        admin_url = _get_admin_service_url()
+        # Get form data from request
+        form_data = dict(request.form)
+        
+        response = requests.post(
+            f'{admin_url}/{endpoint}',
+            data=form_data,
+            timeout=10
+        )
+        return Response(
+            response.content,
+            status=response.status_code,
+            mimetype=response.headers.get('Content-Type', 'application/json')
+        )
+    except Exception as e:
+        current_app.logger.error(f"Error proxying admin POST request: {e}")
+        return Response(
+            json.dumps({"error": str(e)}),
+            status=500,
+            mimetype='application/json'
+        )
 
 
 @app.errorhandler(404)
