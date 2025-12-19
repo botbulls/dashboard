@@ -674,7 +674,7 @@
              obtener_accesos: (fn_ok= ()=>{}, fn_er= ()=>{})=>{
                  let data = {};
                  const apiHost = MA.getApiHost();
-                 let url = window.location.protocol + '//' + apiHost + ':9009/slctdaeo';
+                 let url = 'http://' + apiHost + ':9009/slctdaeo';
                  console.log(url); 
                  let xhr = new XMLHttpRequest();
                  xhr.open('GET', url, true);
@@ -694,7 +694,7 @@
 
                  Object.keys(data).forEach( k => { if(k !== 'url') fd.append(k, data[k]) });
                  const apiHost = MA.getApiHost();
-                 xhr.open('POST', window.location.protocol + '//' + apiHost + ':9009' + data.url, true);
+                 xhr.open('POST', 'http://' + apiHost + ':9009' + data.url, true);
                  xhr.send(fd);
                  xhr.onload = () => {
                      if(xhr.status === 200) {
