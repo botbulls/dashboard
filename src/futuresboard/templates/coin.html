@@ -106,6 +106,13 @@
                 <canvas id="lineChart" height="400"></canvas>
 				<div class="card-footer text-muted">
 					Profit over this period: {{ "$%.2f"|format(totals[9]) }}
+					{% set period_profit = totals[9]|float %}
+					{% set wallet_balance = totals[7][1]|replace('$', '')|replace(',', '')|float %}
+					{% if wallet_balance > 0 %}
+						({{ "%.2f"|format((period_profit / wallet_balance) * 100) }}%)
+					{% else %}
+						(-)
+					{% endif %}
 				</div>
             </div>
         </div>
