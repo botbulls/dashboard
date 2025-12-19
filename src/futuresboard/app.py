@@ -7,6 +7,8 @@ import pathlib
 import secrets
 import socket
 
+import requests
+
 from flask import Flask
 from flask import redirect
 from flask import request
@@ -25,18 +27,42 @@ def clear_trailing():
 
 
 def _get_server_ip():
-    """Get the server's IP address."""
-    try:
-        # Connect to a remote address to determine the local IP
-        # This doesn't actually send data, just determines the route
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(0)
+    """Get the server's public IP address."""
+    # First, try to get from environment variable (useful for Docker/containers)
+    public_ip = os.environ.get('FUTURESBOARD_PUBLIC_IP')
+    if public_ip:
+        return public_ip.strip()
+    
+    # Try to get public IP from external services
+    services = [
+        'https://api.ipify.org',
+        'https://ifconfig.me/ip',
+        'https://icanhazip.com',
+        'https://checkip.amazonaws.com',
+    ]
+    
+    for service in services:
         try:
-            # Connect to a public DNS server (doesn't actually connect)
+            response = requests.get(service, timeout=3)
+            if response.status_code == 200:
+                ip = response.text.strip()
+                # Validate it's a valid IP address
+                try:
+                    socket.inet_aton(ip)
+                    return ip
+                except socket.error:
+                    continue
+        except Exception:
+            continue
+    
+    # Fallback: try to get from socket (may be private IP in Docker)
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1)
+        try:
             s.connect(('8.8.8.8', 80))
             ip = s.getsockname()[0]
         except Exception:
-            # Fallback to localhost
             ip = '127.0.0.1'
         finally:
             s.close()
