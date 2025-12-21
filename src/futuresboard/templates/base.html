@@ -232,26 +232,36 @@
         <div class="wrapper">
             <div class="container-fluid">
                 <div class="row">
-                    <div class="flex-shrink-0 p-3 bg-white col-md-2 sidebar-container">
+                    <div class="sidebar-overlay d-md-none" id="sidebarOverlay"></div>
+                    <div class="flex-shrink-0 p-3 bg-white col-md-2 sidebar-container" id="sidebar">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <button id="sidebarToggle" class="btn btn-sm btn-outline-secondary" type="button" title="Contraer/Expandir menú">
+                                <i class="fas fa-chevron-left" id="sidebarToggleIcon"></i>
+                            </button>
+                        </div>
                         <ul class="list-unstyled ps-0">
                             <li>
-                                <a href="{{ url_for("main.index_page") }}" class="btn align-items-center rounded">
-                                    Dashboard
+                                <a href="{{ url_for("main.index_page") }}" class="btn align-items-center rounded" title="Dashboard">
+                                    <i class="fas fa-chart-line me-2"></i>
+                                    <span class="sidebar-text">Dashboard</span>
                                 </a>
                             </li>
                             <li>
-                                <a href="{{ url_for("main.positions_page") }}" class="btn align-items-center rounded">
-                                    All positions
+                                <a href="{{ url_for("main.positions_page") }}" class="btn align-items-center rounded" title="All positions">
+                                    <i class="fas fa-list me-2"></i>
+                                    <span class="sidebar-text">All positions</span>
                                 </a>
                             </li>
                             <li>
-                                <a href="{{ url_for("main.history_page") }}" class="btn align-items-center rounded">
-                                    Income history
+                                <a href="{{ url_for("main.history_page") }}" class="btn align-items-center rounded" title="Income history">
+                                    <i class="fas fa-history me-2"></i>
+                                    <span class="sidebar-text">Income history</span>
                                 </a>
                             </li>
                             <li class="mb-1">
-                                <button class="btn btn-toggle align-items-center rounded" data-bs-toggle="collapse" data-bs-target="#activecoins-collapse" aria-expanded="true">
-                                    Active coins ({{ coin_list['totals']['active'] }})
+                                <button class="btn btn-toggle align-items-center rounded" data-bs-toggle="collapse" data-bs-target="#activecoins-collapse" aria-expanded="true" title="Active coins">
+                                    <i class="fas fa-coins me-2"></i>
+                                    <span class="sidebar-text">Active coins ({{ coin_list['totals']['active'] }})</span>
                                 </button>
                                 <div class="collapse show" id="activecoins-collapse">
                                     <ul class="btn-toggle-nav list-unstyled fw-normal pb-1 small">
@@ -281,8 +291,9 @@
                                 </div>
                             </li>
                             <li class="mb-1">
-                                <button class="btn btn-toggle align-items-center rounded collapsed" data-bs-toggle="collapse" data-bs-target="#inactivecoins-collapse" aria-expanded="false">
-                                    Inactive coins ({{ coin_list['totals']['inactive'] }})
+                                <button class="btn btn-toggle align-items-center rounded collapsed" data-bs-toggle="collapse" data-bs-target="#inactivecoins-collapse" aria-expanded="false" title="Inactive coins">
+                                    <i class="fas fa-coins me-2"></i>
+                                    <span class="sidebar-text">Inactive coins ({{ coin_list['totals']['inactive'] }})</span>
                                 </button>
                                 <div class="collapse" id="inactivecoins-collapse">
                                     <ul class="btn-toggle-nav list-unstyled fw-normal pb-1 small">
@@ -295,7 +306,7 @@
                         </ul>
                     </div>
 
-                    <div class="col-md-10 ms-sm-auto px-4 py-3">
+                    <div class="col-md-10 ms-sm-auto px-4 py-3" id="mainContent">
                         <div id="content">{% block content %}{% endblock %}</div>
                     </div>
                 </div>
@@ -322,6 +333,175 @@
 			$("body").tooltip({ selector: '[data-toggle=tooltip]' });
 		});
 		</script>
+        <script>
+            // Sidebar collapse functionality
+            (function() {
+                const STORAGE_KEY = 'futuresboard.sidebarCollapsed';
+                const sidebar = document.getElementById('sidebar');
+                const sidebarToggle = document.getElementById('sidebarToggle');
+                const sidebarToggleIcon = document.getElementById('sidebarToggleIcon');
+                const mainContent = document.getElementById('mainContent');
+                const mobileMenuToggle = document.getElementById('mobileMenuToggle');
+                const sidebarOverlay = document.getElementById('sidebarOverlay');
+                
+                if (!sidebar) return;
+                
+                function getStoredState() {
+                    try {
+                        const stored = localStorage.getItem(STORAGE_KEY);
+                        return stored === 'true';
+                    } catch (e) {
+                        return false;
+                    }
+                }
+                
+                function setStoredState(collapsed) {
+                    try {
+                        localStorage.setItem(STORAGE_KEY, collapsed ? 'true' : 'false');
+                    } catch (e) {
+                        // ignore
+                    }
+                }
+                
+                function toggleSidebar(collapsed) {
+                    // Only apply collapse/expand on desktop
+                    if (window.innerWidth >= 768 && sidebarToggle && sidebarToggleIcon) {
+                        if (collapsed) {
+                            sidebar.classList.add('collapsed');
+                            sidebarToggleIcon.classList.remove('fa-chevron-left');
+                            sidebarToggleIcon.classList.add('fa-chevron-right');
+                            if (mainContent) {
+                                mainContent.classList.remove('col-md-10');
+                                mainContent.classList.add('col-md-11');
+                            }
+                        } else {
+                            sidebar.classList.remove('collapsed');
+                            sidebarToggleIcon.classList.remove('fa-chevron-right');
+                            sidebarToggleIcon.classList.add('fa-chevron-left');
+                            if (mainContent) {
+                                mainContent.classList.remove('col-md-11');
+                                mainContent.classList.add('col-md-10');
+                            }
+                        }
+                        setStoredState(collapsed);
+                    }
+                }
+                
+                function toggleMobileMenu() {
+                    const isOpen = sidebar.classList.contains('mobile-open');
+                    sidebar.classList.toggle('mobile-open');
+                    
+                    if (sidebarOverlay) {
+                        sidebarOverlay.classList.toggle('active');
+                    }
+                    
+                    // Update all hamburger button icons
+                    const allHamburgerButtons = document.querySelectorAll('#mobileMenuToggle');
+                    allHamburgerButtons.forEach(btn => {
+                        const icon = btn.querySelector('i');
+                        if (icon) {
+                            if (!isOpen) {
+                                icon.classList.remove('fa-bars');
+                                icon.classList.add('fa-times');
+                            } else {
+                                icon.classList.remove('fa-times');
+                                icon.classList.add('fa-bars');
+                            }
+                        }
+                    });
+                    
+                    // Prevent body scroll when menu is open
+                    if (!isOpen) {
+                        document.body.style.overflow = 'hidden';
+                    } else {
+                        document.body.style.overflow = '';
+                    }
+                }
+                
+                // Initialize from stored state (desktop only)
+                if (window.innerWidth >= 768) {
+                    const initialState = getStoredState();
+                    toggleSidebar(initialState);
+                }
+                
+                // Handle desktop toggle button click
+                if (sidebarToggle) {
+                    sidebarToggle.addEventListener('click', function() {
+                        const isCollapsed = sidebar.classList.contains('collapsed');
+                        toggleSidebar(!isCollapsed);
+                    });
+                }
+                
+                // Handle mobile menu toggle - use event delegation for multiple buttons
+                document.addEventListener('click', function(e) {
+                    if (e.target.closest('#mobileMenuToggle')) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        toggleMobileMenu();
+                    }
+                });
+                
+                // Close mobile menu when clicking overlay
+                if (sidebarOverlay) {
+                    sidebarOverlay.addEventListener('click', function(e) {
+                        // Only close if clicking directly on overlay, not if event bubbled from sidebar
+                        if (e.target === sidebarOverlay) {
+                            toggleMobileMenu();
+                        }
+                    });
+                }
+                
+                // Close mobile menu after navigation (delay to allow navigation to complete)
+                const sidebarLinks = sidebar.querySelectorAll('a');
+                sidebarLinks.forEach(link => {
+                    link.addEventListener('click', function(e) {
+                        // Allow the click to propagate normally for navigation
+                        if (window.innerWidth < 768) {
+                            // Small delay to ensure navigation happens before closing
+                            setTimeout(() => {
+                                if (sidebar.classList.contains('mobile-open')) {
+                                    toggleMobileMenu();
+                                }
+                            }, 100);
+                        }
+                    });
+                });
+                
+                // Handle collapse buttons (Active coins, Inactive coins)
+                const collapseButtons = sidebar.querySelectorAll('[data-bs-toggle="collapse"]');
+                collapseButtons.forEach(button => {
+                    // Prevent menu from closing when clicking collapse buttons
+                    button.addEventListener('click', function(e) {
+                        e.stopPropagation();
+                    });
+                });
+                
+                // Handle window resize
+                window.addEventListener('resize', function() {
+                    if (window.innerWidth >= 768) {
+                        sidebar.classList.remove('mobile-open');
+                        if (sidebarOverlay) sidebarOverlay.classList.remove('active');
+                        const allHamburgerButtons = document.querySelectorAll('#mobileMenuToggle');
+                        allHamburgerButtons.forEach(btn => {
+                            const icon = btn.querySelector('i');
+                            if (icon) {
+                                icon.classList.remove('fa-times');
+                                icon.classList.add('fa-bars');
+                            }
+                        });
+                        document.body.style.overflow = '';
+                        const initialState = getStoredState();
+                        toggleSidebar(initialState);
+                    } else {
+                        sidebar.classList.remove('collapsed');
+                        if (mainContent) {
+                            mainContent.classList.remove('col-md-11');
+                            mainContent.classList.add('col-md-10');
+                        }
+                    }
+                });
+            })();
+        </script>
         <script>
             (function () {
                 const themeButtons = document.querySelectorAll('.theme-switcher [data-theme-value]');

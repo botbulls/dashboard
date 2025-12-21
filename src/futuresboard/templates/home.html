@@ -3,7 +3,10 @@
 {% block title %}Dashboard{% endblock %}
 {% block content %}
     <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-4 border-bottom">
-        <h3 class="mb-0" style="color: var(--text-primary); font-weight: 700;">
+        <h3 class="mb-0 d-flex align-items-center" style="color: var(--text-primary); font-weight: 700;">
+            <button class="navbar-toggler d-md-none hamburger-btn me-2" type="button" id="mobileMenuToggle" aria-label="Toggle navigation" title="Menú">
+                <i class="fas fa-bars"></i>
+            </button>
             <i class="fas fa-tachometer-alt"></i> Dashboard
             {% if session.get('username') %}
                 <a class="ms-2 small text-muted" href="{{ url_for('auth.settings_page') }}" style="text-decoration: none;">{{ session.get('username') }}</a>

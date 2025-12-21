@@ -397,6 +397,241 @@ a:hover {
 .sidebar-container {
   background: var(--bg-sidebar);
   min-height: calc(100vh - 56px);
+  transition: width 0.3s ease, padding 0.3s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.sidebar-container.collapsed {
+  width: 80px !important;
+  min-width: 80px;
+  max-width: 80px;
+  padding: 1rem 0.5rem !important;
+}
+
+.sidebar-container.collapsed .sidebar-text {
+  display: none;
+}
+
+.sidebar-container.collapsed .btn-toggle-nav,
+.sidebar-container.collapsed #activecoins-collapse,
+.sidebar-container.collapsed #inactivecoins-collapse {
+  display: none !important;
+}
+
+.sidebar-container.collapsed .btn-toggle {
+  justify-content: center;
+  padding: 0.5rem;
+}
+
+.sidebar-container.collapsed .btn-toggle::before {
+  display: none;
+}
+
+.sidebar-container.collapsed .list-unstyled li a.btn {
+  justify-content: center;
+  padding: 0.75rem 0.5rem;
+}
+
+.sidebar-container.collapsed .list-unstyled li a.btn i {
+  margin-right: 0 !important;
+}
+
+.sidebar-container.collapsed .list-unstyled li a.btn:hover {
+  transform: none;
+}
+
+.sidebar-container #sidebarToggle {
+  width: 100%;
+  margin-bottom: 1rem;
+}
+
+.sidebar-container.collapsed #sidebarToggle {
+  width: 100%;
+  padding: 0.5rem;
+}
+
+/* Icon styling */
+.sidebar-container .list-unstyled li a.btn i,
+.sidebar-container .btn-toggle i {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  text-align: center;
+  font-size: 1rem;
+}
+
+.sidebar-container #sidebarToggle i {
+  font-size: 0.875rem;
+}
+
+/* Center icons when collapsed */
+.sidebar-container.collapsed .list-unstyled li a.btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sidebar-container.collapsed .list-unstyled li a.btn i {
+  margin: 0;
+}
+
+.sidebar-container.collapsed .btn-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sidebar-container.collapsed .btn-toggle i {
+  margin: 0;
+}
+
+/* Mobile menu styles */
+.hamburger-btn {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+  height: 40px;
+}
+
+.hamburger-btn:hover {
+  background: var(--table-row-hover-bg);
+  color: var(--text-primary);
+  border-color: var(--border-color);
+}
+
+.hamburger-btn i {
+  font-size: 1rem;
+}
+
+.sidebar-overlay {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 1040;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+}
+
+.sidebar-overlay.active {
+  display: block;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Mobile sidebar */
+@media (max-width: 767.98px) {
+  .sidebar-container {
+    position: fixed;
+    left: -100%;
+    top: 56px;
+    height: calc(100vh - 56px);
+    width: 280px !important;
+    max-width: 80%;
+    z-index: 1041;
+    transition: left 0.3s ease;
+    overflow-y: auto;
+    overflow-x: hidden;
+    box-shadow: 2px 0 10px rgba(0, 0, 0, 0.3);
+    pointer-events: none;
+  }
+  
+  .sidebar-container.mobile-open {
+    left: 0;
+    pointer-events: auto;
+  }
+  
+  .sidebar-container.mobile-open {
+    pointer-events: auto !important;
+  }
+  
+  .sidebar-container.mobile-open * {
+    pointer-events: auto !important;
+  }
+  
+  .sidebar-container.mobile-open a,
+  .sidebar-container.mobile-open button,
+  .sidebar-container.mobile-open .btn,
+  .sidebar-container.mobile-open .btn-toggle {
+    cursor: pointer !important;
+    z-index: 1042;
+    position: relative;
+  }
+  
+  .sidebar-container #sidebarToggle {
+    display: none;
+  }
+  
+  .sidebar-container.collapsed {
+    width: 280px !important;
+    padding: 1rem !important;
+  }
+  
+  .sidebar-container.collapsed .sidebar-text {
+    display: inline;
+  }
+  
+  .sidebar-container.collapsed .btn-toggle-nav,
+  .sidebar-container.collapsed #activecoins-collapse,
+  .sidebar-container.collapsed #inactivecoins-collapse {
+    display: block !important;
+  }
+  
+  .sidebar-container.collapsed .btn-toggle {
+    justify-content: flex-start;
+    padding: 0.5rem 0.75rem;
+  }
+  
+  .sidebar-container.collapsed .btn-toggle::before {
+    display: inline-block;
+  }
+  
+  .sidebar-container.collapsed .list-unstyled li a.btn {
+    justify-content: flex-start;
+    padding: 0.75rem 1rem;
+  }
+  
+  .sidebar-container.collapsed .list-unstyled li a.btn i {
+    margin-right: 0.5rem !important;
+  }
+  
+  #mainContent {
+    width: 100% !important;
+    margin-left: 0 !important;
+  }
+}
+
+/* Desktop responsive adjustments for collapsed sidebar */
+@media (min-width: 768px) {
+  .sidebar-container.collapsed ~ .col-md-10 {
+    flex: 0 0 auto;
+    width: calc(100% - 80px);
+  }
+  
+  .sidebar-container:not(.collapsed) ~ .col-md-10 {
+    flex: 0 0 auto;
+    width: 83.33333333%;
+  }
+  
+  .hamburger-btn {
+    display: none;
+  }
+  
+  .sidebar-overlay {
+    display: none !important;
+  }
 }
 
 /* Bootstrap + third-party components: keep contrast in both themes */
