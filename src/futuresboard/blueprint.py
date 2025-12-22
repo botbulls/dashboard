@@ -185,6 +185,28 @@ def get_lastupdate():
     return datetime.fromtimestamp(lastupdate[0] / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def get_last_order_details():
+    """Get details of the most recent order."""
+    order = db.query(
+        "SELECT origQty, price, side, positionSide, status, symbol, time, type FROM orders ORDER BY time DESC LIMIT 1",
+        one=True
+    )
+    if order is None:
+        return None
+    
+    return {
+        "origQty": float(order[0]) if order[0] is not None else 0,
+        "price": float(order[1]) if order[1] is not None else 0,
+        "side": order[2] or "",
+        "positionSide": order[3] or "",
+        "status": order[4] or "",
+        "symbol": order[5] or "",
+        "time": order[6],
+        "type": order[7] or "",
+        "formatted_time": datetime.fromtimestamp(order[6] / 1000.0).strftime("%Y-%m-%d %H:%M:%S") if order[6] else "-"
+    }
+
+
 def timeranges():
     today = date.today()
     yesterday_start = today - timedelta(days=1)
@@ -1579,6 +1601,31 @@ def bot_proxy_status():
         )
     except Exception as e:
         current_app.logger.error(f"Error proxying bot status request: {e}")
+        return Response(
+            json.dumps({"error": str(e)}),
+            status=500,
+            mimetype='application/json'
+        )
+
+
+@app.route("/api/last-order", methods=["GET"])
+def get_last_order():
+    """API endpoint to get details of the last order."""
+    try:
+        order = get_last_order_details()
+        if order is None:
+            return Response(
+                json.dumps({"error": "No orders found"}),
+                status=404,
+                mimetype='application/json'
+            )
+        return Response(
+            json.dumps(order),
+            status=200,
+            mimetype='application/json'
+        )
+    except Exception as e:
+        current_app.logger.error(f"Error getting last order: {e}")
         return Response(
             json.dumps({"error": str(e)}),
             status=500,

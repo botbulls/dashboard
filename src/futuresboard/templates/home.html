@@ -13,7 +13,7 @@
             {% endif %}
         </h3>
         <div class="d-flex align-items-center gap-2">
-            <span class="badge bg-secondary last-order-badge" style="font-size: 0.875rem; padding: 0.625rem 1rem;" title="Última orden: {{ lastupdate }}">
+            <span class="badge bg-secondary last-order-badge" style="font-size: 0.875rem; padding: 0.625rem 1rem; cursor: pointer;" data-bs-toggle="modal" data-bs-target="#lastOrderModal" title="Click para ver detalles">
                 <i class="far fa-clock"></i> 
                 <span class="last-order-text">LAST ORDER: {{ lastupdate }}</span>
                 <span class="last-order-short d-none">{{ lastupdate }}</span>
@@ -21,6 +21,24 @@
             <span id="botStatus" class="badge bot-status-badge" style="font-size: 0.875rem; padding: 0.625rem 1rem; cursor: pointer;" data-bs-toggle="modal" data-bs-target="#botStatusModal" title="Click para ver detalles">
                 <i class="fas fa-circle-notch fa-spin"></i> <span class="bot-status-text">Loading...</span>
             </span>
+        </div>
+        
+        <!-- Last Order Modal -->
+        <div class="modal fade" id="lastOrderModal" tabindex="-1" aria-labelledby="lastOrderModalLabel" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="lastOrderModalLabel">Detalles de la Última Orden</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body" id="lastOrderModalBody">
+                        <p>Cargando información...</p>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cerrar</button>
+                    </div>
+                </div>
+            </div>
         </div>
         
         <!-- Bot Status Modal -->
@@ -392,7 +410,43 @@ var myChart = new Chart(
                 const guardianName = containers.guardian?.name || 'guardian';
                 const passivbotName = containers.passivbot?.name || 'passivbot';
                 
-                if (isRunning && guardianRunning && passivbotRunning) {
+                // Priority logic: passivbot is the most important bot
+                // If passivbot is stopped -> show as stopped
+                // If passivbot is running but guardian is stopped -> show as partial
+                // If both are running -> show as running
+                
+                if (!passivbotRunning) {
+                    // Passivbot is stopped - most important, show as stopped
+                    statusText = 'BOT: Stopped';
+                    statusClass = 'bg-danger';
+                    iconClass = 'fas fa-times-circle';
+                    modalContent = `
+                        <div class="mb-3">
+                            <h6 class="text-danger"><i class="fas fa-times-circle"></i> Bot detenido</h6>
+                            <p class="text-muted small mb-2">Passivbot está detenido (bot principal)</p>
+                            <ul class="list-unstyled ms-3">
+                                <li><i class="fas ${guardianRunning ? 'fa-check text-success' : 'fa-times text-danger'}"></i> ${guardianName}: <strong>${guardianRunning ? 'Running' : 'Stopped'}</strong></li>
+                                <li><i class="fas fa-times text-danger"></i> ${passivbotName}: <strong class="text-danger">Stopped</strong> <span class="badge bg-danger ms-2">Principal</span></li>
+                            </ul>
+                        </div>
+                    `;
+                } else if (passivbotRunning && !guardianRunning) {
+                    // Passivbot running but guardian stopped -> partial
+                    statusText = 'BOT: Partial';
+                    statusClass = 'bg-warning';
+                    iconClass = 'fas fa-exclamation-triangle';
+                    modalContent = `
+                        <div class="mb-3">
+                            <h6 class="text-warning"><i class="fas fa-exclamation-triangle"></i> Bot parcialmente activo</h6>
+                            <p class="text-muted small mb-2">Passivbot está corriendo pero Guardian está detenido</p>
+                            <ul class="list-unstyled ms-3">
+                                <li><i class="fas fa-times text-danger"></i> ${guardianName}: <strong>Stopped</strong></li>
+                                <li><i class="fas fa-check text-success"></i> ${passivbotName}: <strong class="text-success">Running</strong> <span class="badge bg-success ms-2">Principal</span></li>
+                            </ul>
+                        </div>
+                    `;
+                } else if (passivbotRunning && guardianRunning) {
+                    // Both running -> running
                     statusText = 'BOT: Running';
                     statusClass = 'bg-success';
                     iconClass = 'fas fa-check-circle';
@@ -401,24 +455,12 @@ var myChart = new Chart(
                             <h6 class="text-success"><i class="fas fa-check-circle"></i> Bot en ejecución</h6>
                             <ul class="list-unstyled ms-3">
                                 <li><i class="fas fa-check text-success"></i> ${guardianName}: <strong>Running</strong></li>
-                                <li><i class="fas fa-check text-success"></i> ${passivbotName}: <strong>Running</strong></li>
-                            </ul>
-                        </div>
-                    `;
-                } else if (guardianRunning || passivbotRunning) {
-                    statusText = 'BOT: Partial';
-                    statusClass = 'bg-warning';
-                    iconClass = 'fas fa-exclamation-triangle';
-                    modalContent = `
-                        <div class="mb-3">
-                            <h6 class="text-warning"><i class="fas fa-exclamation-triangle"></i> Bot parcialmente activo</h6>
-                            <ul class="list-unstyled ms-3">
-                                <li><i class="fas ${guardianRunning ? 'fa-check text-success' : 'fa-times text-danger'}"></i> ${guardianName}: <strong>${guardianRunning ? 'Running' : 'Stopped'}</strong></li>
-                                <li><i class="fas ${passivbotRunning ? 'fa-check text-success' : 'fa-times text-danger'}"></i> ${passivbotName}: <strong>${passivbotRunning ? 'Running' : 'Stopped'}</strong></li>
+                                <li><i class="fas fa-check text-success"></i> ${passivbotName}: <strong>Running</strong> <span class="badge bg-success ms-2">Principal</span></li>
                             </ul>
                         </div>
                     `;
                 } else {
+                    // Fallback: both stopped
                     statusText = 'BOT: Stopped';
                     statusClass = 'bg-danger';
                     iconClass = 'fas fa-times-circle';
@@ -427,7 +469,7 @@ var myChart = new Chart(
                             <h6 class="text-danger"><i class="fas fa-times-circle"></i> Bot detenido</h6>
                             <ul class="list-unstyled ms-3">
                                 <li><i class="fas fa-times text-danger"></i> ${guardianName}: <strong>Stopped</strong></li>
-                                <li><i class="fas fa-times text-danger"></i> ${passivbotName}: <strong>Stopped</strong></li>
+                                <li><i class="fas fa-times text-danger"></i> ${passivbotName}: <strong>Stopped</strong> <span class="badge bg-danger ms-2">Principal</span></li>
                             </ul>
                         </div>
                     `;
@@ -510,6 +552,86 @@ var myChart = new Chart(
             if (!isUpdating) {
                 updateBotStatus();
             }
+        });
+    }
+})();
+
+// Last order functionality
+(function() {
+    function loadLastOrderDetails() {
+        const modalBody = document.getElementById('lastOrderModalBody');
+        if (!modalBody) return;
+        
+        fetch('/api/last-order')
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Network response was not ok');
+                }
+                return response.json();
+            })
+            .then(data => {
+                // Format the order details
+                const sideClass = data.side === 'BUY' ? 'text-success' : 'text-danger';
+                const sideIcon = data.side === 'BUY' ? 'fa-arrow-up' : 'fa-arrow-down';
+                const positionSideBadge = data.positionSide === 'LONG' ? 'bg-info' : 'bg-warning';
+                
+                modalBody.innerHTML = `
+                    <div class="row">
+                        <div class="col-12 mb-3">
+                            <h6><i class="fas fa-coins"></i> Símbolo</h6>
+                            <p class="mb-0"><strong>${data.symbol || 'N/A'}</strong></p>
+                        </div>
+                        <div class="col-6 mb-3">
+                            <h6><i class="fas ${sideIcon} ${sideClass}"></i> Lado</h6>
+                            <p class="mb-0"><span class="badge ${sideClass === 'text-success' ? 'bg-success' : 'bg-danger'}">${data.side || 'N/A'}</span></p>
+                        </div>
+                        <div class="col-6 mb-3">
+                            <h6><i class="fas fa-exchange-alt"></i> Posición</h6>
+                            <p class="mb-0"><span class="badge ${positionSideBadge}">${data.positionSide || 'N/A'}</span></p>
+                        </div>
+                        <div class="col-6 mb-3">
+                            <h6><i class="fas fa-sort-numeric-up"></i> Cantidad</h6>
+                            <p class="mb-0"><strong>${data.origQty ? data.origQty.toLocaleString('en-US', {maximumFractionDigits: 8}) : 'N/A'}</strong></p>
+                        </div>
+                        <div class="col-6 mb-3">
+                            <h6><i class="fas fa-dollar-sign"></i> Precio</h6>
+                            <p class="mb-0"><strong>${data.price ? data.price.toLocaleString('en-US', {maximumFractionDigits: 8}) : 'N/A'}</strong></p>
+                        </div>
+                        <div class="col-6 mb-3">
+                            <h6><i class="fas fa-tag"></i> Tipo</h6>
+                            <p class="mb-0"><strong>${data.type || 'N/A'}</strong></p>
+                        </div>
+                        <div class="col-6 mb-3">
+                            <h6><i class="fas fa-info-circle"></i> Estado</h6>
+                            <p class="mb-0"><span class="badge bg-secondary">${data.status || 'N/A'}</span></p>
+                        </div>
+                        <div class="col-12 mb-3">
+                            <h6><i class="far fa-clock"></i> Fecha y Hora</h6>
+                            <p class="mb-0"><strong>${data.formatted_time || 'N/A'}</strong></p>
+                        </div>
+                        ${data.price && data.origQty ? `
+                        <div class="col-12 mb-3">
+                            <h6><i class="fas fa-calculator"></i> Valor Total</h6>
+                            <p class="mb-0"><strong>$${(data.price * data.origQty).toLocaleString('en-US', {maximumFractionDigits: 2})}</strong></p>
+                        </div>
+                        ` : ''}
+                    </div>
+                `;
+            })
+            .catch(error => {
+                console.error('Error fetching last order:', error);
+                const modalBody = document.getElementById('lastOrderModalBody');
+                if (modalBody) {
+                    modalBody.innerHTML = '<p class="text-danger">Error al obtener los detalles de la última orden. Por favor, intente más tarde.</p>';
+                }
+            });
+    }
+    
+    // Load order details when modal opens
+    const lastOrderModal = document.getElementById('lastOrderModal');
+    if (lastOrderModal) {
+        lastOrderModal.addEventListener('show.bs.modal', function() {
+            loadLastOrderDetails();
         });
     }
 })();
