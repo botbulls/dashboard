@@ -1418,6 +1418,75 @@ def projection_page():
 
 # Cache for admin service URL to avoid repeated lookups
 _admin_service_url_cache = None
+# Cache for bot service URL to avoid repeated lookups
+_bot_service_url_cache = None
+
+
+def _get_bot_service_url():
+    """Get the bot service URL (port 5000), automatically detecting public IP if needed."""
+    global _bot_service_url_cache
+    
+    # Return cached value if available
+    if _bot_service_url_cache is not None:
+        return _bot_service_url_cache
+    
+    # Try to get from environment variable first
+    bot_url = os.environ.get('FUTURESBOARD_BOT_URL')
+    if bot_url:
+        _bot_service_url_cache = bot_url.rstrip('/')
+        return _bot_service_url_cache
+    
+    # Get server IP (public or private)
+    # Try to get from environment variable
+    public_ip = os.environ.get('FUTURESBOARD_PUBLIC_IP')
+    if public_ip:
+        _bot_service_url_cache = f'http://{public_ip.strip()}:5000'
+        return _bot_service_url_cache
+    
+    # Automatically detect public IP from external services
+    import socket
+    services = [
+        'https://api.ipify.org',
+        'https://ifconfig.me/ip',
+        'https://icanhazip.com',
+        'https://checkip.amazonaws.com',
+    ]
+    
+    current_app.logger.info("Detecting public IP address for bot service...")
+    for service in services:
+        try:
+            response = requests.get(service, timeout=3)
+            if response.status_code == 200:
+                ip = response.text.strip()
+                try:
+                    socket.inet_aton(ip)
+                    _bot_service_url_cache = f'http://{ip}:5000'
+                    current_app.logger.info(f"Detected public IP: {ip}, bot service URL: {_bot_service_url_cache}")
+                    return _bot_service_url_cache
+                except socket.error:
+                    continue
+        except Exception as e:
+            current_app.logger.debug(f"Failed to get IP from {service}: {e}")
+            continue
+    
+    # Fallback: try to get from socket (may be private IP in Docker)
+    current_app.logger.warning("Could not detect public IP from external services, using local network IP")
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1)
+        try:
+            s.connect(('8.8.8.8', 80))
+            ip = s.getsockname()[0]
+        except Exception:
+            ip = '127.0.0.1'
+        finally:
+            s.close()
+        _bot_service_url_cache = f'http://{ip}:5000'
+        current_app.logger.warning(f"Using local IP: {ip}, bot service URL: {_bot_service_url_cache}")
+        return _bot_service_url_cache
+    except Exception:
+        _bot_service_url_cache = 'http://127.0.0.1:5000'
+        return _bot_service_url_cache
 
 
 def _get_admin_service_url():
@@ -1527,6 +1596,26 @@ def admin_proxy_post(endpoint):
         )
     except Exception as e:
         current_app.logger.error(f"Error proxying admin POST request: {e}")
+        return Response(
+            json.dumps({"error": str(e)}),
+            status=500,
+            mimetype='application/json'
+        )
+
+
+@app.route("/api/bot/status", methods=["GET"])
+def bot_proxy_status():
+    """Proxy endpoint to get bot status."""
+    try:
+        bot_url = _get_bot_service_url()
+        response = requests.get(f'{bot_url}/bot/status', timeout=5)
+        return Response(
+            response.content,
+            status=response.status_code,
+            mimetype=response.headers.get('Content-Type', 'application/json')
+        )
+    except Exception as e:
+        current_app.logger.error(f"Error proxying bot status request: {e}")
         return Response(
             json.dumps({"error": str(e)}),
             status=500,

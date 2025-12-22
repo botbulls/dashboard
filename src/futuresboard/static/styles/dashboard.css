@@ -269,6 +269,16 @@ body {
   transition: all 0.3s ease;
 }
 
+/* Bot status badge */
+#botStatus {
+  transition: all 0.3s ease;
+  white-space: nowrap;
+}
+
+#botStatus i {
+  font-size: 0.75rem;
+}
+
 .form-control-dark {
   color: #fff;
   background-color: rgba(255, 255, 255, .1);
@@ -1540,6 +1550,17 @@ html[data-theme="auto"] .daterangepicker .calendar-table .next:hover {
   .d-flex.justify-content-between h3 {
     flex: 1 1 auto;
     min-width: 200px;
+  }
+  
+  /* Bot status responsive */
+  .d-flex.align-items-center.gap-2 {
+    flex-wrap: wrap;
+    gap: 0.5rem !important;
+  }
+  
+  #botStatus {
+    font-size: 0.75rem !important;
+    padding: 0.5rem 0.75rem !important;
   }
   
   .d-flex.justify-content-between .badge {

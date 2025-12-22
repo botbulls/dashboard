@@ -12,7 +12,12 @@
                 <a class="ms-2 small text-muted" href="{{ url_for('auth.settings_page') }}" style="text-decoration: none;">{{ session.get('username') }}</a>
             {% endif %}
         </h3>
-        <span class="badge bg-secondary" style="font-size: 0.875rem; padding: 0.625rem 1rem;"><i class="far fa-clock"></i> LAST ORDER: {{ lastupdate }}</span>
+        <div class="d-flex align-items-center gap-2">
+            <span class="badge bg-secondary" style="font-size: 0.875rem; padding: 0.625rem 1rem;"><i class="far fa-clock"></i> LAST ORDER: {{ lastupdate }}</span>
+            <span id="botStatus" class="badge" style="font-size: 0.875rem; padding: 0.625rem 1rem;">
+                <i class="fas fa-circle-notch fa-spin"></i> Loading...
+            </span>
+        </div>
         <div class="btn-toolbar mb-2 mb-md-0">
             <div class="btn-group me-2">
                 <form method="GET" name="daterangeform">
@@ -322,5 +327,79 @@ var myChart = new Chart(
     document.getElementById('lineChart'),
     config2
 );
+
+// Bot status functionality
+(function() {
+    const botStatusEl = document.getElementById('botStatus');
+    if (!botStatusEl) return;
+    
+    function updateBotStatus() {
+        fetch('/api/bot/status')
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Network response was not ok');
+                }
+                return response.json();
+            })
+            .then(data => {
+                let statusText = '';
+                let statusClass = '';
+                let iconClass = '';
+                
+                if (data.status === 'running' || data.status === 'start') {
+                    // Check if containers are running
+                    const containers = data.containers || {};
+                    const guardianRunning = containers.guardian?.running || false;
+                    const passivbotRunning = containers.passivbot?.running || false;
+                    
+                    if (guardianRunning && passivbotRunning) {
+                        statusText = 'BOT: Running';
+                        statusClass = 'bg-success';
+                        iconClass = 'fas fa-check-circle';
+                    } else if (guardianRunning || passivbotRunning) {
+                        statusText = 'BOT: Partial';
+                        statusClass = 'bg-warning';
+                        iconClass = 'fas fa-exclamation-triangle';
+                    } else {
+                        statusText = 'BOT: Stopped';
+                        statusClass = 'bg-danger';
+                        iconClass = 'fas fa-times-circle';
+                    }
+                } else {
+                    statusText = 'BOT: Stopped';
+                    statusClass = 'bg-danger';
+                    iconClass = 'fas fa-times-circle';
+                }
+                
+                botStatusEl.textContent = '';
+                botStatusEl.className = 'badge ' + statusClass;
+                botStatusEl.style.fontSize = '0.875rem';
+                botStatusEl.style.padding = '0.625rem 1rem';
+                
+                const icon = document.createElement('i');
+                icon.className = iconClass;
+                icon.style.marginRight = '0.5rem';
+                botStatusEl.appendChild(icon);
+                botStatusEl.appendChild(document.createTextNode(statusText));
+            })
+            .catch(error => {
+                console.error('Error fetching bot status:', error);
+                botStatusEl.textContent = '';
+                botStatusEl.className = 'badge bg-secondary';
+                botStatusEl.style.fontSize = '0.875rem';
+                botStatusEl.style.padding = '0.625rem 1rem';
+                
+                const icon = document.createElement('i');
+                icon.className = 'fas fa-question-circle';
+                icon.style.marginRight = '0.5rem';
+                botStatusEl.appendChild(icon);
+                botStatusEl.appendChild(document.createTextNode('BOT: Unknown'));
+            });
+    }
+    
+    // Update immediately and then every 30 seconds
+    updateBotStatus();
+    setInterval(updateBotStatus, 30000);
+})();
 </script>
 {% endblock %}
