@@ -285,6 +285,59 @@ body {
   font-size: 0.75rem;
 }
 
+/* Last order badge responsive */
+.last-order-badge {
+  white-space: nowrap;
+}
+
+.last-order-short {
+  display: none;
+}
+
+/* Mobile: show only icon or short format */
+@media (max-width: 575.98px) {
+  .last-order-badge {
+    padding: 0.5rem !important;
+    min-width: 2.5rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  
+  .last-order-text {
+    display: none;
+  }
+  
+  .last-order-short {
+    display: none !important;
+  }
+  
+  .last-order-badge i {
+    margin-right: 0 !important;
+    font-size: 1rem;
+  }
+}
+
+/* Small screens: show short format */
+@media (min-width: 576px) and (max-width: 767.98px) {
+  .last-order-badge {
+    padding: 0.5rem 0.75rem !important;
+    font-size: 0.75rem !important;
+  }
+  
+  .last-order-text {
+    display: none;
+  }
+  
+  .last-order-short {
+    display: inline !important;
+  }
+  
+  .last-order-badge i {
+    margin-right: 0.5rem;
+  }
+}
+
 /* Mobile: show only icon */
 @media (max-width: 767.98px) {
   .bot-status-badge {

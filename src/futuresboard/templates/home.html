@@ -13,7 +13,11 @@
             {% endif %}
         </h3>
         <div class="d-flex align-items-center gap-2">
-            <span class="badge bg-secondary" style="font-size: 0.875rem; padding: 0.625rem 1rem;"><i class="far fa-clock"></i> LAST ORDER: {{ lastupdate }}</span>
+            <span class="badge bg-secondary last-order-badge" style="font-size: 0.875rem; padding: 0.625rem 1rem;" title="Última orden: {{ lastupdate }}">
+                <i class="far fa-clock"></i> 
+                <span class="last-order-text">LAST ORDER: {{ lastupdate }}</span>
+                <span class="last-order-short d-none">{{ lastupdate }}</span>
+            </span>
             <span id="botStatus" class="badge bot-status-badge" style="font-size: 0.875rem; padding: 0.625rem 1rem; cursor: pointer;" data-bs-toggle="modal" data-bs-target="#botStatusModal" title="Click para ver detalles">
                 <i class="fas fa-circle-notch fa-spin"></i> <span class="bot-status-text">Loading...</span>
             </span>

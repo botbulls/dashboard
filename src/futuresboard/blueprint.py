@@ -1423,70 +1423,33 @@ _bot_service_url_cache = None
 
 
 def _get_bot_service_url():
-    """Get the bot service URL (port 5000), automatically detecting public IP if needed."""
+    """Get the bot service URL (port 5000) for container-to-container communication.
+    
+    In Docker Compose, services can communicate using the service name as hostname.
+    This function prioritizes Docker service name 'api' for internal communication,
+    falling back to environment variables or IP detection if needed.
+    """
     global _bot_service_url_cache
     
     # Return cached value if available
     if _bot_service_url_cache is not None:
         return _bot_service_url_cache
     
-    # Try to get from environment variable first
+    # Priority 1: Try to get from environment variable (can be set in docker-compose)
     bot_url = os.environ.get('FUTURESBOARD_BOT_URL')
     if bot_url:
         _bot_service_url_cache = bot_url.rstrip('/')
+        current_app.logger.info(f"Using FUTURESBOARD_BOT_URL: {_bot_service_url_cache}")
         return _bot_service_url_cache
     
-    # Get server IP (public or private)
-    # Try to get from environment variable
-    public_ip = os.environ.get('FUTURESBOARD_PUBLIC_IP')
-    if public_ip:
-        _bot_service_url_cache = f'http://{public_ip.strip()}:5000'
-        return _bot_service_url_cache
-    
-    # Automatically detect public IP from external services
-    import socket
-    services = [
-        'https://api.ipify.org',
-        'https://ifconfig.me/ip',
-        'https://icanhazip.com',
-        'https://checkip.amazonaws.com',
-    ]
-    
-    current_app.logger.info("Detecting public IP address for bot service...")
-    for service in services:
-        try:
-            response = requests.get(service, timeout=3)
-            if response.status_code == 200:
-                ip = response.text.strip()
-                try:
-                    socket.inet_aton(ip)
-                    _bot_service_url_cache = f'http://{ip}:5000'
-                    current_app.logger.info(f"Detected public IP: {ip}, bot service URL: {_bot_service_url_cache}")
-                    return _bot_service_url_cache
-                except socket.error:
-                    continue
-        except Exception as e:
-            current_app.logger.debug(f"Failed to get IP from {service}: {e}")
-            continue
-    
-    # Fallback: try to get from socket (may be private IP in Docker)
-    current_app.logger.warning("Could not detect public IP from external services, using local network IP")
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(1)
-        try:
-            s.connect(('8.8.8.8', 80))
-            ip = s.getsockname()[0]
-        except Exception:
-            ip = '127.0.0.1'
-        finally:
-            s.close()
-        _bot_service_url_cache = f'http://{ip}:5000'
-        current_app.logger.warning(f"Using local IP: {ip}, bot service URL: {_bot_service_url_cache}")
-        return _bot_service_url_cache
-    except Exception:
-        _bot_service_url_cache = 'http://127.0.0.1:5000'
-        return _bot_service_url_cache
+    # Priority 2: Use Docker service name for container-to-container communication
+    # In Docker Compose, services can reach each other using service names
+    # The service name is 'api' according to docker-compose.yml
+    docker_service_name = os.environ.get('FUTURESBOARD_BOT_SERVICE_NAME', 'api')
+    docker_port = os.environ.get('FUTURESBOARD_BOT_SERVICE_PORT', '5000')
+    _bot_service_url_cache = f'http://{docker_service_name}:{docker_port}'
+    current_app.logger.info(f"Using Docker service name for container-to-container communication: {_bot_service_url_cache}")
+    return _bot_service_url_cache
 
 
 def _get_admin_service_url():
