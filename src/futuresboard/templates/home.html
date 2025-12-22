@@ -14,9 +14,27 @@
         </h3>
         <div class="d-flex align-items-center gap-2">
             <span class="badge bg-secondary" style="font-size: 0.875rem; padding: 0.625rem 1rem;"><i class="far fa-clock"></i> LAST ORDER: {{ lastupdate }}</span>
-            <span id="botStatus" class="badge" style="font-size: 0.875rem; padding: 0.625rem 1rem;">
-                <i class="fas fa-circle-notch fa-spin"></i> Loading...
+            <span id="botStatus" class="badge bot-status-badge" style="font-size: 0.875rem; padding: 0.625rem 1rem; cursor: pointer;" data-bs-toggle="modal" data-bs-target="#botStatusModal" title="Click para ver detalles">
+                <i class="fas fa-circle-notch fa-spin"></i> <span class="bot-status-text">Loading...</span>
             </span>
+        </div>
+        
+        <!-- Bot Status Modal -->
+        <div class="modal fade" id="botStatusModal" tabindex="-1" aria-labelledby="botStatusModalLabel" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="botStatusModalLabel">Estado del Bot</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body" id="botStatusModalBody">
+                        <p>Cargando información...</p>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cerrar</button>
+                    </div>
+                </div>
+            </div>
         </div>
         <div class="btn-toolbar mb-2 mb-md-0">
             <div class="btn-group me-2">
@@ -328,13 +346,28 @@ var myChart = new Chart(
     config2
 );
 
-// Bot status functionality
+// Bot status functionality - optimized to not block page load
 (function() {
-    const botStatusEl = document.getElementById('botStatus');
-    if (!botStatusEl) return;
+    let botStatusInterval = null;
+    let isUpdating = false;
     
     function updateBotStatus() {
-        fetch('/api/bot/status')
+        const botStatusEl = document.getElementById('botStatus');
+        const botStatusText = botStatusEl?.querySelector('.bot-status-text');
+        if (!botStatusEl || !botStatusText) return;
+        
+        // Prevent concurrent requests
+        if (isUpdating) return;
+        isUpdating = true;
+        
+        // Create timeout controller for older browsers
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        
+        fetch('/api/bot/status', { 
+            cache: 'no-cache',
+            signal: controller.signal
+        })
             .then(response => {
                 if (!response.ok) {
                     throw new Error('Network response was not ok');
@@ -345,61 +378,136 @@ var myChart = new Chart(
                 let statusText = '';
                 let statusClass = '';
                 let iconClass = '';
+                let modalContent = '';
                 
-                if (data.status === 'running' || data.status === 'start') {
-                    // Check if containers are running
-                    const containers = data.containers || {};
-                    const guardianRunning = containers.guardian?.running || false;
-                    const passivbotRunning = containers.passivbot?.running || false;
-                    
-                    if (guardianRunning && passivbotRunning) {
-                        statusText = 'BOT: Running';
-                        statusClass = 'bg-success';
-                        iconClass = 'fas fa-check-circle';
-                    } else if (guardianRunning || passivbotRunning) {
-                        statusText = 'BOT: Partial';
-                        statusClass = 'bg-warning';
-                        iconClass = 'fas fa-exclamation-triangle';
-                    } else {
-                        statusText = 'BOT: Stopped';
-                        statusClass = 'bg-danger';
-                        iconClass = 'fas fa-times-circle';
-                    }
+                // Check status - API returns "run" not "running"
+                const isRunning = data.status === 'run' || data.status === 'running' || data.status === 'start';
+                const containers = data.containers || {};
+                const guardianRunning = containers.guardian?.running || false;
+                const passivbotRunning = containers.passivbot?.running || false;
+                const guardianName = containers.guardian?.name || 'guardian';
+                const passivbotName = containers.passivbot?.name || 'passivbot';
+                
+                if (isRunning && guardianRunning && passivbotRunning) {
+                    statusText = 'BOT: Running';
+                    statusClass = 'bg-success';
+                    iconClass = 'fas fa-check-circle';
+                    modalContent = `
+                        <div class="mb-3">
+                            <h6 class="text-success"><i class="fas fa-check-circle"></i> Bot en ejecución</h6>
+                            <ul class="list-unstyled ms-3">
+                                <li><i class="fas fa-check text-success"></i> ${guardianName}: <strong>Running</strong></li>
+                                <li><i class="fas fa-check text-success"></i> ${passivbotName}: <strong>Running</strong></li>
+                            </ul>
+                        </div>
+                    `;
+                } else if (guardianRunning || passivbotRunning) {
+                    statusText = 'BOT: Partial';
+                    statusClass = 'bg-warning';
+                    iconClass = 'fas fa-exclamation-triangle';
+                    modalContent = `
+                        <div class="mb-3">
+                            <h6 class="text-warning"><i class="fas fa-exclamation-triangle"></i> Bot parcialmente activo</h6>
+                            <ul class="list-unstyled ms-3">
+                                <li><i class="fas ${guardianRunning ? 'fa-check text-success' : 'fa-times text-danger'}"></i> ${guardianName}: <strong>${guardianRunning ? 'Running' : 'Stopped'}</strong></li>
+                                <li><i class="fas ${passivbotRunning ? 'fa-check text-success' : 'fa-times text-danger'}"></i> ${passivbotName}: <strong>${passivbotRunning ? 'Running' : 'Stopped'}</strong></li>
+                            </ul>
+                        </div>
+                    `;
                 } else {
                     statusText = 'BOT: Stopped';
                     statusClass = 'bg-danger';
                     iconClass = 'fas fa-times-circle';
+                    modalContent = `
+                        <div class="mb-3">
+                            <h6 class="text-danger"><i class="fas fa-times-circle"></i> Bot detenido</h6>
+                            <ul class="list-unstyled ms-3">
+                                <li><i class="fas fa-times text-danger"></i> ${guardianName}: <strong>Stopped</strong></li>
+                                <li><i class="fas fa-times text-danger"></i> ${passivbotName}: <strong>Stopped</strong></li>
+                            </ul>
+                        </div>
+                    `;
                 }
                 
-                botStatusEl.textContent = '';
-                botStatusEl.className = 'badge ' + statusClass;
-                botStatusEl.style.fontSize = '0.875rem';
-                botStatusEl.style.padding = '0.625rem 1rem';
+                // Update badge
+                const icon = botStatusEl.querySelector('i');
+                if (icon) {
+                    icon.className = iconClass;
+                    icon.classList.remove('fa-spin', 'fa-circle-notch');
+                }
+                if (botStatusText) {
+                    botStatusText.textContent = statusText;
+                }
+                botStatusEl.className = 'badge bot-status-badge ' + statusClass;
                 
-                const icon = document.createElement('i');
-                icon.className = iconClass;
-                icon.style.marginRight = '0.5rem';
-                botStatusEl.appendChild(icon);
-                botStatusEl.appendChild(document.createTextNode(statusText));
+                // Update modal content
+                const modalBody = document.getElementById('botStatusModalBody');
+                if (modalBody) {
+                    modalBody.innerHTML = modalContent + `
+                        <div class="mt-3">
+                            <small class="text-muted">Última actualización: ${new Date().toLocaleTimeString()}</small>
+                        </div>
+                    `;
+                }
             })
             .catch(error => {
                 console.error('Error fetching bot status:', error);
-                botStatusEl.textContent = '';
-                botStatusEl.className = 'badge bg-secondary';
-                botStatusEl.style.fontSize = '0.875rem';
-                botStatusEl.style.padding = '0.625rem 1rem';
+                const botStatusEl = document.getElementById('botStatus');
+                const botStatusText = botStatusEl?.querySelector('.bot-status-text');
+                if (!botStatusEl || !botStatusText) return;
                 
-                const icon = document.createElement('i');
-                icon.className = 'fas fa-question-circle';
-                icon.style.marginRight = '0.5rem';
-                botStatusEl.appendChild(icon);
-                botStatusEl.appendChild(document.createTextNode('BOT: Unknown'));
+                const icon = botStatusEl.querySelector('i');
+                if (icon) {
+                    icon.className = 'fas fa-question-circle';
+                    icon.classList.remove('fa-spin', 'fa-circle-notch');
+                }
+                botStatusText.textContent = 'BOT: Unknown';
+                botStatusEl.className = 'badge bot-status-badge bg-secondary';
+                
+                const modalBody = document.getElementById('botStatusModalBody');
+                if (modalBody) {
+                    modalBody.innerHTML = '<p class="text-danger">Error al obtener el estado del bot. Por favor, intente más tarde.</p>';
+                }
+            })
+            .finally(() => {
+                clearTimeout(timeoutId);
+                isUpdating = false;
             });
     }
     
-    // Update immediately and then every 30 seconds
-    updateBotStatus();
-    setInterval(updateBotStatus, 30000);
+    // Wait for DOM to be ready and delay initial load to not block page rendering
+    function initBotStatus() {
+        // Use requestIdleCallback if available, otherwise setTimeout
+        if (window.requestIdleCallback) {
+            requestIdleCallback(() => {
+                updateBotStatus();
+                botStatusInterval = setInterval(updateBotStatus, 30000);
+            }, { timeout: 2000 });
+        } else {
+            setTimeout(() => {
+                updateBotStatus();
+                botStatusInterval = setInterval(updateBotStatus, 30000);
+            }, 1000);
+        }
+    }
+    
+    // Initialize when DOM is ready
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initBotStatus);
+    } else {
+        initBotStatus();
+    }
+    
+    // Update modal content when opened
+    const botStatusModal = document.getElementById('botStatusModal');
+    if (botStatusModal) {
+        botStatusModal.addEventListener('show.bs.modal', function() {
+            // Trigger update when modal opens
+            if (!isUpdating) {
+                updateBotStatus();
+            }
+        });
+    }
 })();
 </script>
 {% endblock %}

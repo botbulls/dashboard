@@ -270,13 +270,39 @@ body {
 }
 
 /* Bot status badge */
-#botStatus {
+.bot-status-badge {
   transition: all 0.3s ease;
   white-space: nowrap;
+  user-select: none;
 }
 
-#botStatus i {
+.bot-status-badge:hover {
+  opacity: 0.9;
+  transform: scale(1.05);
+}
+
+.bot-status-badge i {
   font-size: 0.75rem;
+}
+
+/* Mobile: show only icon */
+@media (max-width: 767.98px) {
+  .bot-status-badge {
+    padding: 0.5rem !important;
+    min-width: 2.5rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  
+  .bot-status-text {
+    display: none;
+  }
+  
+  .bot-status-badge i {
+    margin-right: 0 !important;
+    font-size: 1rem;
+  }
 }
 
 .form-control-dark {
