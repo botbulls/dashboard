@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import pathlib
 from datetime import date
 from datetime import datetime
 from datetime import timedelta
@@ -1588,6 +1589,29 @@ def admin_proxy_post(endpoint):
         )
 
 
+def _guardian_prevent_restart_path():
+    """Path to the file that stores the 'do not restart guardian' preference."""
+    db_path = current_app.config.get("DATABASE")
+    if db_path:
+        return pathlib.Path(db_path).parent / "guardian_prevent_restart"
+    return pathlib.Path.cwd() / "guardian_prevent_restart"
+
+
+def _get_guardian_prevent_restart():
+    """Return True if guardian should not be restarted (preference persisted)."""
+    path = _guardian_prevent_restart_path()
+    return path.exists()
+
+
+def _set_guardian_prevent_restart(value: bool):
+    """Persist preference to prevent (or allow) guardian restart."""
+    path = _guardian_prevent_restart_path()
+    if value:
+        path.write_text("1")
+    elif path.exists():
+        path.unlink()
+
+
 @app.route("/api/bot/status", methods=["GET"])
 def bot_proxy_status():
     """Proxy endpoint to get bot status."""
@@ -1606,6 +1630,73 @@ def bot_proxy_status():
             status=500,
             mimetype='application/json'
         )
+
+
+@app.route("/api/bot/guardian/disabled", methods=["GET"])
+def guardian_disabled():
+    """Return whether guardian restart is disabled (preference persisted)."""
+    return Response(
+        json.dumps({"disabled": _get_guardian_prevent_restart()}),
+        status=200,
+        mimetype='application/json'
+    )
+
+
+@app.route("/api/bot/guardian/stop", methods=["POST"])
+def guardian_stop():
+    """Stop guardian container and persist preference to prevent restart."""
+    try:
+        bot_url = _get_bot_service_url()
+        response = requests.post(
+            f'{bot_url}/bot/guardian/stop',
+            json={"prevent_restart": True},
+            timeout=10,
+            headers={"Content-Type": "application/json"}
+        )
+        # Persist preference so guardian is not restarted (e.g. by external scripts)
+        _set_guardian_prevent_restart(True)
+        if response.status_code < 400:
+            return Response(
+                response.content,
+                status=response.status_code,
+                mimetype=response.headers.get('Content-Type', 'application/json')
+            )
+        # Bot service returned error (e.g. 404 if endpoint not implemented); still persist
+        current_app.logger.warning(f"Bot service guardian/stop returned {response.status_code}")
+        return Response(
+            json.dumps({"ok": True, "message": "Preference saved. Stop the guardian container manually if needed."}),
+            status=200,
+            mimetype='application/json'
+        )
+    except requests.exceptions.RequestException as e:
+        current_app.logger.warning(f"Bot service guardian/stop request failed: {e}")
+        _set_guardian_prevent_restart(True)
+        return Response(
+            json.dumps({
+                "ok": True,
+                "message": "Preference 'do not restart' saved. Stop the guardian container manually if the bot service is unavailable."
+            }),
+            status=200,
+            mimetype='application/json'
+        )
+    except Exception as e:
+        current_app.logger.error(f"Error in guardian stop: {e}")
+        return Response(
+            json.dumps({"error": str(e)}),
+            status=500,
+            mimetype='application/json'
+        )
+
+
+@app.route("/api/bot/guardian/allow-restart", methods=["POST"])
+def guardian_allow_restart():
+    """Clear the preference so guardian can be restarted again."""
+    _set_guardian_prevent_restart(False)
+    return Response(
+        json.dumps({"ok": True, "disabled": False}),
+        status=200,
+        mimetype='application/json'
+    )
 
 
 @app.route("/api/last-order", methods=["GET"])

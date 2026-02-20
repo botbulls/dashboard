@@ -457,6 +457,11 @@ var myChart = new Chart(
                                 <li><i class="fas fa-check text-success"></i> ${guardianName}: <strong>Running</strong></li>
                                 <li><i class="fas fa-check text-success"></i> ${passivbotName}: <strong>Running</strong> <span class="badge bg-success ms-2">Principal</span></li>
                             </ul>
+                            <div class="mt-2">
+                                <button type="button" class="btn btn-warning btn-sm" data-action="stop-guardian" title="Detener solo Guardian; passivbot seguirá corriendo y Guardian no se reiniciará">
+                                    <i class="fas fa-stop"></i> Detener Guardian (solo passivbot)
+                                </button>
+                            </div>
                         </div>
                     `;
                 } else {
@@ -490,10 +495,27 @@ var myChart = new Chart(
                 const modalBody = document.getElementById('botStatusModalBody');
                 if (modalBody) {
                     modalBody.innerHTML = modalContent + `
+                        <div id="botStatusGuardianPreference" class="mt-2"></div>
                         <div class="mt-3">
                             <small class="text-muted">Última actualización: ${new Date().toLocaleTimeString()}</small>
                         </div>
                     `;
+                    // Load guardian "prevent restart" preference and show allow-restart button if set
+                    fetch('/api/bot/guardian/disabled', { cache: 'no-cache' })
+                        .then(r => r.ok ? r.json() : { disabled: false })
+                        .then(data => {
+                            const prefEl = document.getElementById('botStatusGuardianPreference');
+                            if (!prefEl) return;
+                            if (data.disabled) {
+                                prefEl.innerHTML = `
+                                    <div class="alert alert-info py-2 small mb-0">
+                                        <i class="fas fa-info-circle"></i> Guardian no se reiniciará automáticamente.
+                                        <button type="button" class="btn btn-outline-primary btn-sm ms-2" data-action="allow-guardian-restart">Permitir reinicio de Guardian</button>
+                                    </div>
+                                `;
+                            }
+                        })
+                        .catch(() => {});
                 }
             })
             .catch(error => {
@@ -551,6 +573,32 @@ var myChart = new Chart(
             // Trigger update when modal opens
             if (!isUpdating) {
                 updateBotStatus();
+            }
+        });
+    }
+
+    // Delegated click: Stop Guardian / Allow Guardian restart
+    const botStatusModalBody = document.getElementById('botStatusModalBody');
+    if (botStatusModalBody) {
+        botStatusModalBody.addEventListener('click', function(e) {
+            const stopBtn = e.target.closest('[data-action="stop-guardian"]');
+            const allowBtn = e.target.closest('[data-action="allow-guardian-restart"]');
+            if (stopBtn && !stopBtn.disabled) {
+                stopBtn.disabled = true;
+                stopBtn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Deteniendo...';
+                fetch('/api/bot/guardian/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+                    .then(r => r.json())
+                    .then(() => { updateBotStatus(); })
+                    .catch(() => { updateBotStatus(); })
+                    .finally(() => {
+                        stopBtn.disabled = false;
+                        stopBtn.innerHTML = '<i class="fas fa-stop"></i> Detener Guardian (solo passivbot)';
+                    });
+            } else if (allowBtn && !allowBtn.disabled) {
+                allowBtn.disabled = true;
+                fetch('/api/bot/guardian/allow-restart', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+                    .then(() => { updateBotStatus(); })
+                    .finally(() => { allowBtn.disabled = false; });
             }
         });
     }
