@@ -72,7 +72,7 @@
                     </div>
                     <div class="modal-footer">
                         <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancelar</button>
-                        <button type="button" class="btn btn-warning btn-sm" id="guardianStopConfirmAccept"><i class="fas fa-stop"></i> Acepto el riesgo y detener</button>
+                        <button type="button" class="btn btn-warning btn-sm" id="guardianStopConfirmAccept" data-action="guardian-stop-accept"><i class="fas fa-stop"></i> Acepto el riesgo y detener</button>
                     </div>
                 </div>
             </div>
@@ -644,16 +644,27 @@ var myChart = new Chart(
             });
     }
 
-    // Al aceptar la advertencia de riesgo, cerrar modal de confirmación y ejecutar stop
-    const guardianStopConfirmAccept = document.getElementById('guardianStopConfirmAccept');
-    if (guardianStopConfirmAccept && guardianStopConfirmModalEl && typeof bootstrap !== 'undefined') {
-        guardianStopConfirmAccept.addEventListener('click', function() {
-            const confirmModal = bootstrap.Modal.getInstance(guardianStopConfirmModalEl);
-            if (confirmModal) confirmModal.hide();
-            const stopBtn = document.querySelector('[data-action="stop-guardian"]');
-            doGuardianStop(stopBtn);
-        });
-    }
+    // Aceptar advertencia de riesgo: delegación en document para que el clic siempre se capture
+    document.addEventListener('click', function(e) {
+        const acceptBtn = e.target.closest('#guardianStopConfirmAccept, [data-action="guardian-stop-accept"]');
+        if (!acceptBtn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (guardianStopConfirmModalEl) {
+            try {
+                const inst = bootstrap.Modal.getInstance(guardianStopConfirmModalEl);
+                if (inst) inst.hide();
+            } catch (err) {
+                guardianStopConfirmModalEl.classList.remove('show');
+                guardianStopConfirmModalEl.style.display = 'none';
+                document.body.classList.remove('modal-open');
+                const backdrop = document.querySelector('.modal-backdrop');
+                if (backdrop) backdrop.remove();
+            }
+        }
+        const stopBtn = document.querySelector('[data-action="stop-guardian"]');
+        doGuardianStop(stopBtn);
+    });
 })();
 
 // Last order functionality
