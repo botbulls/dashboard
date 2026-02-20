@@ -58,6 +58,25 @@
                 </div>
             </div>
         </div>
+        <!-- Confirmación: Detener Guardian (advertencia de riesgo) -->
+        <div class="modal fade" id="guardianStopConfirmModal" tabindex="-1" aria-labelledby="guardianStopConfirmLabel" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content">
+                    <div class="modal-header border-warning">
+                        <h5 class="modal-title text-warning" id="guardianStopConfirmLabel"><i class="fas fa-exclamation-triangle me-2"></i>Confirmar detener Guardian</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="mb-0"><strong>Usted opera bajo su propio riesgo.</strong></p>
+                        <p class="text-muted small mb-0 mt-2">Al detener Guardian solo passivbot seguirá activo. Esta acción no se puede deshacer desde aquí y Guardian no se reiniciará automáticamente hasta que lo permita.</p>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancelar</button>
+                        <button type="button" class="btn btn-warning btn-sm" id="guardianStopConfirmAccept"><i class="fas fa-stop"></i> Acepto el riesgo y detener</button>
+                    </div>
+                </div>
+            </div>
+        </div>
         <div class="btn-toolbar mb-2 mb-md-0">
             <div class="btn-group me-2">
                 <form method="GET" name="daterangeform">
@@ -405,10 +424,18 @@ var myChart = new Chart(
                 // Check status - API returns "run" not "running"
                 const isRunning = data.status === 'run' || data.status === 'running' || data.status === 'start';
                 const containers = data.containers || {};
-                const guardianRunning = containers.guardian?.running || false;
-                const passivbotRunning = containers.passivbot?.running || false;
-                const guardianName = containers.guardian?.name || 'guardian';
-                const passivbotName = containers.passivbot?.name || 'passivbot';
+                // Resolve guardian/passivbot by key: API may use "guardian" or "client17-guardian" etc.
+                const findContainer = (substr) => {
+                    const key = Object.keys(containers).find(k => k.toLowerCase().includes(substr));
+                    return key ? containers[key] : null;
+                };
+                const guardianInfo = findContainer('guardian') || containers.guardian || {};
+                const passivbotInfo = findContainer('passivbot') || containers.passivbot || {};
+                const isRun = (v) => v === true || v === 'run' || (typeof v === 'string' && v.toLowerCase() === 'running');
+                const guardianRunning = isRun(guardianInfo.running);
+                const passivbotRunning = isRun(passivbotInfo.running);
+                const guardianName = guardianInfo.name || Object.keys(containers).find(k => k.toLowerCase().includes('guardian')) || 'guardian';
+                const passivbotName = passivbotInfo.name || Object.keys(containers).find(k => k.toLowerCase().includes('passivbot')) || 'passivbot';
                 
                 // Priority logic: passivbot is the most important bot
                 // If passivbot is stopped -> show as stopped
@@ -577,29 +604,54 @@ var myChart = new Chart(
         });
     }
 
-    // Delegated click: Stop Guardian / Allow Guardian restart
+    // Delegated click: Stop Guardian -> show confirmation; Allow Guardian restart
     const botStatusModalBody = document.getElementById('botStatusModalBody');
+    const guardianStopConfirmModalEl = document.getElementById('guardianStopConfirmModal');
     if (botStatusModalBody) {
         botStatusModalBody.addEventListener('click', function(e) {
             const stopBtn = e.target.closest('[data-action="stop-guardian"]');
             const allowBtn = e.target.closest('[data-action="allow-guardian-restart"]');
             if (stopBtn && !stopBtn.disabled) {
-                stopBtn.disabled = true;
-                stopBtn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Deteniendo...';
-                fetch('/api/bot/guardian/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
-                    .then(r => r.json())
-                    .then(() => { updateBotStatus(); })
-                    .catch(() => { updateBotStatus(); })
-                    .finally(() => {
-                        stopBtn.disabled = false;
-                        stopBtn.innerHTML = '<i class="fas fa-stop"></i> Detener Guardian (solo passivbot)';
-                    });
+                if (guardianStopConfirmModalEl && typeof bootstrap !== 'undefined') {
+                    new bootstrap.Modal(guardianStopConfirmModalEl).show();
+                } else {
+                    doGuardianStop(stopBtn);
+                }
             } else if (allowBtn && !allowBtn.disabled) {
                 allowBtn.disabled = true;
                 fetch('/api/bot/guardian/allow-restart', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
                     .then(() => { updateBotStatus(); })
                     .finally(() => { allowBtn.disabled = false; });
             }
+        });
+    }
+
+    function doGuardianStop(stopBtn) {
+        if (stopBtn) {
+            stopBtn.disabled = true;
+            stopBtn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Deteniendo...';
+        }
+        fetch('/api/bot/guardian/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+            .then(r => r.json())
+            .then(() => { updateBotStatus(); })
+            .catch(() => { updateBotStatus(); })
+            .finally(() => {
+                const btn = stopBtn || document.querySelector('[data-action="stop-guardian"]');
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fas fa-stop"></i> Detener Guardian (solo passivbot)';
+                }
+            });
+    }
+
+    // Al aceptar la advertencia de riesgo, cerrar modal de confirmación y ejecutar stop
+    const guardianStopConfirmAccept = document.getElementById('guardianStopConfirmAccept');
+    if (guardianStopConfirmAccept && guardianStopConfirmModalEl && typeof bootstrap !== 'undefined') {
+        guardianStopConfirmAccept.addEventListener('click', function() {
+            const confirmModal = bootstrap.Modal.getInstance(guardianStopConfirmModalEl);
+            if (confirmModal) confirmModal.hide();
+            const stopBtn = document.querySelector('[data-action="stop-guardian"]');
+            doGuardianStop(stopBtn);
         });
     }
 })();
