@@ -42,14 +42,26 @@ class FakeDocker:
         self.running = running
         self.exists = exists
         self.calls = []
+        self.fail_action = None      # codigo HTTP con el que fallan start/restart/stop
+        self.timeout_action = False  # start/restart/stop sin respuesta (timeout)
+        self.started_at = None
 
     def request(self, method, url, **kwargs):
+        import requests
+
         self.calls.append((method, url, kwargs.get("params")))
         if not self.exists:
             return FakeResponse(404)
         if method == "GET" and url.endswith("/json"):
             status = "running" if self.running else "exited"
-            return FakeResponse(200, {"State": {"Status": status, "Running": self.running}})
+            state = {"Status": status, "Running": self.running}
+            if self.started_at:
+                state["StartedAt"] = self.started_at
+            return FakeResponse(200, {"State": state})
+        if self.timeout_action:
+            raise requests.ReadTimeout("timeout")
+        if self.fail_action:
+            return FakeResponse(self.fail_action)
         action = url.rsplit("/", 1)[-1]
         if action == "start":
             if self.running:
@@ -424,3 +436,111 @@ def test_detect_preset():
     assert bot_control.detect_preset({"twe_long": 8, "twe_short": 3}) == "alto"
     assert bot_control.detect_preset({"twe_long": 8, "twe_short": 1}) == "personalizado"
     assert bot_control.detect_preset({}) == "desconocido"
+
+
+# ---------------------------------------------------------------- config vs accion docker
+
+
+def state_path(app):
+    return pathlib.Path(app.config["DATABASE"]).parent / bot_control.STATE_FILE_NAME
+
+
+def test_start_container_missing_keeps_config(client, app, env, docker):
+    original = env.read_text()
+    docker.exists = False
+    resp = post(client, "/api/bot/start", {"riesgo": "alto"})
+    assert resp.status_code == 502
+    assert env.read_text() == original
+    assert list(env.parent.glob("new.json.bak-*")) == []
+    assert docker.actions() == []
+    assert "No se modifico la config" in audit_lines(app)[-1]["detail"]
+
+
+def test_start_proxy_down_keeps_config(client, env, monkeypatch):
+    import requests
+
+    class Broken:
+        def request(self, *a, **k):
+            raise requests.ConnectionError("boom")
+
+    original = env.read_text()
+    monkeypatch.setattr(bot_control.requests, "Session", lambda: Broken())
+    assert post(client, "/api/bot/start", {"riesgo": "alto"}).status_code == 502
+    assert env.read_text() == original
+
+
+@pytest.mark.parametrize("running", [True, False])
+def test_start_docker_rejects_restores_config(client, app, env, docker, running):
+    docker.running = running
+    original = env.read_text()
+    original_mtime = env.stat().st_mtime
+    docker.fail_action = 500
+    resp = post(client, "/api/bot/start", {"riesgo": "alto"})
+    assert resp.status_code == 502
+    assert "Se restauro la config" in resp.get_json()["error"]
+    assert env.read_text() == original
+    assert env.stat().st_mtime == original_mtime
+    entry = audit_lines(app)[-1]
+    assert entry["result"] == "error" and "Se restauro" in entry["detail"]
+
+
+def test_graceful_docker_rejects_restores_config_and_state(client, app, env, docker):
+    env.write_text(FORAGER_HJSON.replace("n_longs: 4", "n_longs: 4\n  short_mode: tp_only"))
+    original = env.read_text()
+    docker.fail_action = 500
+    resp = post(client, "/api/bot/stop", {"modo": "graceful"})
+    assert resp.status_code == 502
+    assert env.read_text() == original
+    assert not state_path(app).exists() or "short_mode_before_stop" not in json.loads(state_path(app).read_text())
+
+
+def test_start_after_graceful_rejected_keeps_saved_short_mode(client, app, env, docker):
+    env.write_text(FORAGER_HJSON.replace("n_longs: 4", "n_longs: 4\n  short_mode: tp_only"))
+    assert post(client, "/api/bot/stop", {"modo": "graceful"}).status_code == 200
+    docker.fail_action = 500
+    assert post(client, "/api/bot/start", {"riesgo": "bajo"}).status_code == 502
+    # el rollback restaura el estado: short_mode_before_stop sigue guardado
+    assert json.loads(state_path(app).read_text())["short_mode_before_stop"] == "tp_only"
+    assert hjson.loads(env.read_text())["short_mode"] == "graceful_stop"
+    docker.fail_action = None
+    assert post(client, "/api/bot/start", {"riesgo": "bajo"}).status_code == 200
+    assert hjson.loads(env.read_text())["short_mode"] == "tp_only"
+
+
+def test_start_docker_timeout_keeps_written_config(client, app, env, docker):
+    docker.timeout_action = True
+    resp = post(client, "/api/bot/start", {"riesgo": "alto"})
+    assert resp.status_code == 502
+    error = resp.get_json()["error"]
+    assert "Resultado incierto" in error and "new.json.bak-" in error
+    data = hjson.loads(env.read_text())
+    assert (data["twe_long"], data["twe_short"]) == (8, 3)
+
+
+# ---------------------------------------------------------------- pendiente de reinicio
+
+
+def test_parse_docker_time():
+    t = bot_control.parse_docker_time("2026-10-01T12:00:00.123456789Z")
+    assert t.isoformat() == "2026-10-01T12:00:00.123456+00:00"
+    assert bot_control.parse_docker_time("2026-10-01T12:00:00Z").second == 0
+    assert bot_control.parse_docker_time("0001-01-01T00:00:00Z") is None
+    assert bot_control.parse_docker_time("basura") is None
+    assert bot_control.parse_docker_time(None) is None
+
+
+def test_status_config_pending(client, env, docker):
+    import os
+
+    docker.started_at = "2026-10-01T12:00:00.000000000Z"
+    started = bot_control.parse_docker_time(docker.started_at).timestamp()
+    os.utime(env, (started + 60, started + 60))
+    assert client.get("/api/bot/status").get_json()["config_pending"] is True
+    os.utime(env, (started - 60, started - 60))
+    assert client.get("/api/bot/status").get_json()["config_pending"] is False
+    docker.running = False
+    assert client.get("/api/bot/status").get_json()["config_pending"] is None
+
+
+def test_status_without_started_at_pending_unknown(client, env, docker):
+    assert client.get("/api/bot/status").get_json()["config_pending"] is None

@@ -77,6 +77,9 @@ class ConfigError(BotControlError):
 
 class DockerError(BotControlError):
     status_code = 502
+    # True cuando no hubo respuesta HTTP (timeout / conexion): no se sabe si Docker ejecuto
+    # la accion, asi que no es seguro revertir la config.
+    uncertain = False
 
 
 def _env_flag(name: str) -> bool:
@@ -133,7 +136,9 @@ class DockerClient:
         try:
             return self.http.request(method, url, **kwargs)
         except requests.RequestException as exc:
-            raise DockerError(f"No se pudo contactar al docker-proxy: {exc.__class__.__name__}") from exc
+            err = DockerError(f"No se pudo contactar al docker-proxy: {exc.__class__.__name__}.")
+            err.uncertain = True
+            raise err from exc
 
     def inspect(self, name: str) -> Dict[str, Any]:
         resp = self._request("GET", self._url(name, "/json"))
@@ -257,6 +262,66 @@ def write_forager_config(path: pathlib.Path, updates: Dict[str, Any]) -> pathlib
     return backup
 
 
+def restore_forager_config(path: pathlib.Path, backup: pathlib.Path) -> None:
+    """Vuelve la config al contenido del backup (atomico; el backup se conserva).
+
+    ``copy2`` preserva el mtime del backup (= el del original previo), asi el marcador
+    "pendiente de reinicio" (mtime de la config vs StartedAt del contenedor) vuelve a su valor.
+    """
+    tmp_name = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".restore", dir=str(path.parent))
+        os.close(fd)
+        shutil.copy2(backup, tmp_name)
+        hjson.loads(pathlib.Path(tmp_name).read_text(encoding="utf-8"))
+        os.replace(tmp_name, path)
+        tmp_name = None
+    except (OSError, hjson.HjsonDecodeError) as exc:
+        raise ConfigError(f"No se pudo restaurar la config desde {backup.name}: {exc}") from exc
+    finally:
+        if tmp_name and os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
+_DOCKER_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$")
+
+
+def parse_docker_time(value: Any) -> Optional[dt.datetime]:
+    """Parsea ``State.StartedAt`` (RFC3339 con nanosegundos). None si falta o es el valor cero."""
+    if not isinstance(value, str):
+        return None
+    m = _DOCKER_TS_RE.match(value.strip())
+    if not m:
+        return None
+    base, frac, tz = m.groups()
+    if base.startswith("0001-"):
+        return None
+    tz = "+00:00" if tz == "Z" else tz
+    frac = (frac or "0")[:6].ljust(6, "0")
+    try:
+        return dt.datetime.fromisoformat(f"{base}.{frac}{tz}")
+    except ValueError:
+        return None
+
+
+def config_pending(path: pathlib.Path, container: Dict[str, Any]) -> Optional[bool]:
+    """True si la config se modifico despues de que arranco el contenedor (forager no la cargo).
+
+    None si no se puede determinar (contenedor detenido / inexistente / sin StartedAt): en ese
+    caso la config se aplica en el proximo arranque.
+    """
+    if not container.get("running"):
+        return None
+    started = parse_docker_time(container.get("started_at"))
+    if started is None:
+        return None
+    try:
+        mtime = dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)
+    except OSError:
+        return None
+    return mtime > started
+
+
 def _num_eq(a: Any, b: Any) -> bool:
     try:
         return float(a) == float(b)
@@ -347,6 +412,8 @@ def get_status(settings: Settings, docker: Optional[DockerClient] = None) -> Dic
         "long_mode": None,
         "short_mode": None,
         "config_available": False,
+        # True: la config cambio despues del ultimo arranque de passivbot (no esta en efecto).
+        "config_pending": None,
         "message": "",
         "presets": {k: {"twe_long": v[0], "twe_short": v[1]} for k, v in RISK_PRESETS.items()},
     }
@@ -371,19 +438,60 @@ def get_status(settings: Settings, docker: Optional[DockerClient] = None) -> Dic
 
     docker = docker or DockerClient(settings.docker_url)
     out["container"] = docker.inspect(settings.container)
+    if out["config_available"] and settings.forager_config is not None:
+        out["config_pending"] = config_pending(settings.forager_config, out["container"])
     out["message"] = " ".join(messages)
     return out
 
 
-def _start_or_restart(docker: DockerClient, name: str) -> str:
+def _inspect_existing(docker: DockerClient, name: str) -> Dict[str, Any]:
+    """Inspect previo a tocar la config: falla rapido si el proxy no responde o no hay contenedor."""
     info = docker.inspect(name)
     if info["status"] == "not_found":
-        raise DockerError(f"El contenedor {name} no existe.")
+        raise DockerError(f"El contenedor {name} no existe. No se modifico la config.")
+    return info
+
+
+def _start_or_restart(docker: DockerClient, name: str, info: Dict[str, Any]) -> str:
     if info["running"]:
         docker.restart(name)
         return "restart"
     docker.start(name)
     return "start"
+
+
+def _apply_and_restart(settings: Settings, store: Store, docker: DockerClient, info: Dict[str, Any],
+                       path: pathlib.Path, updates: Dict[str, Any], prev_state: Dict[str, Any],
+                       new_state: Dict[str, Any]) -> tuple:
+    """Escribe la config + estado y reinicia passivbot. Si Docker rechaza la accion, revierte.
+
+    - Error con respuesta HTTP (4xx/5xx, contenedor inexistente): Docker no aplico la accion, se
+      restaura el HJSON desde el backup y el estado local previo.
+    - Error sin respuesta (timeout / conexion): no se sabe si el reinicio ocurrio; NO se revierte
+      (revertir podria dejar el archivo distinto de lo que forager ya cargo). El mensaje lo dice y
+      /api/bot/status muestra "pendiente de reinicio" comparando mtime vs StartedAt.
+    """
+    backup = write_forager_config(path, updates)
+    store.save_state(new_state)
+    try:
+        return _start_or_restart(docker, settings.container, info), backup
+    except DockerError as exc:
+        if exc.uncertain:
+            err = DockerError(
+                f"{exc} Resultado incierto: la config de forager quedo escrita (backup {backup.name}); "
+                "revisar el estado del bot antes de reintentar."
+            )
+            raise err from exc
+        try:
+            restore_forager_config(path, backup)
+            store.save_state(prev_state)
+        except (BotControlError, OSError) as restore_exc:
+            err = DockerError(
+                f"{exc} ATENCION: la config de forager quedo modificada y no se pudo restaurar "
+                f"({restore_exc}); backup: {backup.name}."
+            )
+            raise err from exc
+        raise DockerError(f"{exc} Se restauro la config de forager; no se aplico ningun cambio.") from exc
 
 
 def start_bot(settings: Settings, store: Store, riesgo: Any,
@@ -393,9 +501,11 @@ def start_bot(settings: Settings, store: Store, riesgo: Any,
     settings.require_enabled()
     path = settings.require_config()
     docker = docker or DockerClient(settings.docker_url)
+    info = _inspect_existing(docker, settings.container)
 
     cfg = read_forager_config(path)
     state = store.load_state()
+    prev_state = dict(state)
     current_short = _mode(cfg, "short")
     # Decision: short_mode se mantiene salvo que sea un modo de stop; en ese caso se vuelve
     # al valor previo al stop (guardado en el estado local) o a "normal".
@@ -412,11 +522,8 @@ def start_bot(settings: Settings, store: Store, riesgo: Any,
         "long_mode": MODE_NORMAL,
         "short_mode": new_short,
     }
-    backup = write_forager_config(path, updates)
     state.pop("short_mode_before_stop", None)
-    store.save_state(state)
-
-    action = _start_or_restart(docker, settings.container)
+    action, backup = _apply_and_restart(settings, store, docker, info, path, updates, prev_state, state)
     return {"ok": True, "riesgo": riesgo, "docker_action": action, "config": updates,
             "backup": backup.name}
 
@@ -442,16 +549,15 @@ def stop_bot(settings: Settings, store: Store, modo: Any,
         raise err
 
     path = settings.require_config()
+    info = _inspect_existing(docker, settings.container)
     cfg = read_forager_config(path)
     state = store.load_state()
+    prev_state = dict(state)
     current_short = _mode(cfg, "short")
     if current_short not in STOP_MODE_VALUES:
         state["short_mode_before_stop"] = current_short
 
     updates = {"long_mode": MODE_GRACEFUL_STOP, "short_mode": MODE_GRACEFUL_STOP}
-    backup = write_forager_config(path, updates)
-    store.save_state(state)
-
-    action = _start_or_restart(docker, settings.container)
+    action, backup = _apply_and_restart(settings, store, docker, info, path, updates, prev_state, state)
     return {"ok": True, "modo": modo, "docker_action": action, "config": updates,
             "backup": backup.name}
