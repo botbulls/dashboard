@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from futuresboard import auth
 from futuresboard import bot_control
 from futuresboard import health
 from futuresboard import scraper
@@ -120,9 +121,21 @@ def collect(app, **kwargs):
         return health.collect_health(now=NOW, **kwargs)
 
 
-def login(client):
+def login(client, app):
+    fingerprint = None
+    if hasattr(auth, "SESSION_FINGERPRINT_KEY"):
+        # Tras mergear login-hardening (#4) la sesion necesita usuario real + huella.
+        auth.set_user_password(str(app.config["DATABASE"]), "cliente17", "clave-de-test")
+        with sqlite3.connect(str(app.config["DATABASE"])) as conn:
+            pw_hash = conn.execute(
+                "SELECT password_hash FROM users WHERE username = 'cliente17'"
+            ).fetchone()[0]
+        with app.app_context():
+            fingerprint = auth.password_fingerprint(pw_hash)
     with client.session_transaction() as sess:
         sess["username"] = "cliente17"
+        if fingerprint is not None:
+            sess[auth.SESSION_FINGERPRINT_KEY] = fingerprint
 
 
 # ---------------------------------------------------------------- /health
@@ -151,7 +164,7 @@ def test_bot_health_requires_login(app):
 def test_bot_health_ok(app, docker):
     seed(app)
     client = app.test_client()
-    login(client)
+    login(client, app)
     resp = client.get("/api/bot/health")
     assert resp.status_code == 200
     data = resp.get_json()
@@ -261,7 +274,7 @@ def test_bot_health_contains_no_secrets(app, docker, monkeypatch):
     monkeypatch.setenv(health.ENV_METRICS_TOKEN, "s3cr3t-token-value")
     seed(app)
     client = app.test_client()
-    login(client)
+    login(client, app)
     body = client.get("/api/bot/health").get_data(as_text=True)
     assert "s3cr3t-token-value" not in body
     assert '"x"' not in body  # API_KEY / API_SECRET de la config de prueba
@@ -287,7 +300,7 @@ def test_metrics_without_auth_is_401(app):
 def test_metrics_with_session(app, docker):
     seed(app)
     client = app.test_client()
-    login(client)
+    login(client, app)
     resp = client.get("/metrics")
     assert resp.status_code == 200
     assert resp.headers["Content-Type"].startswith("text/plain; version=0.0.4")
@@ -331,7 +344,7 @@ def test_metrics_unknown_values_are_nan(app, docker):
     seed(app, trade_age=None, scrape_age=None)
     docker.fail = True
     client = app.test_client()
-    login(client)
+    login(client, app)
     m = parse_metrics(client.get("/metrics").get_data(as_text=True))
     import math
 
