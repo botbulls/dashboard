@@ -342,21 +342,42 @@ def test_headers_hacia_docker_son_fijos(env):
 # --- errores de Docker -------------------------------------------------------------------
 
 
-def test_docker_caido_502(env):
-    fake, proxy = env
+def _docker_caido(fake, proxy):
     fake.shutdown()
     fake.server_close()
     os.unlink(proxy.cfg.socket_path)
-    status, _ = call(proxy, "GET", f"/containers/{CONTAINER}/json")
+
+
+@pytest.mark.parametrize(
+    "method,target",
+    [("GET", f"/containers/{CONTAINER}/json"), ("POST", f"/containers/{CONTAINER}/restart?t=20")],
+)
+def test_docker_caido_502(env, method, target):
+    # no se pudo conectar: Docker seguro no actuo -> respuesta HTTP 502
+    fake, proxy = env
+    _docker_caido(fake, proxy)
+    status, _ = call(proxy, method, target)
     assert status == 502
 
 
-def test_timeout_docker_504(env):
+def test_timeout_inspect_504(env):
     fake, proxy = env
     fake.delay = threading.Event()
     try:
-        status, _ = call(proxy, "POST", f"/containers/{CONTAINER}/start")
+        status, _ = call(proxy, "GET", f"/containers/{CONTAINER}/json")
         assert status == 504
+    finally:
+        fake.delay.set()
+
+
+def test_timeout_accion_corta_sin_responder(env):
+    # la accion ya se envio: no se sabe si Docker la ejecuto -> sin respuesta HTTP
+    fake, proxy = env
+    fake.delay = threading.Event()
+    try:
+        with pytest.raises((http.client.RemoteDisconnected, ConnectionError)):
+            call(proxy, "POST", f"/containers/{CONTAINER}/restart?t=0")
+        assert fake.requests[-1]["path"] == f"/containers/{CONTAINER}/restart?t=0"
     finally:
         fake.delay.set()
 
@@ -368,12 +389,22 @@ def test_inspect_respuesta_invalida_502(env):
     assert status == 502
 
 
-def test_respuesta_gigante_502(env):
+def _gigante():
+    return b'{"message":"' + b"x" * (docker_proxy.MAX_RESPONSE_BYTES + 10) + b'"}'
+
+
+def test_inspect_respuesta_gigante_502(env):
     fake, proxy = env
-    payload = b'{"message":"' + b"x" * (docker_proxy.MAX_RESPONSE_BYTES + 10) + b'"}'
-    fake.responses[("POST", f"/containers/{CONTAINER}/start")] = (500, payload)
-    status, _ = call(proxy, "POST", f"/containers/{CONTAINER}/start")
+    fake.responses[("GET", f"/containers/{CONTAINER}/json")] = (200, _gigante())
+    status, _ = call(proxy, "GET", f"/containers/{CONTAINER}/json")
     assert status == 502
+
+
+def test_accion_respuesta_gigante_corta_sin_responder(env):
+    fake, proxy = env
+    fake.responses[("POST", f"/containers/{CONTAINER}/start")] = (500, _gigante())
+    with pytest.raises((http.client.RemoteDisconnected, ConnectionError)):
+        call(proxy, "POST", f"/containers/{CONTAINER}/start")
 
 
 # --- config ------------------------------------------------------------------------------
@@ -424,3 +455,24 @@ def test_cliente_del_panel_funciona_via_proxy(env):
     # el panel apuntando a otro contenedor recibe 403 -> DockerError
     with pytest.raises(bot_control.DockerError):
         client.inspect("otro-passivbot")
+
+
+def test_cliente_del_panel_distingue_rechazo_de_incierto(env):
+    bot_control = pytest.importorskip("futuresboard.bot_control")
+    fake, proxy = env
+    client = bot_control.DockerClient(f"http://127.0.0.1:{proxy.server_address[1]}")
+
+    # Docker colgado despues de recibir el restart: el panel lo ve como incierto (no revierte)
+    fake.delay = threading.Event()
+    try:
+        with pytest.raises(bot_control.DockerError) as exc_info:
+            client._action(CONTAINER, "restart", {"t": 0})
+        assert exc_info.value.uncertain is True
+    finally:
+        fake.delay.set()
+
+    # Docker caido (no se pudo conectar): rechazo seguro, el panel puede revertir
+    _docker_caido(fake, proxy)
+    with pytest.raises(bot_control.DockerError) as exc_info:
+        client.restart(CONTAINER)
+    assert exc_info.value.uncertain is False

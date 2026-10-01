@@ -74,6 +74,10 @@ class Denied(Exception):
         self.status = status
 
 
+class Uncertain(Exception):
+    """La accion ya se envio a Docker pero no hay respuesta valida: no se sabe si se ejecuto."""
+
+
 @dataclass(frozen=True)
 class Allowed:
     method: str
@@ -151,22 +155,44 @@ def filter_inspect(body: bytes) -> bytes:
 
 
 def forward(allowed: Allowed, cfg: Config) -> Tuple[int, Optional[str], bytes]:
+    """Reenvia a Docker.
+
+    Si no se pudo conectar, Docker seguro no actuo: ``Denied`` 502/504. Si la accion (POST) ya se
+    envio y despues falla (timeout, conexion cortada, respuesta invalida), no se sabe si Docker la
+    ejecuto: ``Uncertain``, y el handler corta la conexion sin responder para que el panel tome su
+    camino de "sin respuesta" (no revierte la config) en vez de un 5xx que trataria como rechazo.
+    """
     timeout = cfg.upstream_timeout + (allowed.t or 0)
     conn = UnixHTTPConnection(cfg.socket_path, timeout=timeout)
     try:
-        conn.request(
-            allowed.method,
-            allowed.upstream_target,
-            body=b"" if allowed.method == "POST" else None,
-            headers={"Host": "docker", "User-Agent": "docker-proxy-min"},
-        )
-        resp = conn.getresponse()
-        body = resp.read(MAX_RESPONSE_BYTES + 1)
-        status = resp.status
-        content_type = resp.getheader("Content-Type")
+        try:
+            conn.connect()
+        except socket.timeout as exc:
+            raise Denied("timeout conectando a Docker", status=504) from exc
+        except OSError as exc:
+            raise Denied("no se pudo conectar a Docker", status=502) from exc
+        try:
+            conn.request(
+                allowed.method,
+                allowed.upstream_target,
+                body=b"" if allowed.method == "POST" else None,
+                headers={"Host": "docker", "User-Agent": "docker-proxy-min"},
+            )
+            resp = conn.getresponse()
+            body = resp.read(MAX_RESPONSE_BYTES + 1)
+            status = resp.status
+            content_type = resp.getheader("Content-Type")
+        except (OSError, http.client.HTTPException) as exc:
+            if allowed.method == "POST":
+                raise Uncertain("sin respuesta de Docker tras enviar la accion") from exc
+            if isinstance(exc, socket.timeout):
+                raise Denied("timeout hablando con Docker", status=504) from exc
+            raise Denied("error hablando con Docker", status=502) from exc
     finally:
         conn.close()
     if len(body) > MAX_RESPONSE_BYTES:
+        if allowed.method == "POST":
+            raise Uncertain("respuesta de Docker demasiado grande")
         raise Denied("respuesta de Docker demasiado grande", status=502)
     if allowed.action == "json" and status == 200:
         try:
@@ -209,6 +235,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 status, content_type, body = forward(allowed, self.server.cfg)
             except Denied as exc:
                 self._reply_error(exc.status, exc.reason)
+                return
+            except Uncertain as exc:
+                self.log_message(
+                    "incierto %s %r: %s; se corta sin responder",
+                    self.command,
+                    self._raw_target()[:200],
+                    exc,
+                )
+                self.close_connection = True
                 return
             except socket.timeout:
                 self._reply_error(504, "timeout hablando con Docker")

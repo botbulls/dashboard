@@ -219,8 +219,16 @@ Otras defensas:
   no expone `Config.Env`, `Mounts` ni la config del contenedor de passivbot.
 - Respuesta de Docker limitada a 1 MiB; timeout hacia Docker de 10 s (+`t` en stop/restart);
   timeout de lectura del cliente de 10 s; máximo 8 requests simultáneos (el resto, 503).
-- Docker caído o socket sin permisos → 502; timeout → 504. Los 204/304/404/500 de Docker pasan
-  tal cual (el panel distingue `not_found` y `sin_cambios`).
+- Los 204/304/404/500 de Docker pasan tal cual (el panel distingue `not_found` y
+  `sin_cambios`).
+- Errores, respetando la regla del panel de "qué pasa si falla":
+  - No se pudo conectar al socket (Docker caído, sin permisos) → 502: Docker seguro no actuó, el
+    panel revierte la config.
+  - El `start`/`stop`/`restart` ya se envió y después hubo timeout, conexión cortada o respuesta
+    inválida → el proxy **corta la conexión sin responder**. El panel lo ve como "sin respuesta"
+    (`uncertain`) y no revierte, igual que sin proxy. Un 5xx acá lo haría revertir mientras
+    passivbot quizá ya se está reiniciando.
+  - En `GET .../json` (sin efectos): timeout → 504, otros errores → 502.
 - `HEALTHCHECK` sin tocar Docker: pide `/_ping` y espera 403.
 - Log a stderr de cada request y del motivo de cada 403 (nunca bodies).
 
