@@ -8,3 +8,7 @@ write_to_template = "# pylint: skip-file\n\n__version__ = \"{version}\""
 
 [tool.black]
 line-length = 100
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

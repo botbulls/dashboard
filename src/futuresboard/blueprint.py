@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import csv
+import functools
+import hmac
 import json
 import os
 import pathlib
+import secrets
 from datetime import date
 from datetime import datetime
 from datetime import timedelta
@@ -15,10 +18,12 @@ from flask import redirect
 from flask import render_template
 from flask import request
 from flask import Response
+from flask import session
 from flask.helpers import url_for
 from flask import current_app
 from typing_extensions import TypedDict
 
+from futuresboard import bot_control
 from futuresboard import db
 from futuresboard.config import BINANCE_FUTURES_MAINNET_URL
 
@@ -1451,263 +1456,99 @@ def projection_page():
     )
 
 
-# Cache for admin service URL to avoid repeated lookups
-_admin_service_url_cache = None
-# Cache for bot service URL to avoid repeated lookups
-_bot_service_url_cache = None
+# --------------------------------------------------------------------------------------
+# Panel passivbot (reemplaza guardian / servicio SCC)
+# --------------------------------------------------------------------------------------
 
 
-def _get_bot_service_url():
-    """Get the bot service URL (port 5000) for container-to-container communication.
-    
-    In Docker Compose, services can communicate using the service name as hostname.
-    This function prioritizes Docker service name 'api' for internal communication,
-    falling back to environment variables or IP detection if needed.
-    """
-    global _bot_service_url_cache
-    
-    # Return cached value if available
-    if _bot_service_url_cache is not None:
-        return _bot_service_url_cache
-    
-    # Priority 1: Try to get from environment variable (can be set in docker-compose)
-    bot_url = os.environ.get('FUTURESBOARD_BOT_URL')
-    if bot_url:
-        _bot_service_url_cache = bot_url.rstrip('/')
-        current_app.logger.info(f"Using FUTURESBOARD_BOT_URL: {_bot_service_url_cache}")
-        return _bot_service_url_cache
-    
-    # Priority 2: Use Docker service name for container-to-container communication
-    # In Docker Compose, services can reach each other using service names
-    # The service name is 'api' according to docker-compose.yml
-    docker_service_name = os.environ.get('FUTURESBOARD_BOT_SERVICE_NAME', 'api')
-    docker_port = os.environ.get('FUTURESBOARD_BOT_SERVICE_PORT', '5000')
-    _bot_service_url_cache = f'http://{docker_service_name}:{docker_port}'
-    current_app.logger.info(f"Using Docker service name for container-to-container communication: {_bot_service_url_cache}")
-    return _bot_service_url_cache
+def _json_response(payload, status=200):
+    return Response(json.dumps(payload), status=status, mimetype="application/json")
 
 
-def _get_admin_service_url():
-    """Get the admin service URL (port 9009), automatically detecting public IP if needed."""
-    global _admin_service_url_cache
-    
-    # Return cached value if available
-    if _admin_service_url_cache is not None:
-        return _admin_service_url_cache
-    
-    # Try to get from environment variable first
-    admin_url = os.environ.get('FUTURESBOARD_ADMIN_URL')
-    if admin_url:
-        _admin_service_url_cache = admin_url.rstrip('/')
-        return _admin_service_url_cache
-    
-    # Get server IP (public or private)
-    # Try to get from environment variable
-    public_ip = os.environ.get('FUTURESBOARD_PUBLIC_IP')
-    if public_ip:
-        _admin_service_url_cache = f'http://{public_ip.strip()}:9009'
-        return _admin_service_url_cache
-    
-    # Automatically detect public IP from external services
-    import socket
-    services = [
-        'https://api.ipify.org',
-        'https://ifconfig.me/ip',
-        'https://icanhazip.com',
-        'https://checkip.amazonaws.com',
-    ]
-    
-    current_app.logger.info("Detecting public IP address for admin service...")
-    for service in services:
-        try:
-            response = requests.get(service, timeout=3)
-            if response.status_code == 200:
-                ip = response.text.strip()
-                try:
-                    socket.inet_aton(ip)
-                    _admin_service_url_cache = f'http://{ip}:9009'
-                    current_app.logger.info(f"Detected public IP: {ip}, admin service URL: {_admin_service_url_cache}")
-                    return _admin_service_url_cache
-                except socket.error:
-                    continue
-        except Exception as e:
-            current_app.logger.debug(f"Failed to get IP from {service}: {e}")
-            continue
-    
-    # Fallback: try to get from socket (may be private IP in Docker)
-    current_app.logger.warning("Could not detect public IP from external services, using local network IP")
+def get_csrf_token() -> str:
+    token = session.get("csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["csrf_token"] = token
+    return token
+
+
+@app.app_context_processor
+def inject_csrf_token():
+    return {"csrf_token": get_csrf_token}
+
+
+def csrf_protect(view):
+    """Exige header X-CSRF-Token igual al token de la sesion y body JSON."""
+
+    @functools.wraps(view)
+    def wrapped(*args, **kwargs):
+        expected = session.get("csrf_token") or ""
+        sent = request.headers.get("X-CSRF-Token") or ""
+        if not expected or not hmac.compare_digest(expected, sent):
+            return _json_response({"ok": False, "error": "CSRF token invalido o ausente."}, 403)
+        if not request.is_json:
+            return _json_response({"ok": False, "error": "Se requiere Content-Type application/json."}, 415)
+        return view(*args, **kwargs)
+
+    return wrapped
+
+
+def _bot_store() -> bot_control.Store:
+    return bot_control.Store(pathlib.Path(current_app.config["DATABASE"]).parent)
+
+
+def _run_bot_action(action: str, params: dict, fn):
+    store = _bot_store()
+    user = session.get("username") or "?"
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(1)
-        try:
-            s.connect(('8.8.8.8', 80))
-            ip = s.getsockname()[0]
-        except Exception:
-            ip = '127.0.0.1'
-        finally:
-            s.close()
-        _admin_service_url_cache = f'http://{ip}:9009'
-        current_app.logger.warning(f"Using local IP: {ip}, admin service URL: {_admin_service_url_cache}")
-        return _admin_service_url_cache
-    except Exception:
-        _admin_service_url_cache = 'http://127.0.0.1:9009'
-        return _admin_service_url_cache
-
-
-@app.route("/api/admin/slctdaeo", methods=["GET"])
-def admin_proxy_slctdaeo():
-    """Proxy endpoint to get admin access configuration."""
+        with store.lock():
+            result = fn(store)
+    except ValueError as exc:
+        status, payload, outcome = 400, {"ok": False, "error": str(exc)}, "rechazado"
+    except bot_control.BotControlError as exc:
+        status, payload, outcome = exc.status_code, {"ok": False, "error": str(exc)}, "error"
+    except Exception:  # pragma: no cover - defensivo
+        current_app.logger.exception("Error en accion de bot %s", action)
+        status, payload, outcome = 500, {"ok": False, "error": "Error interno."}, "error"
+    else:
+        status, payload, outcome = 200, result, "ok"
     try:
-        admin_url = _get_admin_service_url()
-        response = requests.get(f'{admin_url}/slctdaeo', timeout=5)
-        return Response(
-            response.content,
-            status=response.status_code,
-            mimetype=response.headers.get('Content-Type', 'application/json')
-        )
-    except Exception as e:
-        current_app.logger.error(f"Error proxying admin request: {e}")
-        return Response(
-            json.dumps({"error": str(e)}),
-            status=500,
-            mimetype='application/json'
-        )
-
-
-@app.route("/api/admin/<path:endpoint>", methods=["POST"])
-def admin_proxy_post(endpoint):
-    """Proxy endpoint for POST requests to admin service."""
-    try:
-        admin_url = _get_admin_service_url()
-        # Get form data from request
-        form_data = dict(request.form)
-        
-        response = requests.post(
-            f'{admin_url}/{endpoint}',
-            data=form_data,
-            timeout=10
-        )
-        return Response(
-            response.content,
-            status=response.status_code,
-            mimetype=response.headers.get('Content-Type', 'application/json')
-        )
-    except Exception as e:
-        current_app.logger.error(f"Error proxying admin POST request: {e}")
-        return Response(
-            json.dumps({"error": str(e)}),
-            status=500,
-            mimetype='application/json'
-        )
-
-
-def _guardian_prevent_restart_path():
-    """Path to the file that stores the 'do not restart guardian' preference."""
-    db_path = current_app.config.get("DATABASE")
-    if db_path:
-        return pathlib.Path(db_path).parent / "guardian_prevent_restart"
-    return pathlib.Path.cwd() / "guardian_prevent_restart"
-
-
-def _get_guardian_prevent_restart():
-    """Return True if guardian should not be restarted (preference persisted)."""
-    path = _guardian_prevent_restart_path()
-    return path.exists()
-
-
-def _set_guardian_prevent_restart(value: bool):
-    """Persist preference to prevent (or allow) guardian restart."""
-    path = _guardian_prevent_restart_path()
-    if value:
-        path.write_text("1")
-    elif path.exists():
-        path.unlink()
+        store.audit(user, action, params, outcome, payload.get("error") or payload.get("docker_action", ""),
+                    request.remote_addr)
+    except OSError:
+        current_app.logger.exception("No se pudo escribir el log de auditoria")
+    return _json_response(payload, status)
 
 
 @app.route("/api/bot/status", methods=["GET"])
-def bot_proxy_status():
-    """Proxy endpoint to get bot status."""
+def bot_status():
+    settings = bot_control.Settings()
     try:
-        bot_url = _get_bot_service_url()
-        response = requests.get(f'{bot_url}/bot/status', timeout=5)
-        return Response(
-            response.content,
-            status=response.status_code,
-            mimetype=response.headers.get('Content-Type', 'application/json')
-        )
-    except Exception as e:
-        current_app.logger.error(f"Error proxying bot status request: {e}")
-        return Response(
-            json.dumps({"error": str(e)}),
-            status=500,
-            mimetype='application/json'
-        )
+        return _json_response(bot_control.get_status(settings))
+    except bot_control.BotControlError as exc:
+        return _json_response({"enabled": settings.enabled, "error": str(exc)}, exc.status_code)
 
 
-@app.route("/api/bot/guardian/disabled", methods=["GET"])
-def guardian_disabled():
-    """Return whether guardian restart is disabled (preference persisted)."""
-    return Response(
-        json.dumps({"disabled": _get_guardian_prevent_restart()}),
-        status=200,
-        mimetype='application/json'
+@app.route("/api/bot/start", methods=["POST"])
+@csrf_protect
+def bot_start():
+    body = request.get_json(silent=True) or {}
+    riesgo = body.get("riesgo") if isinstance(body, dict) else None
+    settings = bot_control.Settings()
+    return _run_bot_action(
+        "start", {"riesgo": riesgo}, lambda store: bot_control.start_bot(settings, store, riesgo)
     )
 
 
-@app.route("/api/bot/guardian/stop", methods=["POST"])
-def guardian_stop():
-    """Stop guardian container and persist preference to prevent restart."""
-    try:
-        bot_url = _get_bot_service_url()
-        response = requests.post(
-            f'{bot_url}/bot/guardian/stop',
-            json={"prevent_restart": True},
-            timeout=10,
-            headers={"Content-Type": "application/json"}
-        )
-        # Persist preference so guardian is not restarted (e.g. by external scripts)
-        _set_guardian_prevent_restart(True)
-        if response.status_code < 400:
-            return Response(
-                response.content,
-                status=response.status_code,
-                mimetype=response.headers.get('Content-Type', 'application/json')
-            )
-        # Bot service returned error (e.g. 404 if endpoint not implemented); still persist
-        current_app.logger.warning(f"Bot service guardian/stop returned {response.status_code}")
-        return Response(
-            json.dumps({"ok": True, "message": "Preference saved. Stop the guardian container manually if needed."}),
-            status=200,
-            mimetype='application/json'
-        )
-    except requests.exceptions.RequestException as e:
-        current_app.logger.warning(f"Bot service guardian/stop request failed: {e}")
-        _set_guardian_prevent_restart(True)
-        return Response(
-            json.dumps({
-                "ok": True,
-                "message": "Preference 'do not restart' saved. Stop the guardian container manually if the bot service is unavailable."
-            }),
-            status=200,
-            mimetype='application/json'
-        )
-    except Exception as e:
-        current_app.logger.error(f"Error in guardian stop: {e}")
-        return Response(
-            json.dumps({"error": str(e)}),
-            status=500,
-            mimetype='application/json'
-        )
-
-
-@app.route("/api/bot/guardian/allow-restart", methods=["POST"])
-def guardian_allow_restart():
-    """Clear the preference so guardian can be restarted again."""
-    _set_guardian_prevent_restart(False)
-    return Response(
-        json.dumps({"ok": True, "disabled": False}),
-        status=200,
-        mimetype='application/json'
+@app.route("/api/bot/stop", methods=["POST"])
+@csrf_protect
+def bot_stop():
+    body = request.get_json(silent=True) or {}
+    modo = body.get("modo") if isinstance(body, dict) else None
+    settings = bot_control.Settings()
+    return _run_bot_action(
+        "stop", {"modo": modo}, lambda store: bot_control.stop_bot(settings, store, modo)
     )
 
 
