@@ -20,8 +20,20 @@ from flask import current_app
 from typing_extensions import TypedDict
 
 from futuresboard import db
+from futuresboard.config import BINANCE_FUTURES_MAINNET_URL
 
 app = Blueprint("main", __name__)
+
+
+def _binance_public_base() -> str:
+    """Base URL para datos publicos de Binance Futures (mark price, klines).
+
+    Por defecto es el endpoint real; con BINANCE_TESTNET activo usa el mismo
+    API_BASE_URL de prueba que el scraper.
+    """
+    if current_app.config.get("BINANCE_TESTNET"):
+        return current_app.config["API_BASE_URL"]
+    return BINANCE_FUTURES_MAINNET_URL
 
 
 class CoinsTotals(TypedDict):
@@ -600,7 +612,7 @@ def positions_page():
     positions = {}
 
     try:
-        response = requests.get("https://fapi.binance.com/fapi/v1/premiumIndex", timeout=2)
+        response = requests.get(_binance_public_base() + "/fapi/v1/premiumIndex", timeout=2)
         markPrices: dict
         markPrices = {}
         if response:
@@ -824,7 +836,7 @@ def coin_page(coin):
         averagetargets = ["-", "-", "-", "-"]
         try:
             response = requests.get(
-                "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=" + coin, timeout=2
+                _binance_public_base() + "/fapi/v1/premiumIndex?symbol=" + coin, timeout=2
             )
             markPrice: float | str
             if response:
@@ -856,7 +868,7 @@ def coin_page(coin):
         for timeframe in sticks:
             try:
                 response = requests.get(
-                    "https://fapi.binance.com/fapi/v1/klines?symbol="
+                    _binance_public_base() + "/fapi/v1/klines?symbol="
                     + coin
                     + "&interval="
                     + timeframe
@@ -1085,7 +1097,7 @@ def coin_page_timeframe(coin, start, end):
         averagetargets = ["-", "-", "-", "-"]
         try:
             response = requests.get(
-                "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=" + coin, timeout=2
+                _binance_public_base() + "/fapi/v1/premiumIndex?symbol=" + coin, timeout=2
             )
             markPrice: float | str
             if response:
@@ -1117,7 +1129,7 @@ def coin_page_timeframe(coin, start, end):
         for timeframe in sticks:
             try:
                 response = requests.get(
-                    "https://fapi.binance.com/fapi/v1/klines?symbol="
+                    _binance_public_base() + "/fapi/v1/klines?symbol="
                     + coin
                     + "&interval="
                     + timeframe
