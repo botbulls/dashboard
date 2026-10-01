@@ -142,22 +142,37 @@ def _recent_failures(failures: dict, key, now: float) -> list:
     return recent
 
 
-def _is_rate_limited(key) -> bool:
-    lock, failures = _attempts_store()
-    with lock:
-        return len(_recent_failures(failures, key, time.monotonic())) >= LOGIN_MAX_FAILURES
+def _reserve_attempt(key) -> float | None:
+    """Cuenta el intento de forma atómica ANTES de verificar la contraseña.
 
-
-def _record_failure(key) -> None:
+    Bajo el candado: si ya hay LOGIN_MAX_FAILURES intentos en la ventana devuelve None
+    (rate limited); si no, registra el intento ahora y devuelve su timestamp. Así N
+    requests concurrentes no pueden pasar todas el chequeo antes de que se registre
+    ninguna falla (el hash scrypt tarda decenas de ms).
+    """
     lock, failures = _attempts_store()
     now = time.monotonic()
     with lock:
         recent = _recent_failures(failures, key, now)
+        if len(recent) >= LOGIN_MAX_FAILURES:
+            return None
         recent.append(now)
         failures[key] = recent
         if len(failures) > 10000:
             for other in list(failures):
                 _recent_failures(failures, other, now)
+    return now
+
+
+def _release_attempt(key, stamp: float) -> None:
+    """Devuelve un intento reservado que no debe contar como fallo."""
+    lock, failures = _attempts_store()
+    with lock:
+        entries = failures.get(key)
+        if entries and stamp in entries:
+            entries.remove(stamp)
+            if not entries:
+                failures.pop(key, None)
 
 
 def _clear_failures(key) -> None:
@@ -269,7 +284,8 @@ def login_page():
         ip = _client_ip()
         key = (username.lower(), ip)
 
-        if _is_rate_limited(key):
+        stamp = _reserve_attempt(key)
+        if stamp is None:
             current_app.logger.warning(
                 "Login bloqueado por rate limit: usuario=%r ip=%s", username, ip
             )
@@ -295,6 +311,8 @@ def login_page():
                 ip,
             )
             if valid:
+                # La cuenta igual no es usable: este intento no suma al rate limit.
+                _release_attempt(key, stamp)
                 flash(
                     "This account still uses the default password and is locked. "
                     f"An administrator must set a new one with `{SET_PASSWORD_HINT}`.",
@@ -309,7 +327,7 @@ def login_page():
             session["theme_default"] = row["theme_default"] or "auto"
             return redirect(next_url)
 
-        _record_failure(key)
+        # El intento ya quedó registrado en _reserve_attempt.
         current_app.logger.warning("Login fallido: usuario=%r ip=%s", username, ip)
         flash("Invalid username or password", "error")
 

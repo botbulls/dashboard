@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import time
 from unittest import mock
 
 import pytest
@@ -335,6 +336,41 @@ def test_success_resets_failures(app, client):
     for _ in range(auth.LOGIN_MAX_FAILURES - 1):
         login(client, "admin", "mal")
     assert login(client, "admin", "clave-actual").status_code == 302
+
+
+def test_rate_limit_holds_under_concurrent_requests(app, monkeypatch):
+    """Ráfaga concurrente: no se evalúan más de LOGIN_MAX_FAILURES contraseñas."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    auth.set_user_password(db_path(app), "admin", "clave-actual")
+    real_check = auth.check_password_hash
+    evaluated = []
+    count_lock = threading.Lock()
+
+    def slow_check(pwhash, password):
+        if password != auth.BLOCKED_DEFAULT_PASSWORD:
+            with count_lock:
+                evaluated.append(password)
+            time.sleep(0.05)  # simula el costo de scrypt y abre la ventana de carrera
+        return real_check(pwhash, password)
+
+    monkeypatch.setattr(auth, "check_password_hash", slow_check)
+    burst = 20
+    barrier = threading.Barrier(burst)
+
+    def attempt(i):
+        c = app.test_client()
+        barrier.wait()
+        return login(c, "admin", f"mal{i}").status_code
+
+    with ThreadPoolExecutor(max_workers=burst) as pool:
+        codes = list(pool.map(attempt, range(burst)))
+
+    assert len(evaluated) <= auth.LOGIN_MAX_FAILURES
+    assert codes.count(200) <= auth.LOGIN_MAX_FAILURES
+    assert codes.count(429) >= burst - auth.LOGIN_MAX_FAILURES
+    assert login(app.test_client(), "admin", "clave-actual").status_code == 429
 
 
 def test_xff_ignored_without_proxy_fix(app, client):
