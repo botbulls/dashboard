@@ -44,7 +44,7 @@ contenedor.
 Browser ──(sesión + CSRF)──> dashboard (Flask)
                                │  lee/escribe  configs/forager/new.json (bind mount del DIRECTORIO, RW)
                                │  auditoría    <data>/bot_actions.log (JSONL)
-                               └─ HTTP ──> docker-proxy:2375 (tecnativa/docker-socket-proxy, CONTAINERS=1, POST=1)
+                               └─ HTTP ──> docker-proxy:2375 (proxy mínimo propio, ./docker-proxy, allowlist)
                                               └─ /var/run/docker.sock (solo en el proxy)
                                                     └─ contenedor <name>-passivbot (forager)
 ```
@@ -135,7 +135,7 @@ falla (`EBUSY`) o passivbot sigue viendo el inode viejo.
 
 | Variable | Default | Descripción |
 |---|---|---|
-| `FUTURESBOARD_DOCKER_URL` | (vacía) | URL del docker-socket-proxy, ej. `http://docker-proxy:2375`. Sin ella el panel se muestra deshabilitado. |
+| `FUTURESBOARD_DOCKER_URL` | (vacía) | URL del docker-proxy (`./docker-proxy`), ej. `http://docker-proxy:2375`. Sin ella el panel se muestra deshabilitado. |
 | `FUTURESBOARD_PASSIVBOT_CONTAINER` | `client17-passivbot` | Nombre del contenedor de passivbot. |
 | `FUTURESBOARD_FORAGER_CONFIG` | (vacía) | Ruta del HJSON de forager dentro del contenedor del dashboard. Sin ella START y graceful quedan deshabilitados; Apagar funciona. |
 | `FUTURESBOARD_FORAGER_SUPPORTS_MODES` | `0` | Habilita Graceful stop. Activar solo con forager parcheado (ver arriba). |
@@ -166,15 +166,21 @@ services:
     depends_on: [docker-proxy]
 
   docker-proxy:
-    image: tecnativa/docker-socket-proxy   # fijar tag/digest en prod
+    build: ./docker-proxy
     environment:
-      CONTAINERS: 1
-      POST: 1
-      # todo lo demás queda en 0 (default): sin images, exec, volumes, networks, etc.
+      # el MISMO nombre que FUTURESBOARD_PASSIVBOT_CONTAINER; se compara exacto
+      PROXY_CONTAINER: client17-passivbot
+      # PROXY_MAX_STOP_T: "120"   # máximo para ?t= en stop/restart (el panel usa 20)
+    # GID dueño del socket en el host: `stat -c %g /var/run/docker.sock`
+    group_add: ["${DOCKER_SOCK_GID:?definir DOCKER_SOCK_GID}"]
     volumes:
-      # ":ro" NO restringe la API (ver "Alcance real" abajo)
+      # el socket se monta SOLO acá; el ":ro" no restringe la API, el filtro es el proxy
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
     networks: [docker-api]
+    restart: unless-stopped
     # sin "ports": solo accesible desde la red interna
 
 networks:
@@ -182,36 +188,54 @@ networks:
     internal: true
 ```
 
-### Alcance real del docker-socket-proxy (leer antes de prod)
+Antes de `docker compose up`: `export DOCKER_SOCK_GID=$(stat -c %g /var/run/docker.sock)`
+(o ponerlo en el `.env` del compose).
 
-`tecnativa/docker-socket-proxy` filtra por prefijo de ruta y por método, no por contenedor:
+### docker-proxy: qué deja pasar
 
-- `CONTAINERS=1` habilita **cualquier** ruta `/containers/*` para **cualquier** contenedor del host.
-- `POST=1` habilita **todos** los métodos que no son GET/HEAD (POST, PUT, DELETE), no solo POST.
+`docker-proxy/docker_proxy.py` (solo stdlib, imagen `python:3.11-slim-bookworm` fijada por
+digest, usuario no-root uid 10001) escucha HTTP en `:2375` y reenvía al socket unix
+**únicamente**, para el contenedor de `PROXY_CONTAINER` (nombre exacto, no por prefijo):
 
-Desde el dashboard (o cualquier cosa en la red `docker-api`) eso permite, entre otras cosas:
+| Método | Ruta (prefijo `/v1.NN` opcional) | Query |
+|---|---|---|
+| GET | `/containers/{name}/json` | ninguna |
+| POST | `/containers/{name}/start` | ninguna |
+| POST | `/containers/{name}/stop` | `t=N` opcional, entero `0..PROXY_MAX_STOP_T` |
+| POST | `/containers/{name}/restart` | `t=N` opcional, entero `0..PROXY_MAX_STOP_T` |
 
-- `GET /containers/client17-passivbot/archive?path=...`: leer cualquier archivo de passivbot,
-  incluidas las **API keys del exchange**.
-- `GET /containers/<x>/json`: `Config.Env` de todos los contenedores del host.
-- `PUT /containers/<x>/archive`: escribir archivos dentro de cualquier contenedor.
-- `POST /containers/create` con `Privileged` y `Binds: ["/:/host"]` + `start`: **root en el host**.
+Es exactamente lo que usa `DockerClient` en `bot_control.py` (`t=20` en stop/restart).
+Todo lo demás responde **403** sin tocar Docker: otras rutas (`/containers/json`, `create`,
+`archive`, `exec`, `logs`...), otros contenedores o nombres parecidos (`client17-passivbot2`),
+otros métodos (PUT, DELETE, HEAD...), método cruzado (GET a `start`), cualquier `%`, `//`,
+`..` o barra final en el path, queries extra (`signal`, `detachKeys`, `size`), y requests con
+body (`Content-Length` distinto de 0, `Transfer-Encoding`, `Expect`). El path se valida tal cual
+llega en la request-line y se reconstruye antes de reenviarlo; a Docker solo le llegan headers
+fijos.
 
-O sea: un RCE o SSRF en el dashboard equivale a root en el host más exfiltración de las keys de
-Binance. El `:ro` del montaje de `docker.sock` **no limita nada** a nivel API (solo impide
-reemplazar el archivo del socket); no es una medida de seguridad. La red interna sin puertos
-publicados solo evita que el proxy sea alcanzable desde afuera.
+Otras defensas:
 
-**Pendiente antes de prod (follow-up):** reemplazar el proxy genérico por uno con allowlist
-explícita (haproxy o nginx propio frente al socket) que permita exactamente, con o sin prefijo
-`/vX.Y`, y deniegue todo lo demás:
+- La respuesta de `GET .../json` se filtra a `Id`, `Name` y `State` (lo único que lee el panel):
+  no expone `Config.Env`, `Mounts` ni la config del contenedor de passivbot.
+- Respuesta de Docker limitada a 1 MiB; timeout hacia Docker de 10 s (+`t` en stop/restart);
+  timeout de lectura del cliente de 10 s; máximo 8 requests simultáneos (el resto, 503).
+- Docker caído o socket sin permisos → 502; timeout → 504. Los 204/304/404/500 de Docker pasan
+  tal cual (el panel distingue `not_found` y `sin_cambios`).
+- `HEALTHCHECK` sin tocar Docker: pide `/_ping` y espera 403.
+- Log a stderr de cada request y del motivo de cada 403 (nunca bodies).
 
-```
-GET  ^(/v[0-9.]+)?/containers/client17-passivbot/json$
-POST ^(/v[0-9.]+)?/containers/client17-passivbot/(start|stop|restart)$   (query t=N permitida)
-```
+Tests: `tests/test_docker_proxy.py` (Docker falso en un socket unix temporal, incluye el
+`DockerClient` real del panel contra el proxy).
 
-Esa config no está incluida ni probada en este PR.
+### Riesgo residual
+
+- Desde la red `docker-api` se puede arrancar, parar y reiniciar passivbot, y leer su estado. Es
+  lo que el panel necesita; nada más.
+- El proceso del proxy tiene acceso al socket (vía grupo), que equivale a root en el host: un bug
+  en el propio proxy sería grave. Por eso es chico, sin dependencias y con tests de las
+  denegaciones. Mantener la red interna y sin `ports`.
+- Probado contra un Docker real local (Docker Desktop) y con tests; **no validado todavía en el
+  host de prod** (GID del socket, versión de API).
 
 ## Prerrequisitos de deploy (fuera del alcance de este PR)
 
