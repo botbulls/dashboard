@@ -71,9 +71,21 @@ def _get_server_ip():
         return '127.0.0.1'
 
 
+def default_config_dir() -> pathlib.Path:
+    """Directorio de config: env FUTURESBOARD_CONFIG_DIR o ``./config`` (igual que el CLI).
+
+    Lo usan el CLI y el entrypoint WSGI (gunicorn), asi ambos leen el mismo config.json y
+    la misma DB.
+    """
+    env_dir = os.environ.get("FUTURESBOARD_CONFIG_DIR", "").strip()
+    if env_dir:
+        return pathlib.Path(env_dir).resolve()
+    return pathlib.Path.cwd() / "config"
+
+
 def init_app(config: Config | None = None):
     if config is None:
-        config = Config.from_config_dir(pathlib.Path.cwd())
+        config = Config.from_config_dir(default_config_dir())
 
     app = Flask(__name__)
     app.secret_key = os.environ.get("FUTURESBOARD_SECRET_KEY") or secrets.token_hex(32)
