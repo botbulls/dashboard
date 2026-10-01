@@ -58,25 +58,6 @@
                 </div>
             </div>
         </div>
-        <!-- Confirmación: Detener Guardian (advertencia de riesgo) -->
-        <div class="modal fade" id="guardianStopConfirmModal" tabindex="-1" aria-labelledby="guardianStopConfirmLabel" aria-hidden="true">
-            <div class="modal-dialog modal-dialog-centered">
-                <div class="modal-content">
-                    <div class="modal-header border-warning">
-                        <h5 class="modal-title text-warning" id="guardianStopConfirmLabel"><i class="fas fa-exclamation-triangle me-2"></i>Confirmar detener Guardian</h5>
-                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                    </div>
-                    <div class="modal-body">
-                        <p class="mb-0"><strong>Usted opera bajo su propio riesgo.</strong></p>
-                        <p class="text-muted small mb-0 mt-2">Al detener Guardian solo passivbot seguirá activo. Esta acción no se puede deshacer desde aquí y Guardian no se reiniciará automáticamente hasta que lo permita.</p>
-                    </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancelar</button>
-                        <button type="button" class="btn btn-warning btn-sm" id="guardianStopConfirmAccept" data-action="guardian-stop-accept"><i class="fas fa-stop"></i> Acepto el riesgo y detener</button>
-                    </div>
-                </div>
-            </div>
-        </div>
         <div class="btn-toolbar mb-2 mb-md-0">
             <div class="btn-group me-2">
                 <form method="GET" name="daterangeform">
@@ -387,284 +368,117 @@ var myChart = new Chart(
     config2
 );
 
-// Bot status functionality - optimized to not block page load
+// Bot status (passivbot) - no bloquea la carga de la pagina
 (function() {
-    let botStatusInterval = null;
     let isUpdating = false;
-    
-    function updateBotStatus() {
+
+    function esc(v) {
+        const d = document.createElement('div');
+        d.textContent = v === null || v === undefined ? '-' : String(v);
+        return d.innerHTML;
+    }
+
+    function setBadge(text, cls, iconClass) {
         const botStatusEl = document.getElementById('botStatus');
         const botStatusText = botStatusEl?.querySelector('.bot-status-text');
         if (!botStatusEl || !botStatusText) return;
-        
-        // Prevent concurrent requests
-        if (isUpdating) return;
+        const icon = botStatusEl.querySelector('i');
+        if (icon) {
+            icon.className = iconClass;
+        }
+        botStatusText.textContent = text;
+        botStatusEl.className = 'badge bot-status-badge ' + cls;
+    }
+
+    function setModal(html) {
+        const modalBody = document.getElementById('botStatusModalBody');
+        if (modalBody) {
+            modalBody.innerHTML = html + `
+                <div class="mt-3">
+                    <small class="text-muted">Última actualización: ${new Date().toLocaleTimeString()}</small>
+                </div>`;
+        }
+    }
+
+    function render(data) {
+        if (!data.enabled) {
+            setBadge('BOT: N/D', 'bg-secondary', 'fas fa-question-circle');
+            setModal(`<p class="text-muted mb-0">${esc(data.message || 'Control del bot no configurado.')}</p>`);
+            return;
+        }
+        const c = data.container || {};
+        const running = c.running === true;
+        const graceful = data.long_mode === 'graceful_stop' && data.short_mode === 'graceful_stop';
+        let title, text, cls, iconClass;
+        if (running && graceful) {
+            text = 'BOT: Graceful stop'; cls = 'bg-warning'; iconClass = 'fas fa-exclamation-triangle';
+            title = '<h6 class="text-warning"><i class="fas fa-exclamation-triangle"></i> Graceful stop</h6><p class="text-muted small mb-2">No abre nuevas posiciones; gestiona las abiertas.</p>';
+        } else if (running) {
+            text = 'BOT: Running'; cls = 'bg-success'; iconClass = 'fas fa-check-circle';
+            title = '<h6 class="text-success"><i class="fas fa-check-circle"></i> Bot en ejecución</h6>';
+        } else {
+            text = 'BOT: Stopped'; cls = 'bg-danger'; iconClass = 'fas fa-times-circle';
+            title = '<h6 class="text-danger"><i class="fas fa-times-circle"></i> Bot detenido</h6><p class="text-muted small mb-2">Si hay posiciones u órdenes abiertas, quedan en el exchange sin gestión.</p>';
+        }
+        setBadge(text, cls, iconClass);
+        setModal(`
+            <div class="mb-3">
+                ${title}
+                <ul class="list-unstyled ms-3 mb-0">
+                    <li><i class="fas ${running ? 'fa-check text-success' : 'fa-times text-danger'}"></i> ${esc(c.name || 'passivbot')}: <strong>${esc(c.status || 'desconocido')}</strong></li>
+                    <li><i class="fas fa-sliders-h"></i> Riesgo: <strong>${esc(data.riesgo)}</strong> <span class="text-muted small">(TWE long ${esc(data.twe_long)} / short ${esc(data.twe_short)})</span></li>
+                    <li><i class="fas fa-random"></i> Modos: long <strong>${esc(data.long_mode)}</strong> / short <strong>${esc(data.short_mode)}</strong></li>
+                </ul>
+                ${data.message ? `<p class="text-warning small mt-2 mb-0">${esc(data.message)}</p>` : ''}
+            </div>`);
+    }
+
+    function updateBotStatus() {
+        if (!document.getElementById('botStatus') || isUpdating) return;
         isUpdating = true;
-        
-        // Create timeout controller for older browsers
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
-        
-        fetch('/api/bot/status', { 
-            cache: 'no-cache',
-            signal: controller.signal
-        })
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error('Network response was not ok');
-                }
-                return response.json();
+        const timeoutId = setTimeout(() => controller.abort(), 8000);
+        fetch('/api/bot/status', { cache: 'no-cache', credentials: 'same-origin', signal: controller.signal })
+            .then(r => {
+                if (r.redirected) throw new Error('Sesión expirada');
+                return r.json().then(d => ({ ok: r.ok, d }));
             })
-            .then(data => {
-                let statusText = '';
-                let statusClass = '';
-                let iconClass = '';
-                let modalContent = '';
-                
-                // Check status - API returns "run" not "running"
-                const isRunning = data.status === 'run' || data.status === 'running' || data.status === 'start';
-                const containers = data.containers || {};
-                // Resolve guardian/passivbot by key: API may use "guardian" or "client17-guardian" etc.
-                const findContainer = (substr) => {
-                    const key = Object.keys(containers).find(k => k.toLowerCase().includes(substr));
-                    return key ? containers[key] : null;
-                };
-                const guardianInfo = findContainer('guardian') || containers.guardian || {};
-                const passivbotInfo = findContainer('passivbot') || containers.passivbot || {};
-                const isRun = (v) => v === true || v === 'run' || (typeof v === 'string' && v.toLowerCase() === 'running');
-                const guardianRunning = isRun(guardianInfo.running);
-                const passivbotRunning = isRun(passivbotInfo.running);
-                const guardianName = guardianInfo.name || Object.keys(containers).find(k => k.toLowerCase().includes('guardian')) || 'guardian';
-                const passivbotName = passivbotInfo.name || Object.keys(containers).find(k => k.toLowerCase().includes('passivbot')) || 'passivbot';
-                
-                // Priority logic: passivbot is the most important bot
-                // If passivbot is stopped -> show as stopped
-                // If passivbot is running but guardian is stopped -> show as partial
-                // If both are running -> show as running
-                
-                if (!passivbotRunning) {
-                    // Passivbot is stopped - most important, show as stopped
-                    statusText = 'BOT: Stopped';
-                    statusClass = 'bg-danger';
-                    iconClass = 'fas fa-times-circle';
-                    modalContent = `
-                        <div class="mb-3">
-                            <h6 class="text-danger"><i class="fas fa-times-circle"></i> Bot detenido</h6>
-                            <p class="text-muted small mb-2">Passivbot está detenido (bot principal)</p>
-                            <ul class="list-unstyled ms-3">
-                                <li><i class="fas ${guardianRunning ? 'fa-check text-success' : 'fa-times text-danger'}"></i> ${guardianName}: <strong>${guardianRunning ? 'Running' : 'Stopped'}</strong></li>
-                                <li><i class="fas fa-times text-danger"></i> ${passivbotName}: <strong class="text-danger">Stopped</strong> <span class="badge bg-danger ms-2">Principal</span></li>
-                            </ul>
-                        </div>
-                    `;
-                } else if (passivbotRunning && !guardianRunning) {
-                    // Passivbot running but guardian stopped -> partial
-                    statusText = 'BOT: Partial';
-                    statusClass = 'bg-warning';
-                    iconClass = 'fas fa-exclamation-triangle';
-                    modalContent = `
-                        <div class="mb-3">
-                            <h6 class="text-warning"><i class="fas fa-exclamation-triangle"></i> Bot parcialmente activo</h6>
-                            <p class="text-muted small mb-2">Passivbot está corriendo pero Guardian está detenido</p>
-                            <ul class="list-unstyled ms-3">
-                                <li><i class="fas fa-times text-danger"></i> ${guardianName}: <strong>Stopped</strong></li>
-                                <li><i class="fas fa-check text-success"></i> ${passivbotName}: <strong class="text-success">Running</strong> <span class="badge bg-success ms-2">Principal</span></li>
-                            </ul>
-                        </div>
-                    `;
-                } else if (passivbotRunning && guardianRunning) {
-                    // Both running -> running
-                    statusText = 'BOT: Running';
-                    statusClass = 'bg-success';
-                    iconClass = 'fas fa-check-circle';
-                    modalContent = `
-                        <div class="mb-3">
-                            <h6 class="text-success"><i class="fas fa-check-circle"></i> Bot en ejecución</h6>
-                            <ul class="list-unstyled ms-3">
-                                <li><i class="fas fa-check text-success"></i> ${guardianName}: <strong>Running</strong></li>
-                                <li><i class="fas fa-check text-success"></i> ${passivbotName}: <strong>Running</strong> <span class="badge bg-success ms-2">Principal</span></li>
-                            </ul>
-                            <div class="mt-2">
-                                <button type="button" class="btn btn-warning btn-sm" data-action="stop-guardian" title="Detener solo Guardian; passivbot seguirá corriendo y Guardian no se reiniciará">
-                                    <i class="fas fa-stop"></i> Detener Guardian (solo passivbot)
-                                </button>
-                            </div>
-                        </div>
-                    `;
-                } else {
-                    // Fallback: both stopped
-                    statusText = 'BOT: Stopped';
-                    statusClass = 'bg-danger';
-                    iconClass = 'fas fa-times-circle';
-                    modalContent = `
-                        <div class="mb-3">
-                            <h6 class="text-danger"><i class="fas fa-times-circle"></i> Bot detenido</h6>
-                            <ul class="list-unstyled ms-3">
-                                <li><i class="fas fa-times text-danger"></i> ${guardianName}: <strong>Stopped</strong></li>
-                                <li><i class="fas fa-times text-danger"></i> ${passivbotName}: <strong>Stopped</strong> <span class="badge bg-danger ms-2">Principal</span></li>
-                            </ul>
-                        </div>
-                    `;
-                }
-                
-                // Update badge
-                const icon = botStatusEl.querySelector('i');
-                if (icon) {
-                    icon.className = iconClass;
-                    icon.classList.remove('fa-spin', 'fa-circle-notch');
-                }
-                if (botStatusText) {
-                    botStatusText.textContent = statusText;
-                }
-                botStatusEl.className = 'badge bot-status-badge ' + statusClass;
-                
-                // Update modal content
-                const modalBody = document.getElementById('botStatusModalBody');
-                if (modalBody) {
-                    modalBody.innerHTML = modalContent + `
-                        <div id="botStatusGuardianPreference" class="mt-2"></div>
-                        <div class="mt-3">
-                            <small class="text-muted">Última actualización: ${new Date().toLocaleTimeString()}</small>
-                        </div>
-                    `;
-                    // Load guardian "prevent restart" preference and show allow-restart button if set
-                    fetch('/api/bot/guardian/disabled', { cache: 'no-cache' })
-                        .then(r => r.ok ? r.json() : { disabled: false })
-                        .then(data => {
-                            const prefEl = document.getElementById('botStatusGuardianPreference');
-                            if (!prefEl) return;
-                            if (data.disabled) {
-                                prefEl.innerHTML = `
-                                    <div class="alert alert-info py-2 small mb-0">
-                                        <i class="fas fa-info-circle"></i> Guardian no se reiniciará automáticamente.
-                                        <button type="button" class="btn btn-outline-primary btn-sm ms-2" data-action="allow-guardian-restart">Permitir reinicio de Guardian</button>
-                                    </div>
-                                `;
-                            }
-                        })
-                        .catch(() => {});
-                }
+            .then(({ ok, d }) => {
+                if (!ok && d.enabled !== false) throw new Error(d.error || 'Error');
+                render(d);
             })
             .catch(error => {
                 console.error('Error fetching bot status:', error);
-                const botStatusEl = document.getElementById('botStatus');
-                const botStatusText = botStatusEl?.querySelector('.bot-status-text');
-                if (!botStatusEl || !botStatusText) return;
-                
-                const icon = botStatusEl.querySelector('i');
-                if (icon) {
-                    icon.className = 'fas fa-question-circle';
-                    icon.classList.remove('fa-spin', 'fa-circle-notch');
-                }
-                botStatusText.textContent = 'BOT: Unknown';
-                botStatusEl.className = 'badge bot-status-badge bg-secondary';
-                
-                const modalBody = document.getElementById('botStatusModalBody');
-                if (modalBody) {
-                    modalBody.innerHTML = '<p class="text-danger">Error al obtener el estado del bot. Por favor, intente más tarde.</p>';
-                }
+                setBadge('BOT: Unknown', 'bg-secondary', 'fas fa-question-circle');
+                setModal('<p class="text-danger">Error al obtener el estado del bot. Por favor, intente más tarde.</p>');
             })
             .finally(() => {
                 clearTimeout(timeoutId);
                 isUpdating = false;
             });
     }
-    
-    // Wait for DOM to be ready and delay initial load to not block page rendering
+
     function initBotStatus() {
-        // Use requestIdleCallback if available, otherwise setTimeout
+        const start = () => { updateBotStatus(); setInterval(updateBotStatus, 30000); };
         if (window.requestIdleCallback) {
-            requestIdleCallback(() => {
-                updateBotStatus();
-                botStatusInterval = setInterval(updateBotStatus, 30000);
-            }, { timeout: 2000 });
+            requestIdleCallback(start, { timeout: 2000 });
         } else {
-            setTimeout(() => {
-                updateBotStatus();
-                botStatusInterval = setInterval(updateBotStatus, 30000);
-            }, 1000);
+            setTimeout(start, 1000);
         }
     }
-    
-    // Initialize when DOM is ready
+
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', initBotStatus);
     } else {
         initBotStatus();
     }
-    
-    // Update modal content when opened
+
     const botStatusModal = document.getElementById('botStatusModal');
     if (botStatusModal) {
-        botStatusModal.addEventListener('show.bs.modal', function() {
-            // Trigger update when modal opens
-            if (!isUpdating) {
-                updateBotStatus();
-            }
-        });
+        botStatusModal.addEventListener('show.bs.modal', updateBotStatus);
     }
-
-    // Delegated click: Stop Guardian -> show confirmation; Allow Guardian restart
-    const botStatusModalBody = document.getElementById('botStatusModalBody');
-    const guardianStopConfirmModalEl = document.getElementById('guardianStopConfirmModal');
-    if (botStatusModalBody) {
-        botStatusModalBody.addEventListener('click', function(e) {
-            const stopBtn = e.target.closest('[data-action="stop-guardian"]');
-            const allowBtn = e.target.closest('[data-action="allow-guardian-restart"]');
-            if (stopBtn && !stopBtn.disabled) {
-                if (guardianStopConfirmModalEl && typeof bootstrap !== 'undefined') {
-                    new bootstrap.Modal(guardianStopConfirmModalEl).show();
-                } else {
-                    doGuardianStop(stopBtn);
-                }
-            } else if (allowBtn && !allowBtn.disabled) {
-                allowBtn.disabled = true;
-                fetch('/api/bot/guardian/allow-restart', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
-                    .then(() => { updateBotStatus(); })
-                    .finally(() => { allowBtn.disabled = false; });
-            }
-        });
-    }
-
-    function doGuardianStop(stopBtn) {
-        if (stopBtn) {
-            stopBtn.disabled = true;
-            stopBtn.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Deteniendo...';
-        }
-        fetch('/api/bot/guardian/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
-            .then(r => r.json())
-            .then(() => { updateBotStatus(); })
-            .catch(() => { updateBotStatus(); })
-            .finally(() => {
-                const btn = stopBtn || document.querySelector('[data-action="stop-guardian"]');
-                if (btn) {
-                    btn.disabled = false;
-                    btn.innerHTML = '<i class="fas fa-stop"></i> Detener Guardian (solo passivbot)';
-                }
-            });
-    }
-
-    // Aceptar advertencia de riesgo: delegación en document para que el clic siempre se capture
-    document.addEventListener('click', function(e) {
-        const acceptBtn = e.target.closest('#guardianStopConfirmAccept, [data-action="guardian-stop-accept"]');
-        if (!acceptBtn) return;
-        e.preventDefault();
-        e.stopPropagation();
-        if (guardianStopConfirmModalEl) {
-            try {
-                const inst = bootstrap.Modal.getInstance(guardianStopConfirmModalEl);
-                if (inst) inst.hide();
-            } catch (err) {
-                guardianStopConfirmModalEl.classList.remove('show');
-                guardianStopConfirmModalEl.style.display = 'none';
-                document.body.classList.remove('modal-open');
-                const backdrop = document.querySelector('.modal-backdrop');
-                if (backdrop) backdrop.remove();
-            }
-        }
-        const stopBtn = document.querySelector('[data-action="stop-guardian"]');
-        doGuardianStop(stopBtn);
-    });
+    // El panel de control (base.html) publica el estado tras cada accion.
+    window.addEventListener('fb-bot-status', (e) => { if (e.detail) render(e.detail); });
 })();
 
 // Last order functionality
