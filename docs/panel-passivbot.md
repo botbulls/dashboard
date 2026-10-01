@@ -45,7 +45,7 @@ Browser ──(sesión + CSRF)──> dashboard (Flask)
                                │  lee/escribe  configs/forager/new.json (bind mount del DIRECTORIO, RW)
                                │  auditoría    <data>/bot_actions.log (JSONL)
                                └─ HTTP ──> docker-proxy:2375 (tecnativa/docker-socket-proxy, CONTAINERS=1, POST=1)
-                                              └─ /var/run/docker.sock (ro, solo en el proxy)
+                                              └─ /var/run/docker.sock (solo en el proxy)
                                                     └─ contenedor <name>-passivbot (forager)
 ```
 
@@ -61,7 +61,7 @@ Browser ──(sesión + CSRF)──> dashboard (Flask)
 
 | Método | Ruta | Body | Efecto |
 |---|---|---|---|
-| GET | `/api/bot/status` | – | Estado del contenedor, preset de riesgo deducido (`bajo`/`medio`/`alto`/`personalizado`/`desconocido`), `twe_long`, `twe_short`, `long_mode`, `short_mode`, `enabled`, `modes_supported`. |
+| GET | `/api/bot/status` | – | Estado del contenedor, preset de riesgo deducido (`bajo`/`medio`/`alto`/`personalizado`/`desconocido`), `twe_long`, `twe_short`, `long_mode`, `short_mode`, `enabled`, `modes_supported`, `config_pending`. |
 | POST | `/api/bot/start` | `{"riesgo": "bajo"\|"medio"\|"alto"}` | Escribe `twe_long`/`twe_short` del preset, `long_mode=normal`, `short_mode` (ver abajo); `start` si está detenido, `restart` si corre. |
 | POST | `/api/bot/stop` | `{"modo": "graceful"\|"apagar"}` | `graceful`: `long_mode=short_mode=graceful_stop` + start o restart (requiere `FUTURESBOARD_FORAGER_SUPPORTS_MODES=1`, si no 409). `apagar`: `stop` del contenedor, no toca la config. |
 
@@ -69,6 +69,35 @@ Presets (históricos del guardian): bajo 4/1, medio 6/2, alto 8/3 (`twe_long`/`t
 
 Códigos: 400 parámetro inválido · 403 CSRF · 409 graceful no soportado · 415 sin JSON ·
 502 docker-proxy/contenedor · 503 panel no configurado.
+
+### Lo que muestra el estado
+
+Riesgo, TWE y modos se leen del HJSON, no del proceso: forager carga la config una sola vez al
+arrancar. Para no mostrar como vigente algo que no lo está:
+
+- `config_pending`: `true` si el mtime del HJSON es posterior a `State.StartedAt` del contenedor
+  (la config cambió y passivbot todavía no la cargó). La UI marca el riesgo como
+  "pendiente de reinicio". `null` si el contenedor no corre (se aplica al próximo arranque).
+- Con `FUTURESBOARD_FORAGER_SUPPORTS_MODES` apagado, la UI muestra los modos como
+  "n/a (forager no los lee)" y nunca muestra el badge "Graceful stop", aunque el HJSON tenga
+  `graceful_stop` (edición manual, o el flag estuvo prendido y se apagó).
+
+### Config y acción Docker: qué pasa si falla
+
+START y Graceful stop siguen este orden:
+
+1. `GET /containers/{name}/json` antes de tocar nada. Si el proxy no responde o el contenedor no
+   existe, se corta acá con 502 y la config queda intacta.
+2. Escritura del HJSON (con backup) y del estado local.
+3. `start` o `restart`.
+   - Si Docker responde con error (4xx/5xx): no aplicó la acción. Se restaura el HJSON desde el
+     backup (atómico, conservando el mtime previo) y el estado local; el error lo dice.
+   - Si no hay respuesta (timeout, conexión cortada): no se sabe si el reinicio ocurrió, así que
+     **no** se revierte (podría dejar el archivo distinto de lo que forager ya cargó). El error
+     dice que la config quedó escrita y nombra el backup; `config_pending` muestra si está en
+     efecto.
+
+El log de auditoría guarda el mensaje de error completo, incluida la restauración o el backup.
 
 **Apagar**: las posiciones y órdenes abiertas quedan en el exchange sin gestión del bot. La UI
 exige tildar esa advertencia antes de confirmar.
@@ -143,6 +172,7 @@ services:
       POST: 1
       # todo lo demás queda en 0 (default): sin images, exec, volumes, networks, etc.
     volumes:
+      # ":ro" NO restringe la API (ver "Alcance real" abajo)
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks: [docker-api]
     # sin "ports": solo accesible desde la red interna
@@ -152,9 +182,49 @@ networks:
     internal: true
 ```
 
-`POST=1` + `CONTAINERS=1` permite POST sobre cualquier endpoint `/containers/*` (incluido
-create/kill/delete) para cualquier contenedor del host: el proxy reduce la superficie pero no
-limita a un contenedor. Por eso la red `docker-api` es interna y solo el dashboard la comparte.
+### Alcance real del docker-socket-proxy (leer antes de prod)
+
+`tecnativa/docker-socket-proxy` filtra por prefijo de ruta y por método, no por contenedor:
+
+- `CONTAINERS=1` habilita **cualquier** ruta `/containers/*` para **cualquier** contenedor del host.
+- `POST=1` habilita **todos** los métodos que no son GET/HEAD (POST, PUT, DELETE), no solo POST.
+
+Desde el dashboard (o cualquier cosa en la red `docker-api`) eso permite, entre otras cosas:
+
+- `GET /containers/client17-passivbot/archive?path=...`: leer cualquier archivo de passivbot,
+  incluidas las **API keys del exchange**.
+- `GET /containers/<x>/json`: `Config.Env` de todos los contenedores del host.
+- `PUT /containers/<x>/archive`: escribir archivos dentro de cualquier contenedor.
+- `POST /containers/create` con `Privileged` y `Binds: ["/:/host"]` + `start`: **root en el host**.
+
+O sea: un RCE o SSRF en el dashboard equivale a root en el host más exfiltración de las keys de
+Binance. El `:ro` del montaje de `docker.sock` **no limita nada** a nivel API (solo impide
+reemplazar el archivo del socket); no es una medida de seguridad. La red interna sin puertos
+publicados solo evita que el proxy sea alcanzable desde afuera.
+
+**Pendiente antes de prod (follow-up):** reemplazar el proxy genérico por uno con allowlist
+explícita (haproxy o nginx propio frente al socket) que permita exactamente, con o sin prefijo
+`/vX.Y`, y deniegue todo lo demás:
+
+```
+GET  ^(/v[0-9.]+)?/containers/client17-passivbot/json$
+POST ^(/v[0-9.]+)?/containers/client17-passivbot/(start|stop|restart)$   (query t=N permitida)
+```
+
+Esa config no está incluida ni probada en este PR.
+
+## Prerrequisitos de deploy (fuera del alcance de este PR)
+
+El panel le da a cualquier sesión logueada la capacidad de arrancar el bot con riesgo "alto" o
+apagarlo dejando posiciones sin gestión. Antes, eso requería además la contraseña de admin
+separada (que este PR elimina). Hoy la app tiene:
+
+- usuario por defecto `cliente17` / `123456` sembrado en `auth.py` (`_ensure_database_schema`),
+- servidor de desarrollo de Flask en HTTP plano en `:80` (CMD del Dockerfile + `80:5000`),
+- cookie de sesión sin `Secure` y login sin rate limit.
+
+Mínimo antes de exponer el panel: sin usuario/contraseña por defecto en prod, HTTPS adelante con
+`SESSION_COOKIE_SECURE=True`, y rate limit en el login.
 
 El contenedor de passivbot debe montar el mismo directorio:
 `/root/botbulls/client17/passivbot/configs/forager:/<passivbot_root>/configs/forager`.
