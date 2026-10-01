@@ -390,3 +390,52 @@ def test_xff_used_with_proxy_fix(monkeypatch, make_app):
         login(c, "admin", "mal", headers={"X-Forwarded-For": "1.2.3.4"})
     assert login(c, "admin", "clave-actual", headers={"X-Forwarded-For": "1.2.3.4"}).status_code == 429
     assert login(c, "admin", "clave-actual", headers={"X-Forwarded-For": "5.6.7.8"}).status_code == 302
+
+
+# ---------------------------------------------------------------- revocación de sesiones
+
+
+def test_session_revoked_after_set_password(app, client):
+    auth.set_user_password(db_path(app), "admin", "clave-actual")
+    assert login(client, "admin", "clave-actual").status_code == 302
+    assert client.get("/settings").status_code == 200
+    auth.set_user_password(db_path(app), "admin", "clave-nueva")
+    resp = client.get("/settings")
+    assert resp.status_code == 302 and "/login" in resp.headers["Location"]
+    assert not logged_in(client)
+
+
+def test_session_revoked_when_user_deleted(app, client):
+    auth.set_user_password(db_path(app), "admin", "clave-actual")
+    login(client, "admin", "clave-actual")
+    with sqlite3.connect(db_path(app)) as conn:
+        conn.execute("DELETE FROM users WHERE username = 'admin'")
+    assert client.get("/").status_code == 302
+
+
+def test_legacy_session_without_fingerprint_rejected(app, client):
+    """Cookie emitida antes del cambio (p. ej. con 123456): solo trae username."""
+    _insert_legacy_default_user(app)
+    with client.session_transaction() as sess:
+        sess["username"] = "cliente17"
+    resp = client.get("/")
+    assert resp.status_code == 302 and "/login" in resp.headers["Location"]
+    assert not logged_in(client)
+
+
+def test_settings_password_change_keeps_own_session_revokes_others(app):
+    auth.set_user_password(db_path(app), "admin", "clave-actual")
+    c1, c2 = app.test_client(), app.test_client()
+    login(c1, "admin", "clave-actual")
+    login(c2, "admin", "clave-actual")
+    c1.post(
+        "/settings",
+        data={
+            "username": "admin",
+            "theme_default": "dark",
+            "current_password": "clave-actual",
+            "new_password": "clave-nueva",
+        },
+    )
+    assert c1.get("/settings").status_code == 200
+    assert c2.get("/settings").status_code == 302

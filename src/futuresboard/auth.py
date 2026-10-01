@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import os
 import sqlite3
@@ -181,6 +183,20 @@ def _clear_failures(key) -> None:
         failures.pop(key, None)
 
 
+def password_fingerprint(password_hash: str) -> str:
+    """Huella del hash de contraseña que se guarda en la sesión.
+
+    Si la contraseña cambia (set-password, /settings) la huella deja de coincidir y las
+    sesiones emitidas antes quedan inválidas. Es un HMAC con la secret key: la cookie es
+    legible por el cliente y no tiene por qué exponer nada derivable del hash.
+    """
+    key = str(current_app.secret_key or "").encode()
+    return hmac.new(key, password_hash.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+SESSION_FINGERPRINT_KEY = "pw_fp"
+
+
 def _ensure_users_columns(conn: sqlite3.Connection) -> None:
     existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
     if "theme_default" not in existing_cols:
@@ -324,6 +340,7 @@ def login_page():
         if valid:
             _clear_failures(key)
             session["username"] = row["username"]
+            session[SESSION_FINGERPRINT_KEY] = password_fingerprint(row["password_hash"])
             session["theme_default"] = row["theme_default"] or "auto"
             return redirect(next_url)
 
@@ -387,10 +404,13 @@ def settings_page():
                 flash(password_error, "error")
             elif new_password:
                 if check_password_hash(row["password_hash"], current_password):
+                    new_hash = generate_password_hash(new_password)
                     conn.execute(
                         "UPDATE users SET password_hash = ? WHERE username = ?",
-                        (generate_password_hash(new_password), current_username),
+                        (new_hash, current_username),
                     )
+                    # Esta sesión sigue válida; las demás del usuario quedan revocadas.
+                    session[SESSION_FINGERPRINT_KEY] = password_fingerprint(new_hash)
                 else:
                     flash("Current password is incorrect", "error")
 
@@ -426,10 +446,29 @@ def _require_login():
     if request.endpoint == "auth.login_page":
         return None
 
-    if "username" not in session:
+    if "username" not in session or not _session_is_current():
+        session.clear()
         next_url = request.full_path if request.query_string else request.path
         return redirect(url_for("auth.login_page", next=next_url))
     return None
+
+
+def _session_is_current() -> bool:
+    """La sesión sigue valiendo solo si el usuario existe y su contraseña no cambió.
+
+    Las sesiones sin huella (emitidas antes de este cambio, p. ej. con `123456`) se
+    rechazan. No se recalcula scrypt por request: se compara la huella del hash guardado.
+    """
+    fingerprint = session.get(SESSION_FINGERPRINT_KEY)
+    if not fingerprint:
+        return False
+    with sqlite3.connect(current_app.config["DATABASE"]) as conn:
+        row = conn.execute(
+            "SELECT password_hash FROM users WHERE username = ?", (session["username"],)
+        ).fetchone()
+    if row is None:
+        return False
+    return hmac.compare_digest(fingerprint, password_fingerprint(row[0]))
 
 
 @click.command("set-password")
