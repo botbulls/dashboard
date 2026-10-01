@@ -139,7 +139,7 @@ falla (`EBUSY`) o passivbot sigue viendo el inode viejo.
 | `FUTURESBOARD_PASSIVBOT_CONTAINER` | `client17-passivbot` | Nombre del contenedor de passivbot. |
 | `FUTURESBOARD_FORAGER_CONFIG` | (vacía) | Ruta del HJSON de forager dentro del contenedor del dashboard. Sin ella START y graceful quedan deshabilitados; Apagar funciona. |
 | `FUTURESBOARD_FORAGER_SUPPORTS_MODES` | `0` | Habilita Graceful stop. Activar solo con forager parcheado (ver arriba). |
-| `FUTURESBOARD_SECRET_KEY` | aleatoria | Ya existente. Fijarla para que las sesiones (y el token CSRF) sobrevivan reinicios. |
+| `FUTURESBOARD_SECRET_KEY` | efímera + warning | Fijarla para que las sesiones (y el token CSRF) sobrevivan reinicios. Ver [login.md](login.md) para cookies, usuarios y rate limit. |
 
 Se eliminan `FUTURESBOARD_ADMIN_URL`, `FUTURESBOARD_BOT_URL`, `FUTURESBOARD_BOT_SERVICE_NAME`
 y `FUTURESBOARD_BOT_SERVICE_PORT`.
@@ -219,12 +219,12 @@ El panel le da a cualquier sesión logueada la capacidad de arrancar el bot con 
 apagarlo dejando posiciones sin gestión. Antes, eso requería además la contraseña de admin
 separada (que este PR elimina). Hoy la app tiene:
 
-- usuario por defecto `cliente17` / `123456` sembrado en `auth.py` (`_ensure_database_schema`),
-- servidor de desarrollo de Flask en HTTP plano en `:80` (CMD del Dockerfile + `80:5000`),
-- cookie de sesión sin `Secure` y login sin rate limit.
+- servidor de desarrollo de Flask en HTTP plano en `:80` (CMD del Dockerfile + `80:5000`).
 
-Mínimo antes de exponer el panel: sin usuario/contraseña por defecto en prod, HTTPS adelante con
-`SESSION_COOKIE_SECURE=True`, y rate limit en el login.
+Resuelto en `dev/login-hardening` (ver [login.md](login.md)): sin usuario por defecto (los que
+tengan `123456` quedan bloqueados hasta `flask set-password`), cookie `Secure`/`HttpOnly`/`Lax`,
+`next` sin open redirect y rate limit en el login. Mínimo pendiente antes de exponer el panel:
+HTTPS adelante (Cloudflare Tunnel) y `FUTURESBOARD_SECRET_KEY` fija.
 
 El contenedor de passivbot debe montar el mismo directorio:
 `/root/botbulls/client17/passivbot/configs/forager:/<passivbot_root>/configs/forager`.
