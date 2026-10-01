@@ -876,7 +876,11 @@
                  disabledMsg.textContent = status.message || '';
                  const c = status.container || {};
                  const riesgo = status.riesgo || 'desconocido';
-                 estadoEl.textContent = `${c.name || 'passivbot'}: ${c.status || 'desconocido'} · riesgo ${riesgo} · modos ${status.long_mode || '-'} / ${status.short_mode || '-'}`;
+                 const modos = status.modes_supported
+                     ? `modos ${status.long_mode || '-'} / ${status.short_mode || '-'}`
+                     : 'modos n/a (forager no los lee)';
+                 const pendiente = status.config_pending === true ? ' (pendiente de reinicio)' : '';
+                 estadoEl.textContent = `${c.name || 'passivbot'}: ${c.status || 'desconocido'} · riesgo ${riesgo}${pendiente} · ${modos}`;
                  setButtonsDisabled(false);
                  if (status.presets && status.presets[riesgo]) {
                      riesgoSelect.value = riesgo;

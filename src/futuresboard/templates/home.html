@@ -408,7 +408,14 @@ var myChart = new Chart(
         }
         const c = data.container || {};
         const running = c.running === true;
-        const graceful = data.long_mode === 'graceful_stop' && data.short_mode === 'graceful_stop';
+        // Los modos salen del HJSON: solo significan algo si forager los lee (modes_supported).
+        const modesOk = data.modes_supported === true;
+        const graceful = modesOk && data.long_mode === 'graceful_stop' && data.short_mode === 'graceful_stop';
+        const pendiente = data.config_pending === true
+            ? ' <span class="badge bg-warning text-dark">pendiente de reinicio</span>' : '';
+        const modos = modesOk
+            ? `long <strong>${esc(data.long_mode)}</strong> / short <strong>${esc(data.short_mode)}</strong>`
+            : '<span class="text-muted">n/a (forager no los lee)</span>';
         let title, text, cls, iconClass;
         if (running && graceful) {
             text = 'BOT: Graceful stop'; cls = 'bg-warning'; iconClass = 'fas fa-exclamation-triangle';
@@ -426,8 +433,9 @@ var myChart = new Chart(
                 ${title}
                 <ul class="list-unstyled ms-3 mb-0">
                     <li><i class="fas ${running ? 'fa-check text-success' : 'fa-times text-danger'}"></i> ${esc(c.name || 'passivbot')}: <strong>${esc(c.status || 'desconocido')}</strong></li>
-                    <li><i class="fas fa-sliders-h"></i> Riesgo: <strong>${esc(data.riesgo)}</strong> <span class="text-muted small">(TWE long ${esc(data.twe_long)} / short ${esc(data.twe_short)})</span></li>
-                    <li><i class="fas fa-random"></i> Modos: long <strong>${esc(data.long_mode)}</strong> / short <strong>${esc(data.short_mode)}</strong></li>
+                    <li><i class="fas fa-sliders-h"></i> Riesgo: <strong>${esc(data.riesgo)}</strong> <span class="text-muted small">(TWE long ${esc(data.twe_long)} / short ${esc(data.twe_short)})</span>${pendiente}</li>
+                    <li><i class="fas fa-random"></i> Modos: ${modos}</li>
+                    ${data.config_pending === true ? '<li class="text-warning small">La config cambió después del último arranque de passivbot: lo que se ve arriba todavía no está en efecto.</li>' : ''}
                 </ul>
                 ${data.message ? `<p class="text-warning small mt-2 mb-0">${esc(data.message)}</p>` : ''}
             </div>`);
