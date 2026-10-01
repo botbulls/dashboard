@@ -7,6 +7,7 @@ from unittest import mock
 import hjson
 import pytest
 
+from futuresboard import auth
 from futuresboard import bot_control
 from futuresboard.app import init_app
 from futuresboard.config import Config
@@ -123,6 +124,8 @@ def app(tmp_path):
 
 @pytest.fixture
 def client(app):
+    # Ya no hay usuario sembrado: se crea el de la sesión de prueba.
+    auth.set_user_password(str(app.config["DATABASE"]), "cliente17", "clave-de-test")
     c = app.test_client()
     with c.session_transaction() as sess:
         sess["username"] = "cliente17"

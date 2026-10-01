@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import logging
+import os
 import sqlite3
+import threading
+import time
+from urllib.parse import urlsplit
 
+import click
 from flask import Blueprint
 from flask import current_app
 from flask import flash
@@ -9,6 +15,7 @@ from flask import redirect
 from flask import render_template
 from flask import request
 from flask import session
+from flask.cli import with_appcontext
 from flask.helpers import url_for
 from werkzeug.security import check_password_hash
 from werkzeug.security import generate_password_hash
@@ -17,6 +24,146 @@ from futuresboard.blueprint import get_coins
 
 
 auth = Blueprint("auth", __name__)
+log = logging.getLogger(__name__)
+
+# Contraseña que sembraban las versiones anteriores. Un usuario que todavía la tenga
+# no puede loguearse hasta fijar una nueva con `flask set-password <usuario>`.
+BLOCKED_DEFAULT_PASSWORD = "123456"
+ENV_ADMIN_USER = "FUTURESBOARD_ADMIN_USER"
+ENV_ADMIN_PASSWORD = "FUTURESBOARD_ADMIN_PASSWORD"
+SET_PASSWORD_HINT = "flask set-password <usuario>"
+
+# Rate limit de login: intentos fallidos por (usuario, IP) dentro de la ventana.
+LOGIN_MAX_FAILURES = 5
+LOGIN_WINDOW_SECONDS = 15 * 60
+_LOGIN_ATTEMPTS_KEY = "futuresboard_login_attempts"
+
+
+def validate_new_password(password: str) -> str | None:
+    """Devuelve un mensaje de error si la contraseña no es aceptable, o None."""
+    if not password:
+        return "La contraseña no puede estar vacía"
+    if password == BLOCKED_DEFAULT_PASSWORD:
+        return "Esa contraseña está bloqueada (era la contraseña por defecto)"
+    return None
+
+
+def set_user_password(database_path: str, username: str, password: str) -> bool:
+    """Crea el usuario o le cambia la contraseña. Devuelve True si lo creó."""
+    with sqlite3.connect(database_path) as conn:
+        cur = conn.execute(
+            "UPDATE users SET password_hash = ? WHERE username = ?",
+            (generate_password_hash(password), username),
+        )
+        created = cur.rowcount == 0
+        if created:
+            conn.execute(
+                "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                (username, generate_password_hash(password)),
+            )
+        conn.commit()
+    return created
+
+
+def _bootstrap_admin_from_env(conn: sqlite3.Connection) -> None:
+    """Alta inicial desde env solo si la tabla users está vacía."""
+    if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] > 0:
+        return
+    username = (os.environ.get(ENV_ADMIN_USER) or "").strip()
+    password = os.environ.get(ENV_ADMIN_PASSWORD) or ""
+    if not username or not password:
+        log.warning(
+            "No hay usuarios en la base. Crear uno con `%s` o definir %s/%s.",
+            SET_PASSWORD_HINT,
+            ENV_ADMIN_USER,
+            ENV_ADMIN_PASSWORD,
+        )
+        return
+    error = validate_new_password(password)
+    if error:
+        log.error("%s rechazada: %s. No se creó el usuario.", ENV_ADMIN_PASSWORD, error)
+        return
+    conn.execute(
+        "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+        (username, generate_password_hash(password)),
+    )
+    log.info("Usuario inicial '%s' creado desde %s.", username, ENV_ADMIN_USER)
+
+
+def _warn_blocked_default_passwords(database_path: str) -> None:
+    with sqlite3.connect(database_path) as conn:
+        rows = conn.execute("SELECT username, password_hash FROM users").fetchall()
+    for username, password_hash in rows:
+        if check_password_hash(password_hash, BLOCKED_DEFAULT_PASSWORD):
+            log.warning(
+                "El usuario '%s' tiene la contraseña por defecto y no puede loguearse. "
+                "Fijar una nueva con `%s`.",
+                username,
+                SET_PASSWORD_HINT,
+            )
+
+
+def safe_next_url(target: str | None) -> str | None:
+    """Acepta solo rutas relativas internas ("/algo"). Cualquier otra cosa -> None."""
+    if not target or not isinstance(target, str):
+        return None
+    if not target.startswith("/") or target.startswith("//"):
+        return None
+    if "\\" in target:
+        return None
+    # Los navegadores ignoran tabs/saltos de línea en URLs ("/\t/evil.com" -> "//evil.com").
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in target):
+        return None
+    parts = urlsplit(target)
+    if parts.scheme or parts.netloc:
+        return None
+    return target
+
+
+def _client_ip() -> str:
+    # Con FUTURESBOARD_PROXY_FIX activo, ProxyFix ya reescribió remote_addr desde
+    # X-Forwarded-For. Sin ProxyFix se usa la IP de la conexión y se ignoran los headers.
+    return request.remote_addr or "unknown"
+
+
+def _attempts_store():
+    ext = current_app.extensions.setdefault(
+        _LOGIN_ATTEMPTS_KEY, {"lock": threading.Lock(), "failures": {}}
+    )
+    return ext["lock"], ext["failures"]
+
+
+def _recent_failures(failures: dict, key, now: float) -> list:
+    recent = [t for t in failures.get(key, []) if now - t < LOGIN_WINDOW_SECONDS]
+    if recent:
+        failures[key] = recent
+    else:
+        failures.pop(key, None)
+    return recent
+
+
+def _is_rate_limited(key) -> bool:
+    lock, failures = _attempts_store()
+    with lock:
+        return len(_recent_failures(failures, key, time.monotonic())) >= LOGIN_MAX_FAILURES
+
+
+def _record_failure(key) -> None:
+    lock, failures = _attempts_store()
+    now = time.monotonic()
+    with lock:
+        recent = _recent_failures(failures, key, now)
+        recent.append(now)
+        failures[key] = recent
+        if len(failures) > 10000:
+            for other in list(failures):
+                _recent_failures(failures, other, now)
+
+
+def _clear_failures(key) -> None:
+    lock, failures = _attempts_store()
+    with lock:
+        failures.pop(key, None)
 
 
 def _ensure_users_columns(conn: sqlite3.Connection) -> None:
@@ -88,6 +235,7 @@ def _ensure_database_schema(database_path: str) -> None:
                 ); """
         )
         _ensure_users_columns(conn)
+        _bootstrap_admin_from_env(conn)
 
         # Seed required baseline rows for first-run.
         conn.execute(
@@ -102,22 +250,31 @@ def _ensure_database_schema(database_path: str) -> None:
             ) VALUES (1, 0.0, 0.0, 0.0, 0.0, 0.0)
             """
         )
-
-        # Seed a test user. Credentials: cliente17 / 123456
-        conn.execute(
-            "INSERT OR IGNORE INTO users (username, password_hash) VALUES (?, ?)",
-            ("cliente17", generate_password_hash("123456")),
-        )
         conn.commit()
 
 
 @auth.route("/login", methods=["GET", "POST"])
 def login_page():
-    next_url = request.args.get("next") or url_for("main.index_page")
+    next_url = safe_next_url(request.args.get("next")) or url_for("main.index_page")
+
+    def _render(status=200):
+        return (
+            render_template("login.html", next=next_url, custom=current_app.config["CUSTOM"]),
+            status,
+        )
 
     if request.method == "POST":
         username = (request.form.get("username") or "").strip()
         password = request.form.get("password") or ""
+        ip = _client_ip()
+        key = (username.lower(), ip)
+
+        if _is_rate_limited(key):
+            current_app.logger.warning(
+                "Login bloqueado por rate limit: usuario=%r ip=%s", username, ip
+            )
+            flash("Too many failed attempts. Try again in a few minutes.", "error")
+            return _render(429)
 
         with sqlite3.connect(current_app.config["DATABASE"]) as conn:
             conn.row_factory = sqlite3.Row
@@ -126,14 +283,37 @@ def login_page():
                 (username,),
             ).fetchone()
 
-        if row and check_password_hash(row["password_hash"], password):
+        valid = bool(row) and check_password_hash(row["password_hash"], password)
+
+        if row and check_password_hash(row["password_hash"], BLOCKED_DEFAULT_PASSWORD):
+            # Contraseña por defecto heredada: no se permite el login aunque sea correcta.
+            current_app.logger.warning(
+                "Login rechazado: el usuario %r tiene la contraseña por defecto; "
+                "fijar una nueva con `%s` (ip=%s)",
+                row["username"],
+                SET_PASSWORD_HINT,
+                ip,
+            )
+            if valid:
+                flash(
+                    "This account still uses the default password and is locked. "
+                    f"An administrator must set a new one with `{SET_PASSWORD_HINT}`.",
+                    "error",
+                )
+                return _render(403)
+            valid = False
+
+        if valid:
+            _clear_failures(key)
             session["username"] = row["username"]
             session["theme_default"] = row["theme_default"] or "auto"
             return redirect(next_url)
 
+        _record_failure(key)
+        current_app.logger.warning("Login fallido: usuario=%r ip=%s", username, ip)
         flash("Invalid username or password", "error")
 
-    return render_template("login.html", next=next_url, custom=current_app.config["CUSTOM"])
+    return _render()
 
 
 @auth.route("/logout", methods=["GET"])
@@ -184,7 +364,10 @@ def settings_page():
                     flash("Username already exists", "error")
 
             # Update password (if provided)
-            if new_password:
+            password_error = validate_new_password(new_password) if new_password else None
+            if password_error:
+                flash(password_error, "error")
+            elif new_password:
                 if check_password_hash(row["password_hash"], current_password):
                     conn.execute(
                         "UPDATE users SET password_hash = ? WHERE username = ?",
@@ -231,10 +414,36 @@ def _require_login():
     return None
 
 
+@click.command("set-password")
+@click.argument("username")
+@with_appcontext
+def set_password_command(username: str) -> None:
+    """Crea el usuario USERNAME o le fija una nueva contraseña.
+
+    La contraseña se pide por prompt sin eco. Si está definida la variable
+    FUTURESBOARD_ADMIN_PASSWORD se usa esa (solo en este comando).
+    """
+    username = username.strip()
+    if not username:
+        raise click.UsageError("El usuario no puede estar vacío")
+    password = os.environ.get(ENV_ADMIN_PASSWORD)
+    if not password:
+        password = click.prompt(
+            f"Nueva contraseña para '{username}'", hide_input=True, confirmation_prompt=True
+        )
+    error = validate_new_password(password)
+    if error:
+        raise click.ClickException(error)
+    created = set_user_password(str(current_app.config["DATABASE"]), username, password)
+    click.echo(f"Usuario '{username}' {'creado' if created else 'actualizado'}.")
+
+
 def init_app(app) -> None:
     app.register_blueprint(auth)
+    app.cli.add_command(set_password_command)
     with app.app_context():
         _ensure_database_schema(str(current_app.config["DATABASE"]))
+        _warn_blocked_default_passwords(str(current_app.config["DATABASE"]))
     app.before_request(_require_login)
 
 
