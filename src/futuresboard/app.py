@@ -14,6 +14,7 @@ import futuresboard.scraper
 from futuresboard import auth
 from futuresboard import blueprint
 from futuresboard import db
+from futuresboard import health
 from futuresboard.config import Config
 
 
@@ -47,6 +48,7 @@ def init_app(config: Config | None = None):
     app.before_request(clear_trailing)
     auth.init_app(app)
     app.register_blueprint(blueprint.app)
+    app.register_blueprint(health.ops)
 
     if config.DISABLE_AUTO_SCRAPE is False:
         futuresboard.scraper.auto_scrape(app)
