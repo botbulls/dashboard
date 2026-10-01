@@ -5,9 +5,6 @@ import logging
 import os
 import pathlib
 import secrets
-import socket
-
-import requests
 
 from flask import Flask
 from flask import redirect
@@ -17,6 +14,8 @@ import futuresboard.scraper
 from futuresboard import auth
 from futuresboard import blueprint
 from futuresboard import db
+from futuresboard import health
+from futuresboard import logs
 from futuresboard.config import Config
 
 
@@ -26,54 +25,22 @@ def clear_trailing():
         return redirect(rp[:-1])
 
 
-def _get_server_ip():
-    """Get the server's public IP address."""
-    # First, try to get from environment variable (useful for Docker/containers)
-    public_ip = os.environ.get('FUTURESBOARD_PUBLIC_IP')
-    if public_ip:
-        return public_ip.strip()
-    
-    # Try to get public IP from external services
-    services = [
-        'https://api.ipify.org',
-        'https://ifconfig.me/ip',
-        'https://icanhazip.com',
-        'https://checkip.amazonaws.com',
-    ]
-    
-    for service in services:
-        try:
-            response = requests.get(service, timeout=3)
-            if response.status_code == 200:
-                ip = response.text.strip()
-                # Validate it's a valid IP address
-                try:
-                    socket.inet_aton(ip)
-                    return ip
-                except socket.error:
-                    continue
-        except Exception:
-            continue
-    
-    # Fallback: try to get from socket (may be private IP in Docker)
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(1)
-        try:
-            s.connect(('8.8.8.8', 80))
-            ip = s.getsockname()[0]
-        except Exception:
-            ip = '127.0.0.1'
-        finally:
-            s.close()
-        return ip
-    except Exception:
-        return '127.0.0.1'
+def default_config_dir() -> pathlib.Path:
+    """Directorio de config: env FUTURESBOARD_CONFIG_DIR o ``./config`` (igual que el CLI).
+
+    Lo usan el CLI y el entrypoint WSGI (gunicorn), asi ambos leen el mismo config.json y
+    la misma DB.
+    """
+    env_dir = os.environ.get("FUTURESBOARD_CONFIG_DIR", "").strip()
+    if env_dir:
+        return pathlib.Path(env_dir).resolve()
+    return pathlib.Path.cwd() / "config"
 
 
 def init_app(config: Config | None = None):
+    logs.configure_logging()
     if config is None:
-        config = Config.from_config_dir(pathlib.Path.cwd())
+        config = Config.from_config_dir(default_config_dir())
 
     app = Flask(__name__)
     app.secret_key = os.environ.get("FUTURESBOARD_SECRET_KEY") or secrets.token_hex(32)
@@ -83,15 +50,23 @@ def init_app(config: Config | None = None):
     app.before_request(clear_trailing)
     auth.init_app(app)
     app.register_blueprint(blueprint.app)
+    app.register_blueprint(health.ops)
 
-    # Add context processor to pass server IP to all templates
-    @app.context_processor
-    def inject_server_ip():
-        return {'server_ip': _get_server_ip()}
+    _register_log_secrets(app, config)
 
     if config.DISABLE_AUTO_SCRAPE is False:
         futuresboard.scraper.auto_scrape(app)
 
-    app.logger.setLevel(logging.INFO)
-
     return app
+
+
+def _register_log_secrets(app: Flask, config: Config) -> None:
+    """Valores que nunca deben aparecer en los logs (ver futuresboard.logs.redact)."""
+    for value in (
+        config.API_KEY,
+        config.API_SECRET,
+        app.secret_key,
+        os.environ.get("FUTURESBOARD_SECRET_KEY"),
+        os.environ.get(health.ENV_METRICS_TOKEN),
+    ):
+        logs.register_secret(value)

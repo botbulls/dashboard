@@ -86,6 +86,13 @@ class Config(BaseModel):
             value = values["CONFIG_DIR"] / "futures.db"
         return value.resolve()
 
+    @validator("DISABLE_AUTO_SCRAPE", always=True)
+    @classmethod
+    def _validate_disable_auto_scrape(cls, value):
+        # config.json (DISABLE_AUTO_SCRAPE: true), env FUTURESBOARD_DISABLE_AUTO_SCRAPE=1
+        # o el flag --disable-auto-scraper del CLI (ver cli.py).
+        return bool(value) or _env_flag("FUTURESBOARD_DISABLE_AUTO_SCRAPE")
+
     @validator("BINANCE_TESTNET", always=True)
     @classmethod
     def _validate_binance_testnet(cls, value, values):
