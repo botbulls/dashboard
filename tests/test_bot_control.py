@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import pathlib
+import sqlite3
 from unittest import mock
 
 import hjson
 import pytest
 
+from futuresboard import auth
 from futuresboard import bot_control
 from futuresboard.app import init_app
 from futuresboard.config import Config
@@ -123,9 +125,18 @@ def app(tmp_path):
 
 @pytest.fixture
 def client(app):
+    # Ya no hay usuario sembrado: se crea el de la sesión de prueba.
+    auth.set_user_password(str(app.config["DATABASE"]), "cliente17", "clave-de-test")
+    with sqlite3.connect(str(app.config["DATABASE"])) as conn:
+        pw_hash = conn.execute(
+            "SELECT password_hash FROM users WHERE username = 'cliente17'"
+        ).fetchone()[0]
+    with app.app_context():
+        fingerprint = auth.password_fingerprint(pw_hash)
     c = app.test_client()
     with c.session_transaction() as sess:
         sess["username"] = "cliente17"
+        sess[auth.SESSION_FINGERPRINT_KEY] = fingerprint
         sess["csrf_token"] = "tok"
     return c
 
