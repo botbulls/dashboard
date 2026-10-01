@@ -67,7 +67,7 @@ Browser ──(sesión + CSRF)──> dashboard (Flask)
 
 Presets (históricos del guardian): bajo 4/1, medio 6/2, alto 8/3 (`twe_long`/`twe_short`).
 
-Códigos: 400 parámetro inválido · 403 CSRF · 409 graceful no soportado · 415 sin JSON ·
+Códigos: 400 parámetro inválido · 403 CSRF · 409 graceful no soportado o `short_mode` inválido · 415 sin JSON ·
 502 docker-proxy/contenedor · 503 panel no configurado.
 
 ### Lo que muestra el estado
@@ -109,6 +109,23 @@ vuelve al valor que tenía antes del graceful stop (guardado en
 `<data>/bot_control_state.json`, fuera del HJSON de forager) o, si no hay valor guardado, a
 `normal`. Así un START no pisa un `short_mode` puesto a mano (por ejemplo `tp_only`) y tampoco
 deja los shorts frenados después de un graceful stop.
+
+### Validación de `long_mode` / `short_mode`
+
+El dashboard normaliza y valida los modos con la misma tabla que forager
+(`forager_modes.py` en botbulls/passivbot#2): `strip().lower()` y alias
+`normal (n)`, `graceful_stop (gs, graceful-stop)`, `manual (m)`, `panic (p)`,
+`tp_only (t, tp-only)`. Ausente, `null` o `""` cuentan como `normal`. Se escribe y se muestra
+siempre el nombre canónico (por ejemplo `GS` pasa a `graceful_stop`). La tabla está copiada en
+`bot_control.MODE_ALIASES` y un test la fija: si cambia en forager, hay que cambiarla acá.
+
+- START con un `short_mode` que forager rechaza (por ejemplo `off`, o un valor que no es texto
+  como `true`): 409, sin escribir la config ni reiniciar. Hay que corregir el HJSON a mano.
+- Graceful stop con un `short_mode` inválido: no se bloquea (el valor se pisa con
+  `graceful_stop`), pero no se guarda para restaurarlo; el próximo START pone `normal`.
+- Si `short_mode_before_stop` del estado local es inválido, START usa `normal`.
+- `/api/bot/status` no falla con un modo inválido: devuelve el valor crudo y el motivo en
+  `message`.
 
 ### Escritura del HJSON
 
