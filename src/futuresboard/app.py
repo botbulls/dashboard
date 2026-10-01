@@ -15,6 +15,7 @@ from futuresboard import auth
 from futuresboard import blueprint
 from futuresboard import db
 from futuresboard import health
+from futuresboard import logs
 from futuresboard.config import Config
 
 
@@ -37,6 +38,7 @@ def default_config_dir() -> pathlib.Path:
 
 
 def init_app(config: Config | None = None):
+    logs.configure_logging()
     if config is None:
         config = Config.from_config_dir(default_config_dir())
 
@@ -50,9 +52,21 @@ def init_app(config: Config | None = None):
     app.register_blueprint(blueprint.app)
     app.register_blueprint(health.ops)
 
+    _register_log_secrets(app, config)
+
     if config.DISABLE_AUTO_SCRAPE is False:
         futuresboard.scraper.auto_scrape(app)
 
-    app.logger.setLevel(logging.INFO)
-
     return app
+
+
+def _register_log_secrets(app: Flask, config: Config) -> None:
+    """Valores que nunca deben aparecer en los logs (ver futuresboard.logs.redact)."""
+    for value in (
+        config.API_KEY,
+        config.API_SECRET,
+        app.secret_key,
+        os.environ.get("FUTURESBOARD_SECRET_KEY"),
+        os.environ.get(health.ENV_METRICS_TOKEN),
+    ):
+        logs.register_secret(value)
