@@ -34,6 +34,11 @@ que el CLI. Se puede cambiar con `FUTURESBOARD_CONFIG_DIR`.
   `config.json`, o `futuresboard --disable-auto-scraper` (dev server).
 - `futuresboard --scrape-only` (cron) ya no arranca además el hilo en segundo plano.
   En Docker: `docker run --rm -v ./config:/usr/src/futuresboard/config <imagen> futuresboard --scrape-only`.
+  **Si el scrape corre por cron, el contenedor del dashboard tiene que llevar
+  `FUTURESBOARD_DISABLE_AUTO_SCRAPE=1`** (en `environment:` del compose). Si no, quedan dos scrapers
+  concurrentes sobre el mismo SQLite (borrado de posiciones/órdenes + inserts): un
+  `sqlite3.OperationalError: database is locked` no es `HTTPRequestError`, así que mata el hilo del
+  scraper dentro de gunicorn hasta el próximo reinicio (solo lo detectaría la alerta de edad del scrape).
 
 El servidor de desarrollo sigue disponible con `futuresboard` (útil en local).
 
