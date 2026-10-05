@@ -853,6 +853,7 @@
                     </div>
                     <div class="modal-footer">
                         <span class="small me-auto" data-bot-job="nota">No cierres esta página si podés; si la recargás, el progreso se retoma.</span>
+                        <button type="button" class="btn btn-danger btn-sm d-none" data-bot-job="apagar" disabled>Apagar</button>
                         <button type="button" class="btn btn-secondary btn-sm" data-bot-job="cerrar" disabled>Cerrar</button>
                     </div>
                 </div>
@@ -884,6 +885,10 @@
              const ESTADOS_PASO = { ok: 'listo', error: 'error', omitido: 'omitido', pendiente: 'pendiente', en_curso: 'en curso' };
              let jobId = null;       // job que muestra el modal
              let jobActivo = false;  // mientras sea true los botones quedan bloqueados
+             let jobCancelable = false;  // espera a forager: Apagar sigue disponible y la corta
+             let modalOculto = false;    // el modal se cerró con el job en curso (se sigue consultando)
+             const NOTA_EN_CURSO = 'No cierres esta página si podés; si la recargás, el progreso se retoma.';
+             const NOTA_CANCELABLE = 'La espera a forager es informativa: podés cerrar esta ventana o usar Apagar, que la corta.';
              let pollTimer = null;
              let ultimoEstadoAnunciado = '';
 
@@ -953,8 +958,15 @@
 
              function setButtonsDisabled(disabled) {
                  const bloquear = disabled || jobActivo;
-                 buttons.forEach((b) => { b.disabled = bloquear; });
+                 buttons.forEach((b) => {
+                     // Durante la espera a forager Apagar queda habilitado: el backend corta la espera.
+                     const apagarPermitido = !disabled && jobActivo && jobCancelable && b.getAttribute('data-bot-accion') === 'apagar';
+                     b.disabled = bloquear && !apagarPermitido;
+                 });
                  riesgoSelect.disabled = bloquear;
+             }
+             function actualizarBotones() {
+                 setButtonsDisabled(!lastStatus || !lastStatus.enabled);
              }
 
              function render(status) {
@@ -1129,6 +1141,14 @@
 
                  const resumenEl = jobQ('resumen');
                  const cerrar = jobQ('cerrar');
+                 const apagarBtn = jobQ('apagar');
+                 const cancelable = !terminado && job.cancelable === true;
+                 if (cancelable !== jobCancelable) {
+                     jobCancelable = cancelable;
+                     actualizarBotones();
+                 }
+                 apagarBtn.classList.toggle('d-none', !cancelable);
+                 apagarBtn.disabled = !cancelable;
                  if (terminado) {
                      const { tipo, msg } = mensajeFinal(job);
                      const d = job.resultado || {};
@@ -1140,16 +1160,24 @@
                  } else {
                      resumenEl.replaceChildren();
                      resumenEl.className = 'bot-job-resumen mt-3 d-none';
-                     cerrar.disabled = true;
+                     jobQ('nota').textContent = cancelable ? NOTA_CANCELABLE : NOTA_EN_CURSO;
+                     cerrar.disabled = !cancelable;
                  }
              }
 
              function terminarJob(job) {
                  jobActivo = false;
+                 jobCancelable = false;
                  clearTimeout(pollTimer);
                  pollTimer = null;
                  const { tipo, msg } = mensajeFinal(job);
                  aviso(tipo, msg);
+                 // Si el modal se había cerrado durante la espera, volver a mostrarlo con el resumen
+                 // (salvo que el usuario esté confirmando otra acción).
+                 if (modalOculto && !confirmEl.classList.contains('show')) {
+                     modalOculto = false;
+                     bootstrap.Modal.getOrCreateInstance(jobEl).show();
+                 }
                  cargarEstado();
              }
 
@@ -1204,6 +1232,8 @@
                  clearTimeout(pollTimer);
                  jobId = job.id;
                  jobActivo = job.estado === 'en_curso';
+                 jobCancelable = false;
+                 modalOculto = false;
                  ultimoEstadoAnunciado = '';
                  guardarJob(job.id);
                  setButtonsDisabled(true);
@@ -1216,13 +1246,50 @@
                  }
              }
 
+             function ocultarJobEnCurso() {
+                 // El job sigue en el servidor: se sigue consultando y al terminar se muestra el resumen.
+                 modalOculto = true;
+                 bootstrap.Modal.getOrCreateInstance(jobEl).hide();
+             }
+
+             jobQ('apagar').addEventListener('click', () => {
+                 if (!jobActivo || !jobCancelable) return;
+                 // Primero se cierra el modal de progreso (no se apilan modales) y después se confirma.
+                 jobEl.addEventListener('hidden.bs.modal', () => pedirConfirmacion('apagar'), { once: true });
+                 ocultarJobEnCurso();
+             });
+
+             // Si se cancela la confirmación con un job en curso oculto, volver a mostrar su progreso.
+             confirmEl.addEventListener('hidden.bs.modal', () => {
+                 if (pending && jobId && jobActivo && modalOculto) {
+                     modalOculto = false;
+                     bootstrap.Modal.getOrCreateInstance(jobEl).show();
+                 }
+             });
+
              jobQ('cerrar').addEventListener('click', () => {
-                 if (jobActivo) return;
+                 if (jobActivo) {
+                     if (jobCancelable) ocultarJobEnCurso();
+                     return;
+                 }
                  jobId = null;
                  guardarJob(null);
                  bootstrap.Modal.getOrCreateInstance(jobEl).hide();
                  cargarEstado();
              });
+
+             // La acción nueva no arrancó: si había un job en curso con el modal cerrado, se vuelve a él.
+             function volverAlJobOculto() {
+                 if (jobId && modalOculto) {
+                     jobActivo = true;
+                     modalOculto = false;
+                     bootstrap.Modal.getOrCreateInstance(jobEl).show();
+                     actualizarBotones();
+                     return;
+                 }
+                 jobActivo = false;
+                 cargarEstado();
+             }
 
              function ejecutar(p) {
                  jobActivo = true;
@@ -1249,16 +1316,14 @@
                              aviso('error', d.error || 'Ya hay una acción en curso.');
                              return pedirJob(d.job_id).then((job) => {
                                  if (job) mostrarJob(job);
-                                 else { jobActivo = false; cargarEstado(); }
+                                 else volverAlJobOculto();
                              });
                          }
-                         jobActivo = false;
                          throw new Error((d && d.error) || 'La acción falló.');
                      })
                      .catch((e) => {
-                         jobActivo = false;
                          aviso('error', e.message || 'La acción falló.');
-                         cargarEstado();
+                         volverAlJobOculto();
                      });
              }
 
