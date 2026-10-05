@@ -794,7 +794,7 @@
                 </li>
                 <li class="btn">
                     <button type="button" data-bot-accion="apagar">Apagar</button>
-                    <span class="nota d-block mt-1">Detiene el contenedor. Las posiciones y órdenes abiertas quedan en el exchange sin gestión.</span>
+                    <span class="nota d-block mt-1">Detiene passivbot, cancela TODAS las órdenes abiertas y cierra TODAS las posiciones a mercado. Irreversible.</span>
                 </li>
             </ul>
         </nav>
@@ -812,7 +812,7 @@
                         <p class="mb-2"><strong>Usted opera bajo su propio riesgo.</strong></p>
                         <div class="form-check d-none" data-bot-confirm="check-wrap">
                             <input class="form-check-input" type="checkbox" id="botActionConfirmCheck">
-                            <label class="form-check-label small" for="botActionConfirmCheck">Entiendo que las posiciones y órdenes abiertas quedan en el exchange sin gestión del bot.</label>
+                            <label class="form-check-label small" for="botActionConfirmCheck">Entiendo que se cierran TODAS las posiciones a mercado y se cancelan TODAS las órdenes abiertas en Binance Futures, y que no se puede deshacer.</label>
                         </div>
                     </div>
                     <div class="modal-footer">
@@ -839,6 +839,7 @@
              const confirmAccept = document.getElementById('botActionConfirmAccept');
              let pending = null;
              let lastStatus = null;
+             let avisoTimer = null;
 
              function csrfToken() {
                  const m = document.querySelector('meta[name="csrf-token"]');
@@ -850,13 +851,54 @@
                  const p = document.createElement('p');
                  p.textContent = msg;
                  respuesta.replaceChildren(p);
-                 setTimeout(limpiarAviso, 8000);
+                 clearTimeout(avisoTimer);
+                 avisoTimer = setTimeout(limpiarAviso, 8000);
              }
              function limpiarAviso() {
                  respuesta.replaceChildren();
                  respuesta.className = '';
              }
              respuesta.addEventListener('click', limpiarAviso);
+
+             // Resumen de Apagar: órdenes canceladas, posiciones cerradas, errores y lo que quedó abierto.
+             function avisoResumen(tipo, msg, r) {
+                 clearTimeout(avisoTimer);  // queda visible hasta que se haga click
+                 respuesta.className = tipo;
+                 const nodos = [];
+                 const add = (tag, texto) => {
+                     const el = document.createElement(tag);
+                     el.textContent = texto;
+                     nodos.push(el);
+                     return el;
+                 };
+                 const lista = (titulo, items) => {
+                     if (!items || !items.length) return;
+                     add('p', titulo);
+                     const ul = document.createElement('ul');
+                     items.forEach((t) => {
+                         const li = document.createElement('li');
+                         li.textContent = t;
+                         ul.appendChild(li);
+                     });
+                     nodos.push(ul);
+                 };
+                 add('p', msg);
+                 const canceladas = r.ordenes_canceladas || [];
+                 const cerradas = r.posiciones_cerradas || [];
+                 add('p', `Órdenes canceladas: ${canceladas.reduce((n, o) => n + (o.cantidad || 0), 0)} · posiciones cerradas: ${cerradas.length}`);
+                 lista('Canceladas:', canceladas.map((o) => `${o.symbol} (${o.tipo}): ${o.cantidad}`));
+                 lista('Cerradas:', cerradas.map((p) => `${p.symbol} ${p.lado} ${p.cantidad} (${p.modo}, ${p.ordenes} orden/es)`));
+                 const rest = r.restante || {};
+                 const quedan = [].concat(
+                     (rest.posiciones || []).map((p) => `Posición ${p.symbol} ${p.lado} ${p.cantidad}`),
+                     (rest.ordenes || []).map((o) => `Órdenes ${o.symbol}: ${o.cantidad}`),
+                     (rest.ordenes_algo || []).map((o) => `Órdenes condicionales ${o.symbol}: ${o.cantidad}`),
+                 );
+                 lista('QUEDÓ ABIERTO (revisar en Binance):', quedan);
+                 if (!r.completo && rest.verificado === false) add('p', 'No se pudo verificar el estado final en Binance: revisar a mano.');
+                 lista('Errores:', r.errores || []);
+                 respuesta.replaceChildren(...nodos);
+             }
 
              function setButtonsDisabled(disabled) {
                  buttons.forEach((b) => { b.disabled = disabled; });
@@ -933,7 +975,7 @@
                      url: '/api/bot/stop',
                      body: { modo: 'apagar' },
                      titulo: 'Confirmar apagado de passivbot',
-                     texto: 'Se detendrá el contenedor de passivbot. ATENCIÓN: las posiciones y órdenes abiertas quedan en el exchange SIN gestión (sin take profit ni recompras del bot).',
+                     texto: 'Se detendrá passivbot y después se cancelarán TODAS las órdenes abiertas (incluidas las condicionales) y se cerrarán TODAS las posiciones de USDⓈ-M Futures A MERCADO, en ambos lados. Es irreversible: el precio de cierre puede ser peor que el esperado (slippage) y se realizan las ganancias o pérdidas actuales.',
                      check: true,
                  }),
              };
@@ -965,6 +1007,13 @@
                          return r.json().then((d) => ({ ok: r.ok, d }));
                      })
                      .then(({ ok, d }) => {
+                         if (d && d.resumen) {
+                             const okCierre = ok && d.ok;
+                             avisoResumen(okCierre ? 'bien' : 'error',
+                                 okCierre ? 'passivbot detenido. Se cerraron todas las posiciones y órdenes.' : (d.error || 'Cierre parcial.'),
+                                 d.resumen);
+                             return;
+                         }
                          if (!ok || !d.ok) throw new Error(d.error || 'La acción falló.');
                          let msg = 'Acción aplicada.';
                          if (d.warning) msg += ' ' + d.warning;
