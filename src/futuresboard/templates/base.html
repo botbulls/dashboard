@@ -1156,7 +1156,11 @@
              function pedirJob(id) {
                  return fetch(`/api/bot/jobs/${encodeURIComponent(id)}`, { cache: 'no-cache', credentials: 'same-origin' })
                      .then((r) => {
-                         if (r.redirected) throw new Error('Sesión expirada: volvé a iniciar sesión.');
+                         if (r.redirected) {
+                             const err = new Error('Sesión expirada: volvé a iniciar sesión para ver el progreso.');
+                             err.sesion = true;
+                             throw err;
+                         }
                          if (r.status === 404) return null;
                          return r.json();
                      });
@@ -1183,8 +1187,15 @@
                          }
                      })
                      .catch((e) => {
+                         if (e && e.sesion) {
+                             // Sin sesión no se puede seguir: dejar cerrar el modal (la acción sigue en el servidor).
+                             jobQ('estado').textContent = e.message;
+                             jobQ('cerrar').disabled = false;
+                             jobActivo = false;
+                             return;
+                         }
                          // Un error de red no corta el seguimiento: se reintenta.
-                         jobQ('estado').textContent = (e && e.message) || 'Sin conexión con el dashboard: reintentando...';
+                         jobQ('estado').textContent = 'Sin conexión con el dashboard: reintentando...';
                          pollTimer = setTimeout(poll, 2000);
                      });
              }
