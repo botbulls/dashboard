@@ -458,17 +458,51 @@ def test_resumen_usa_telegram_real_con_prefijo(db_path, notifier_env, monkeypatc
 
 def test_main_once_deshabilitado_sale_sin_enviar(tmp_path, caplog):
     with caplog.at_level(logging.INFO):
-        assert notifier.main(["--once", "-c", str(tmp_path)]) == 0
+        assert notifier.main(["--once", "--db", str(tmp_path / "futures.db")]) == 0
     assert "deshabilitadas" in caplog.text
 
 
-def test_main_once_habilitado(tmp_path, tg_env, tg, notifier_env, monkeypatch):
-    (tmp_path / "config.json").write_text('{"api_key": "k", "api_secret": "s"}')
+def test_main_once_habilitado_sin_config_json(tmp_path, tg_env, tg, notifier_env, monkeypatch):
+    # Sin config.json (ni API keys de Binance): el notifier solo necesita la ruta de la DB.
     make_db(tmp_path / "futures.db").close()
     monkeypatch.delenv(bot_control.ENV_DOCKER_URL)
-    assert notifier.main(["--once", "-c", str(tmp_path)]) == 0
+    assert notifier.main(["--once", "--db", str(tmp_path / "futures.db")]) == 0
+    assert not (tmp_path / "config.json").exists()
     assert (tmp_path / notifier.STATE_FILE_NAME).exists()
     assert tg.calls == []                       # todo sano, sin resumen: nada que avisar
+
+
+def test_main_no_carga_config(tmp_path, tg_env, tg, notifier_env, monkeypatch):
+    from futuresboard import config as fb_config
+
+    def boom(*a, **k):
+        raise AssertionError("el notifier no debe cargar Config")
+
+    monkeypatch.setattr(fb_config.Config, "from_config_dir", boom)
+    make_db(tmp_path / "futures.db").close()
+    monkeypatch.delenv(bot_control.ENV_DOCKER_URL)
+    monkeypatch.setenv(notifier.ENV_DB_PATH, str(tmp_path / "futures.db"))
+    assert notifier.main(["--once"]) == 0
+    assert (tmp_path / notifier.STATE_FILE_NAME).exists()
+
+
+def test_main_db_solo_lectura_y_estado_aparte(tmp_path, tg_env, tg, notifier_env, monkeypatch):
+    # DB en un directorio de solo lectura (como un montaje :ro) y estado en otro volumen rw.
+    data = tmp_path / "data"
+    data.mkdir()
+    make_db(data / "futures.db").close()
+    state = tmp_path / "state" / "notifier_state.json"
+    state.parent.mkdir()
+    monkeypatch.delenv(bot_control.ENV_DOCKER_URL)
+    monkeypatch.setenv(notifier.ENV_STATE_PATH, str(state))
+    monkeypatch.setenv("NOTIFIER_DAILY_SUMMARY", "00:00")
+    os.chmod(data, 0o555)
+    try:
+        assert notifier.main(["--once", "--db", str(data / "futures.db")]) == 0
+    finally:
+        os.chmod(data, 0o755)
+    assert state.exists() and not (data / notifier.STATE_FILE_NAME).exists()
+    assert len(tg.texts) == 1 and "📊" in tg.texts[0]   # leyó la DB en solo lectura para el resumen
 
 
 def test_resumen_suma_ordenes_restantes_por_simbolo():

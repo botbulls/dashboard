@@ -1,6 +1,9 @@
 """Proceso opcional de alertas de salud y resumen diario por Telegram.
 
-Uso: ``python -m futuresboard.notifier [-c CONFIG_DIR] [--once]``
+Uso: ``python -m futuresboard.notifier [--db RUTA_DB] [--state RUTA_ESTADO] [--once]``
+
+No carga ``Config`` ni ``config.json`` (que tienen las API keys de Binance): la DB se indica con ``--db`` o
+``NOTIFIER_DB_PATH`` (default ``./config/futures.db``) y se abre en solo lectura.
 
 Cada ``NOTIFIER_INTERVAL`` segundos:
 - chequea el contenedor de passivbot via docker-socket-proxy (si FUTURESBOARD_DOCKER_URL está configurado),
@@ -9,8 +12,9 @@ Cada ``NOTIFIER_INTERVAL`` segundos:
   Solo avisa en las transiciones: un estado caído persistente no se repite cada ciclo.
 - una vez por día, a ``NOTIFIER_DAILY_SUMMARY`` (HH:MM, hora de Buenos Aires), manda el resumen de PnL.
 
-El estado (caído/ok por chequeo y fecha del último resumen) se guarda en ``notifier_state.json`` en el
-directorio de la DB, para que un reinicio del notifier no repita alertas ni el resumen del día.
+El estado (caído/ok por chequeo y fecha del último resumen) se guarda en ``--state`` /
+``NOTIFIER_STATE_PATH`` (default ``notifier_state.json`` junto a la DB), para que un reinicio del notifier
+no repita alertas ni el resumen del día.
 """
 from __future__ import annotations
 
@@ -44,6 +48,9 @@ except Exception:  # pragma: no cover - depende del entorno
     TZ = dt.timezone(dt.timedelta(hours=-3), "ART")
 
 STATE_FILE_NAME = "notifier_state.json"
+ENV_DB_PATH = "NOTIFIER_DB_PATH"
+ENV_STATE_PATH = "NOTIFIER_STATE_PATH"
+DEFAULT_DB_PATH = pathlib.Path("config") / "futures.db"
 # Mismo criterio que blueprint.py para el ingreso realizado.
 EXCLUDED_INCOME_TYPES = ("TRANSFER", "COIN_SWAP_DEPOSIT", "COIN_SWAP_WITHDRAW")
 
@@ -222,7 +229,8 @@ class Monitor:
                  bot_settings: Optional[bot_control.Settings] = None,
                  docker: Optional[bot_control.DockerClient] = None,
                  send: Optional[Callable[[str], bool]] = None,
-                 now: Optional[Callable[[], dt.datetime]] = None) -> None:
+                 now: Optional[Callable[[], dt.datetime]] = None,
+                 state_path: Optional[pathlib.Path] = None) -> None:
         self.db_path = pathlib.Path(db_path)
         self.settings = settings or NotifierSettings()
         self.bot_settings = bot_settings or bot_control.Settings()
@@ -231,7 +239,7 @@ class Monitor:
             self.docker = bot_control.DockerClient(self.bot_settings.docker_url)
         self.send = send or telegram_notify.send
         self.now = now or (lambda: dt.datetime.now(TZ))
-        self.state_path = self.db_path.parent / STATE_FILE_NAME
+        self.state_path = pathlib.Path(state_path) if state_path else self.db_path.parent / STATE_FILE_NAME
         self.state = self._load_state()
 
     def _load_state(self) -> Dict[str, Any]:
@@ -316,16 +324,17 @@ class Monitor:
         return sent
 
 
-def _db_path_from_config(config_dir: pathlib.Path) -> pathlib.Path:
-    from futuresboard.config import Config
-
-    return pathlib.Path(Config.from_config_dir(config_dir).DATABASE)
+def _env_path(name: str) -> Optional[pathlib.Path]:
+    raw = os.environ.get(name, "").strip()
+    return pathlib.Path(raw) if raw else None
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="futuresboard.notifier")
-    parser.add_argument("-c", "--config-dir", type=pathlib.Path, default=None,
-                        help="Directorio de config (default: ./config), igual que futuresboard.")
+    parser.add_argument("--db", type=pathlib.Path, default=None,
+                        help=f"Ruta de la DB (default: ${ENV_DB_PATH} o ./config/futures.db). Solo lectura.")
+    parser.add_argument("--state", type=pathlib.Path, default=None,
+                        help=f"Archivo de estado (default: ${ENV_STATE_PATH} o {STATE_FILE_NAME} junto a la DB).")
     parser.add_argument("--once", action="store_true", help="Un solo ciclo y salir.")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -337,10 +346,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         while True:
             time.sleep(3600)
 
-    config_dir = (args.config_dir or pathlib.Path.cwd() / "config").resolve()
-    monitor = Monitor(_db_path_from_config(config_dir))
-    log.info("Notifier iniciado: intervalo %ss, DB %s, passivbot %s.", monitor.settings.interval,
-             monitor.db_path, "sí" if monitor.docker is not None else "no (sin FUTURESBOARD_DOCKER_URL)")
+    db_path = (args.db or _env_path(ENV_DB_PATH) or pathlib.Path.cwd() / DEFAULT_DB_PATH).resolve()
+    state_path = args.state or _env_path(ENV_STATE_PATH)
+    monitor = Monitor(db_path, state_path=state_path.resolve() if state_path else None)
+    log.info("Notifier iniciado: intervalo %ss, DB %s, estado %s, passivbot %s.", monitor.settings.interval,
+             monitor.db_path, monitor.state_path,
+             "sí" if monitor.docker is not None else "no (sin FUTURESBOARD_DOCKER_URL)")
     while True:
         try:
             monitor.tick()
