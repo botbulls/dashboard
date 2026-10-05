@@ -1009,9 +1009,14 @@
                      .then(({ ok, d }) => {
                          if (d && d.resumen) {
                              const okCierre = ok && d.ok;
-                             avisoResumen(okCierre ? 'bien' : 'error',
-                                 okCierre ? 'passivbot detenido. Se cerraron todas las posiciones y órdenes.' : (d.error || 'Cierre parcial.'),
-                                 d.resumen);
+                             const algoSinVerificar = d.resumen.algo_verificado === false;
+                             let msgCierre = d.error || 'Cierre parcial.';
+                             if (okCierre) {
+                                 msgCierre = algoSinVerificar
+                                     ? 'passivbot detenido. Se cerraron las posiciones y órdenes normales, pero las órdenes condicionales NO se pudieron verificar (demo/testnet): revisar en Binance.'
+                                     : 'passivbot detenido. Se cerraron todas las posiciones y órdenes.';
+                             }
+                             avisoResumen(okCierre && !algoSinVerificar ? 'bien' : 'error', msgCierre, d.resumen);
                              return;
                          }
                          if (!ok || !d.ok) throw new Error(d.error || 'La acción falló.');
