@@ -9,13 +9,16 @@ corre en un hilo y responde 202 con su id. La UI consulta ``GET /api/bot/jobs/<i
   Binance. La espera informativa a forager corre sin el lock y es cancelable: una acción nueva
   (ej. Apagar) la corta en vez de esperar hasta 90 s.
 * El último job se persiste en el directorio de datos. Si el proceso se reinicia con un job en
-  curso, al arrancar se lo marca ``interrumpido`` (y se audita / notifica).
+  curso, al arrancar se lo marca ``interrumpido`` (y se audita / notifica). Mientras un job vive,
+  su hilo tiene un lock compartido sobre ``bot_job.alive``: si al arrancar otro proceso (ej. el
+  worker nuevo de un reload de gunicorn) lo encuentra tomado, el job sigue vivo y no se toca.
 
 No depende de Flask: el blueprint le pasa todo lo que necesita (store, usuario, logger, etc.).
 """
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import json
 import logging
 import os
@@ -36,8 +39,11 @@ from futuresboard import telegram_notify
 JOB_TTL_SECONDS = 3600
 MAX_JOBS = 50
 LAST_JOB_FILE_NAME = "bot_job_last.json"
-# Cuánto espera un POST nuevo a que termine la espera a forager que cancela.
-CANCEL_WAIT_SECONDS = 5.0
+ALIVE_FILE_NAME = "bot_job.alive"
+# Al cortar la espera a forager, cuánto espera un POST nuevo a que el job viejo suelte el lock
+# de acciones. El job lo suelta justo después de marcarse cancelable, así que alcanza con poco.
+LOCK_WAIT_SECONDS = 2.0
+LOCK_POLL_SECONDS = 0.02
 
 ESTADO_EN_CURSO = "en_curso"
 ESTADO_OK = "ok"
@@ -92,6 +98,7 @@ class Job(bot_control.Reporter):
         self.done = threading.Event()
         self._lock = threading.RLock()
         self._on_change = on_change
+        self._alive: Any = None  # fh con LOCK_SH sobre bot_job.alive mientras el job vive
 
     # -- Reporter -------------------------------------------------------------------
     def step(self, clave: str, estado: str, detalle: Optional[str] = None,
@@ -139,6 +146,37 @@ class Job(bot_control.Reporter):
             self.cancelable = False
         self._changed()
         self.done.set()
+        self.release_alive()
+
+    def hold_alive(self, path: Any) -> None:
+        """Lock compartido sobre ``bot_job.alive`` mientras el job vive (lo ve ``recover``)."""
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fh = open(path, "a")
+            fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
+        except OSError:  # pragma: no cover - sin lock solo se pierde la protección de recover
+            log.exception("No se pudo tomar %s", path)
+            return
+        self._alive = fh
+
+    def release_alive(self) -> None:
+        fh, self._alive = self._alive, None
+        if fh is None:
+            return
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fh.close()
+
+    def set_cancelable(self, value: bool) -> None:
+        with self._lock:
+            self.cancelable = value and self.estado == ESTADO_EN_CURSO
+        self._changed()
+
+    @property
+    def bloqueante(self) -> bool:
+        """En curso y sin cortar: impide lanzar otra acción (un job cortado ya no bloquea)."""
+        return self.activo and not self.cancel.is_set()
 
     @property
     def activo(self) -> bool:
@@ -169,6 +207,9 @@ class Job(bot_control.Reporter):
                 "pasos": [dict(p, **({"progreso": dict(p["progreso"])} if p.get("progreso") else {}))
                           for p in self.pasos],
                 "porcentaje": self.porcentaje(),
+                # True durante la espera a forager: se puede lanzar Apagar (corta la espera).
+                "cancelable": bool(self.cancelable and self.estado == ESTADO_EN_CURSO
+                                   and not self.cancel.is_set()),
                 "resultado": self.resultado,
                 "http_status": self.http_status,
                 "inicio": self.inicio,
@@ -215,6 +256,7 @@ class JobRegistry:
                  ttl_seconds: int = JOB_TTL_SECONDS, max_jobs: int = MAX_JOBS) -> None:
         self.store = store
         self.path = store.data_dir / LAST_JOB_FILE_NAME
+        self.alive_path = store.data_dir / ALIVE_FILE_NAME
         self.clock = clock
         self.ttl_seconds = ttl_seconds
         self.max_jobs = max_jobs
@@ -223,11 +265,15 @@ class JobRegistry:
         # Serializa los POST de este proceso: chequear activo + tomar lock + crear job.
         self.launch_lock = threading.Lock()
         self._persist_lock = threading.Lock()
+        self._latest_id: Optional[str] = None
 
     # -- persistencia ---------------------------------------------------------------
     def persist(self, job: Job) -> None:
         data = job.to_dict(internal=True)
         with self._persist_lock:
+            if job.id != self._latest_id:
+                # Un job cortado (ej. START tras un Apagar) termina después del nuevo: no pisarlo.
+                return
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_name(f".{self.path.name}.{job.id}.tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -240,14 +286,40 @@ class JobRegistry:
             return None
         return data if isinstance(data, dict) and valid_job_id(str(data.get("id") or "")) else None
 
+    def job_alive_elsewhere(self) -> bool:
+        """True si algún job sigue vivo (en este u otro proceso) o alguien tiene el lock de acciones.
+
+        Cada job vivo tiene un lock compartido sobre ``bot_job.alive`` (también durante la espera
+        a forager, que corre sin el lock de acciones). flock se libera solo si el proceso muere,
+        así que no depende de pids (que en un contenedor se reusan tras un reinicio).
+        """
+        handle = self.store.try_lock()
+        if handle is None:
+            return True
+        try:
+            self.alive_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.alive_path, "a") as fh:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    return True
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            return False
+        finally:
+            handle.release()
+
     def recover(self) -> Optional[Dict[str, Any]]:
         """Al arrancar: un job persistido como en curso quedó cortado por un reinicio del proceso.
 
         Lo marca ``interrumpido`` (paso en curso -> error, pendientes -> omitido) y lo devuelve
-        para auditar / notificar. None si no había nada que recuperar.
+        para auditar / notificar. None si no había nada que recuperar o si el job sigue vivo en
+        otro proceso (ej. el worker viejo durante un reload de gunicorn): ese lo termina él.
         """
         data = self.load_persisted()
         if not data or data.get("estado") != ESTADO_EN_CURSO:
+            return None
+        if self.job_alive_elsewhere():
+            log.info("El job %s sigue en curso en otro proceso: no se marca interrumpido.", data.get("id"))
             return None
         motivo = "Interrumpido: el dashboard se reinició durante la acción."
         for paso in data.get("pasos") or []:
@@ -284,8 +356,9 @@ class JobRegistry:
             del self._jobs[finished.pop(0)]
 
     def active(self) -> Optional[Job]:
+        """Job en curso que bloquea otra acción (no cuenta uno cuya espera a forager se cortó)."""
         with self._lock:
-            return next((j for j in self._jobs.values() if j.activo), None)
+            return next((j for j in reversed(self._jobs.values()) if j.bloqueante), None)
 
     def get(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Snapshot del job (memoria, o el último persistido si coincide el id)."""
@@ -306,9 +379,12 @@ class JobRegistry:
 
     def create(self, accion: str, params: Dict[str, Any], usuario: str) -> Job:
         job = Job(accion, params, catalogo_de(accion), usuario, on_change=self.persist, clock=self.clock)
+        job.hold_alive(self.alive_path)
         with self._lock:
             self._purge()
             self._jobs[job.id] = job
+        with self._persist_lock:
+            self._latest_id = job.id
         self.persist(job)
         return job
 
@@ -347,29 +423,44 @@ def launch(registry: JobRegistry, action: str, params: Dict[str, Any], ctx: JobC
            work: Callable[[Job], Dict[str, Any]]) -> Job:
     """Crea y arranca el job. ``ActiveJobError`` si ya hay una acción en curso.
 
-    Si el job activo está en la espera a forager (sin lock), se la corta y se sigue.
+    Si el job activo está en la espera a forager (sin lock), se la corta y se sigue sin esperar a
+    que termine: el job cortado deja de bloquear y su final no pisa el persistido del nuevo.
     """
     accion = accion_de(action, params)
     with registry.launch_lock:
         active = registry.active()
+        cortado = False
         if active is not None and active.cancelable:
             active.cancel.set()
-            active.done.wait(CANCEL_WAIT_SECONDS)
-            active = registry.active()
+            active, cortado = None, True
         if active is not None:
             raise ActiveJobError(active.id)
-        handle = ctx.store.try_lock()
+        handle = _try_lock_wait(ctx.store, LOCK_WAIT_SECONDS if cortado else 0)
         if handle is None:
             # Otro proceso tiene el lock (o una acción vieja sigue corriendo).
             data = registry.load_persisted()
             raise ActiveJobError(data.get("id") if data and data.get("estado") == ESTADO_EN_CURSO else None)
         try:
             job = registry.create(accion, params, ctx.user)
-            _start_thread(lambda: _run(job, action, params, ctx, work, handle))
         except BaseException:
             handle.release()
             raise
+        try:
+            _start_thread(lambda: _run(job, action, params, ctx, work, handle))
+        except BaseException:
+            handle.release()
+            job.release_alive()
+            raise
     return job
+
+
+def _try_lock_wait(store: bot_control.Store, timeout: float) -> Optional[bot_control.LockHandle]:
+    deadline = time.monotonic() + timeout
+    while True:
+        handle = store.try_lock()
+        if handle is not None or time.monotonic() >= deadline:
+            return handle
+        time.sleep(LOCK_POLL_SECONDS)
 
 
 def _run(job: Job, action: str, params: Dict[str, Any], ctx: JobContext,
@@ -386,10 +477,12 @@ def _run(job: Job, action: str, params: Dict[str, Any], ctx: JobContext,
                     status, outcome = exc.status_code, "error"
                     payload = {**payload, "ok": False, "error": str(exc)}
         finally:
+            if outcome == "ok" and job.accion in ("start", "graceful"):
+                # Cancelable ANTES de soltar el lock: un Apagar que llegue en el medio no recibe 409.
+                job.set_cancelable(True)
             handle.release()
         if outcome == "ok" and job.accion in ("start", "graceful"):
             # Paso informativo, sin lock: otra acción lo puede cortar.
-            job.cancelable = True
             try:
                 bot_control.wait_for_forager(ctx.settings, bot_control.forager_warmup_seconds(),
                                              reporter=job, cancel=job.cancel)
@@ -398,7 +491,7 @@ def _run(job: Job, action: str, params: Dict[str, Any], ctx: JobContext,
                 status, outcome = exc.status_code, "error"
                 payload = {**payload, "ok": False, "error": str(exc)}
             finally:
-                job.cancelable = False
+                job.set_cancelable(False)
     except Exception:  # pragma: no cover - defensivo
         ctx.logger.exception("Error inesperado en el job %s", job.id)
         job.fail_current("Error interno.")

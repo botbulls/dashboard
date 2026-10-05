@@ -1210,9 +1210,28 @@ def wait_for_forager(settings: Settings, seconds: int, docker: Optional[DockerCl
                 info = docker.inspect(settings.container)
             except DockerError:
                 continue  # un corte breve del proxy no invalida la espera; la consulta final decide
+            if cancel is not None and cancel.is_set():
+                continue  # la cortó otra acción (ej. Apagar detuvo passivbot): no es un error
             if not info["running"]:
                 raise DockerError(f"passivbot se detuvo mientras forager arrancaba (estado {info['status']}).")
-    info = docker.inspect(settings.container)
+
+    def cortada() -> bool:
+        if cancel is not None and cancel.is_set():
+            rep.step("forager", PASO_OMITIDO, "Espera interrumpida por otra acción del panel.")
+            return True
+        return False
+
+    if cortada():
+        return PASO_OMITIDO
+    try:
+        info = docker.inspect(settings.container)
+    except DockerError:
+        if cortada():
+            return PASO_OMITIDO
+        raise
+    if not info["running"] and cortada():
+        # Otra acción (ej. Apagar) ya detuvo passivbot mientras se consultaba: no es un error.
+        return PASO_OMITIDO
     if not info["running"]:
         raise DockerError(f"passivbot se detuvo mientras forager arrancaba (estado {info['status']}).")
     rep.step("forager", PASO_OK, "passivbot sigue en ejecución; forager ya debería estar operando los pares.",

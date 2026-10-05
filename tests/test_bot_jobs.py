@@ -330,22 +330,83 @@ def test_warmup_env(monkeypatch):
         assert bot_control.forager_warmup_seconds() == expected
 
 
+def _esperar_forager(client, job_id):  # noqa: F811
+    deadline = time.monotonic() + 5
+    while True:
+        job = client.get(f"/api/bot/jobs/{job_id}").get_json()
+        if estados(job)["forager"] == "en_curso":
+            return job
+        assert time.monotonic() < deadline, job
+        time.sleep(0.01)
+
+
 def test_apagar_corta_la_espera_a_forager(client, env, docker, binance, monkeypatch):  # noqa: F811
     monkeypatch.setenv(bot_control.ENV_FORAGER_WARMUP, "30")
     monkeypatch.setattr(bot_control, "WARMUP_TICK_SECONDS", 0.02)
     first = post(client, "/api/bot/start", {"riesgo": "bajo"}, wait=False)
+    assert first.get_json()["job"]["cancelable"] is False
     job_id = first.get_json()["job_id"]
-    deadline = time.monotonic() + 5
-    while estados(client.get(f"/api/bot/jobs/{job_id}").get_json())["forager"] != "en_curso":
-        assert time.monotonic() < deadline
-        time.sleep(0.01)
+    start_job = _esperar_forager(client, job_id)
+    # La UI usa ``cancelable`` para dejar cerrar el modal y habilitar Apagar.
+    assert start_job["cancelable"] is True
+    assert client.get("/api/bot/jobs/activo").get_json()["job"]["cancelable"] is True
     binance.add_position("BTCUSDT", "1")
     resp = post(client, "/api/bot/stop", {"modo": "apagar"})
     assert resp.status_code == 200, resp.data
-    start_job = client.get(f"/api/bot/jobs/{job_id}").get_json()
-    assert start_job["estado"] == "ok"
+    assert resp.job["cancelable"] is False
+    start_job = wait_job(client, job_id)
+    assert start_job["estado"] == "ok" and start_job["cancelable"] is False
     assert paso(start_job, "forager")["estado"] == "omitido"
     assert docker.actions() == ["restart", "stop"]
+
+
+def test_apagar_no_espera_a_que_termine_el_start_cortado(client, app, env, docker, binance, monkeypatch):  # noqa: F811
+    """Proxy de Docker lento durante la espera: Apagar arranca igual (202), sin 409."""
+    monkeypatch.setenv(bot_control.ENV_FORAGER_WARMUP, "30")
+    monkeypatch.setattr(bot_control, "WARMUP_TICK_SECONDS", 0.02)
+    monkeypatch.setattr(bot_control, "WARMUP_CHECK_SECONDS", 0.05)
+    lento = threading.Event()
+    soltar = threading.Event()
+    en_inspect = threading.Event()
+    original = docker.request
+
+    def request(method, url, **kwargs):
+        if lento.is_set() and method == "GET" and url.endswith("/json") and threading.current_thread().name == "bot-job":
+            if not en_inspect.is_set():
+                en_inspect.set()
+                assert soltar.wait(10)
+        return original(method, url, **kwargs)
+
+    docker.request = request
+    data_dir = pathlib.Path(app.config["DATABASE"]).parent
+    start_id = post(client, "/api/bot/start", {"riesgo": "bajo"}, wait=False).get_json()["job_id"]
+    _esperar_forager(client, start_id)
+    lento.set()
+    assert en_inspect.wait(5)  # el hilo de START está trabado en docker.inspect
+    try:
+        t0 = time.monotonic()
+        resp = post(client, "/api/bot/stop", {"modo": "apagar"}, wait=False)
+        assert resp.status_code == 202, resp.data
+        assert time.monotonic() - t0 < jobs.LOCK_WAIT_SECONDS
+        apagar_id = resp.get_json()["job_id"]
+        # START sigue en curso (trabado) pero ya no bloquea: el activo es Apagar.
+        assert client.get(f"/api/bot/jobs/{start_id}").get_json()["estado"] == "en_curso"
+        assert client.get("/api/bot/jobs/activo").get_json()["job"]["id"] == apagar_id
+        apagar = wait_job(client, apagar_id)
+        assert apagar["estado"] == "ok", apagar
+    finally:
+        soltar.set()
+    start_job = wait_job(client, start_id)
+    assert start_job["estado"] == "ok" and paso(start_job, "forager")["estado"] == "omitido"
+    # El final del START cortado no pisa el persistido del Apagar.
+    persisted = json.loads((data_dir / jobs.LAST_JOB_FILE_NAME).read_text())
+    assert persisted["id"] == apagar_id and persisted["estado"] == "ok"
+
+
+def test_panel_tiene_apagar_en_el_modal_de_progreso(client):  # noqa: F811
+    html = client.get("/").get_data(as_text=True)
+    assert 'data-bot-job="apagar"' in html and 'data-bot-job="cerrar"' in html
+    assert "job.cancelable" in html
 
 
 # ---------------------------------------------------------------- telegram: una vez al terminar
@@ -381,28 +442,75 @@ def test_reinicio_marca_interrumpido(client, app, env, docker, monkeypatch):  # 
     monkeypatch.setattr(telegram_notify, "notify_bot_action", lambda *a, **k: notificaciones.append(a))
     gate = Gate(docker, "stop")
     data_dir = pathlib.Path(app.config["DATABASE"]).parent
+    path = data_dir / jobs.LAST_JOB_FILE_NAME
     try:
         first = post(client, "/api/bot/stop", {"modo": "apagar"}, wait=False)
         job_id = first.get_json()["job_id"]
         assert gate.entered.wait(5)
-        persisted = json.loads((data_dir / jobs.LAST_JOB_FILE_NAME).read_text())
+        snapshot = path.read_text()
+        persisted = json.loads(snapshot)
         assert persisted["id"] == job_id and persisted["estado"] == "en_curso"
-
-        # "Reinicio": un proceso nuevo arranca la app sobre el mismo directorio de datos.
-        app2 = _app_on(data_dir)
-        job = registry(app2).get(job_id)
-        assert job["estado"] == "interrumpido"
-        assert estados(job)["detener"] == "error" and "se reinició" in paso(job, "detener")["detalle"]
-        assert estados(job)["verificacion"] == "omitido"
-        assert "Binance" in job["resultado"]["error"]
-        assert "usuario" not in job and "pid" not in job
-        assert registry(app2).active() is None
-        assert audit_lines(app2)[-1]["result"] == "interrumpido"
-        assert notificaciones and notificaciones[-1][2] == "error"
-        assert notificaciones[-1][1] == {"modo": "apagar"}
     finally:
         gate.release.set()
     wait_job(client, job_id)
+    # "Reinicio": el proceso murió con el job a mitad (el archivo quedó en_curso y ya nadie tiene
+    # los locks) y un proceso nuevo arranca la app sobre el mismo directorio de datos.
+    path.write_text(snapshot)
+    notificaciones.clear()
+    app2 = _app_on(data_dir)
+    job = registry(app2).get(job_id)
+    assert job["estado"] == "interrumpido"
+    assert estados(job)["detener"] == "error" and "se reinició" in paso(job, "detener")["detalle"]
+    assert estados(job)["verificacion"] == "omitido"
+    assert "Binance" in job["resultado"]["error"]
+    assert "usuario" not in job and "pid" not in job
+    assert registry(app2).active() is None
+    assert audit_lines(app2)[-1]["result"] == "interrumpido"
+    assert len(notificaciones) == 1 and notificaciones[0][2] == "error"
+    assert notificaciones[0][1] == {"modo": "apagar"}
+
+
+def test_arranque_con_job_vivo_en_otro_proceso_no_lo_toca(client, app, env, docker, monkeypatch):  # noqa: F811
+    """Reload de gunicorn: el worker nuevo arranca mientras el viejo sigue con Apagar (con lock)."""
+    notificaciones = []
+    monkeypatch.setattr(telegram_notify, "notify_bot_action", lambda *a, **k: notificaciones.append(a[2]))
+    gate = Gate(docker, "stop")
+    data_dir = pathlib.Path(app.config["DATABASE"]).parent
+    try:
+        job_id = post(client, "/api/bot/stop", {"modo": "apagar"}, wait=False).get_json()["job_id"]
+        assert gate.entered.wait(5)
+        app2 = _app_on(data_dir)
+        persisted = json.loads((data_dir / jobs.LAST_JOB_FILE_NAME).read_text())
+        assert persisted["id"] == job_id and persisted["estado"] == "en_curso"
+        assert registry(app2).get(job_id) is None  # en curso en otro proceso: no hay final que mostrar
+        assert notificaciones == []
+        audit = data_dir / bot_control.AUDIT_LOG_NAME
+        assert not audit.exists() or all(line["result"] != "interrumpido" for line in audit_lines(app2))
+    finally:
+        gate.release.set()
+    assert wait_job(client, job_id)["estado"] == "ok"
+    assert json.loads((data_dir / jobs.LAST_JOB_FILE_NAME).read_text())["estado"] == "ok"
+    assert notificaciones == ["ok"]
+
+
+def test_arranque_durante_la_espera_a_forager_no_la_marca(client, app, env, docker, binance, monkeypatch):  # noqa: F811
+    """La espera a forager corre sin el lock de acciones: igual se detecta que el job sigue vivo."""
+    notificaciones = []
+    monkeypatch.setattr(telegram_notify, "notify_bot_action", lambda *a, **k: notificaciones.append(a[2]))
+    monkeypatch.setenv(bot_control.ENV_FORAGER_WARMUP, "30")
+    monkeypatch.setattr(bot_control, "WARMUP_TICK_SECONDS", 0.02)
+    data_dir = pathlib.Path(app.config["DATABASE"]).parent
+    job_id = post(client, "/api/bot/start", {"riesgo": "bajo"}, wait=False).get_json()["job_id"]
+    _esperar_forager(client, job_id)
+    handle = bot_control.Store(data_dir).try_lock()
+    assert handle is not None  # el lock de acciones está libre durante la espera
+    handle.release()
+    app2 = _app_on(data_dir)
+    assert json.loads((data_dir / jobs.LAST_JOB_FILE_NAME).read_text())["estado"] == "en_curso"
+    assert registry(app2).active() is None and notificaciones == []
+    assert post(client, "/api/bot/stop", {"modo": "apagar"}).status_code == 200
+    assert wait_job(client, job_id)["estado"] == "ok"
+    assert sorted(notificaciones) == ["ok", "ok"]
 
 
 def test_reinicio_sin_job_en_curso_no_hace_nada(tmp_path, monkeypatch):
