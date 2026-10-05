@@ -1600,8 +1600,9 @@ def bot_stop():
 
     return _run_bot_action(
         "stop", {"modo": modo}, validate,
-        lambda store, settings, binance, rep: bot_control.stop_bot(settings, store, modo, binance=binance,
-                                                                  reporter=rep),
+        lambda store, settings, binance, rep: bot_control.stop_bot(
+            settings, store, modo, binance=binance, reporter=rep
+        ),
     )
 
 
