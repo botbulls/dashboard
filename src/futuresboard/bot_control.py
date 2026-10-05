@@ -52,9 +52,27 @@ STOP_MODES = ("graceful", "apagar")
 
 MODE_NORMAL = "normal"
 MODE_GRACEFUL_STOP = "graceful_stop"
-# Valores de modo que significan "no abrir nuevas posiciones". Solo exponemos graceful_stop,
-# pero si alguien dejo un alias a mano en el HJSON tambien lo tratamos como stop.
-STOP_MODE_VALUES = {"graceful_stop", "gs", "graceful-stop"}
+
+# Alias de long_mode/short_mode -> nombre canonico. Es la misma tabla que MODE_ALIASES de
+# forager_modes.py en passivbot (botbulls/passivbot#2), que normaliza con strip().lower().
+# Si cambia alla, cambiar aca: tests/test_bot_control.py la fija como literal.
+MODE_ALIASES: Dict[str, str] = {
+    "n": "normal",
+    "normal": "normal",
+    "gs": "graceful_stop",
+    "graceful_stop": "graceful_stop",
+    "graceful-stop": "graceful_stop",
+    "m": "manual",
+    "manual": "manual",
+    "p": "panic",
+    "panic": "panic",
+    "t": "tp_only",
+    "tp_only": "tp_only",
+    "tp-only": "tp_only",
+}
+ACCEPTED_MODES = "normal (n), graceful_stop (gs, graceful-stop), manual (m), panic (p), tp_only (t, tp-only)"
+# Modos canonicos que significan "no abrir nuevas posiciones" (los alias ya vienen normalizados).
+STOP_MODE_VALUES = {MODE_GRACEFUL_STOP}
 
 STOP_TIMEOUT_SECONDS = 20
 HTTP_TIMEOUT_SECONDS = 10
@@ -87,6 +105,12 @@ class DisabledError(BotControlError):
 
 class ConfigError(BotControlError):
     status_code = 500
+
+
+class InvalidModeError(BotControlError):
+    """long_mode/short_mode con un valor que forager rechaza al arrancar."""
+
+    status_code = 409
 
 
 class DockerError(BotControlError):
@@ -694,9 +718,42 @@ def detect_preset(cfg: Dict[str, Any]) -> str:
     return "personalizado"
 
 
+def normalize_mode(value: Any, key: str = "mode") -> str:
+    """Normaliza long_mode/short_mode igual que forager y devuelve el nombre canonico.
+
+    None o "" -> "normal" (forager lo trata como ausente). Un valor desconocido o que no es
+    texto lanza InvalidModeError (409): con ese valor forager no arranca.
+    """
+    if value is None:
+        return MODE_NORMAL
+    if not isinstance(value, str):
+        raise InvalidModeError(
+            f"La config de forager tiene {key}={value!r} (tipo {type(value).__name__}), que forager "
+            f"rechaza al arrancar. Valores aceptados: {ACCEPTED_MODES}. No se modifico la config."
+        )
+    normalized = value.strip().lower()
+    if normalized == "":
+        return MODE_NORMAL
+    if normalized not in MODE_ALIASES:
+        raise InvalidModeError(
+            f"La config de forager tiene {key}={value!r}, que forager rechaza al arrancar. "
+            f"Valores aceptados: {ACCEPTED_MODES}. No se modifico la config."
+        )
+    return MODE_ALIASES[normalized]
+
+
 def _mode(cfg: Dict[str, Any], side: str) -> str:
-    value = cfg.get(f"{side}_mode")
-    return str(value) if value not in (None, "") else MODE_NORMAL
+    return normalize_mode(cfg.get(f"{side}_mode"), f"{side}_mode")
+
+
+def _saved_short_mode(value: Any) -> Optional[str]:
+    """short_mode_before_stop del estado local, normalizado. None si falta o es invalido."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return normalize_mode(value, "short_mode_before_stop")
+    except InvalidModeError:
+        return None
 
 
 # --------------------------------------------------------------------------------------
@@ -785,9 +842,15 @@ def get_status(settings: Settings, docker: Optional[DockerClient] = None) -> Dic
             riesgo=detect_preset(cfg),
             twe_long=cfg.get("twe_long"),
             twe_short=cfg.get("twe_short"),
-            long_mode=_mode(cfg, "long"),
-            short_mode=_mode(cfg, "short"),
         )
+        # Un modo invalido no rompe el status: se muestra el valor crudo y el motivo.
+        for side in ("long", "short"):
+            key = f"{side}_mode"
+            try:
+                out[key] = _mode(cfg, side)
+            except InvalidModeError as exc:
+                out[key] = str(cfg.get(key))
+                messages.append(str(exc).replace(" No se modifico la config.", ""))
     except BotControlError as exc:
         messages.append(str(exc))
 
@@ -861,12 +924,15 @@ def start_bot(settings: Settings, store: Store, riesgo: Any,
     cfg = read_forager_config(path)
     state = store.load_state()
     prev_state = dict(state)
+    # Valida antes de escribir nada: con un short_mode que forager rechaza, 409 sin tocar la
+    # config ni reiniciar (si no, el contenedor quedaria reiniciando en loop).
     current_short = _mode(cfg, "short")
     # Decision: short_mode se mantiene salvo que sea un modo de stop; en ese caso se vuelve
-    # al valor previo al stop (guardado en el estado local) o a "normal".
+    # al valor previo al stop (guardado en el estado local) o a "normal". Si el valor guardado
+    # es invalido (estado viejo o editado a mano) se usa "normal": es estado del dashboard.
     if current_short in STOP_MODE_VALUES:
-        previous = state.get("short_mode_before_stop")
-        new_short = previous if isinstance(previous, str) and previous not in STOP_MODE_VALUES and previous else MODE_NORMAL
+        previous = _saved_short_mode(state.get("short_mode_before_stop"))
+        new_short = previous if previous and previous not in STOP_MODE_VALUES else MODE_NORMAL
     else:
         new_short = current_short
 
@@ -907,8 +973,15 @@ def stop_bot(settings: Settings, store: Store, modo: Any,
     cfg = read_forager_config(path)
     state = store.load_state()
     prev_state = dict(state)
-    current_short = _mode(cfg, "short")
-    if current_short not in STOP_MODE_VALUES:
+    # Decision: un short_mode invalido no bloquea el graceful stop (se va a pisar con
+    # graceful_stop), pero tampoco se guarda para restaurarlo en el proximo START.
+    try:
+        current_short: Optional[str] = _mode(cfg, "short")
+    except InvalidModeError:
+        current_short = None
+    if current_short is None:
+        state.pop("short_mode_before_stop", None)
+    elif current_short not in STOP_MODE_VALUES:
         state["short_mode_before_stop"] = current_short
 
     updates = {"long_mode": MODE_GRACEFUL_STOP, "short_mode": MODE_GRACEFUL_STOP}

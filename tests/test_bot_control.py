@@ -1039,3 +1039,115 @@ def test_lot_filters_fallback():
     f = bot_control.lot_filters(info, "X")
     assert str(f["step"]) == "0.01" and str(f["max"]) == "120" and str(f["min"]) == "0.01"
     assert bot_control.lot_filters(info, "Y") is None
+
+
+# ---------------------------------------------------------------- modos: misma tabla que forager
+
+
+def set_short_mode(path, value):
+    """Agrega short_mode al HJSON de prueba como texto crudo (respeta el tipo que parsea hjson)."""
+    path.write_text(FORAGER_HJSON.replace("n_longs: 4", f"n_longs: 4\n  short_mode: {value}"))
+
+
+def test_mode_aliases_match_forager():
+    # Copia literal de MODE_ALIASES de forager_modes.py (botbulls/passivbot#2), por codigo corto.
+    forager = {
+        "n": "n", "normal": "n",
+        "gs": "gs", "graceful_stop": "gs", "graceful-stop": "gs",
+        "m": "m", "manual": "m",
+        "p": "p", "panic": "p",
+        "t": "t", "tp_only": "t", "tp-only": "t",
+    }
+    canonical = {"n": "normal", "gs": "graceful_stop", "m": "manual", "p": "panic", "t": "tp_only"}
+    assert bot_control.MODE_ALIASES == {alias: canonical[code] for alias, code in forager.items()}
+    assert bot_control.STOP_MODE_VALUES == {"graceful_stop"}
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (None, "normal"), ("", "normal"), ("   ", "normal"), ("n", "normal"), ("NORMAL", "normal"),
+        ("GS", "graceful_stop"), (" Graceful_Stop ", "graceful_stop"), ("graceful-stop", "graceful_stop"),
+        ("M", "manual"), ("Panic", "panic"), ("t", "tp_only"), ("TP-ONLY", "tp_only"),
+    ],
+)
+def test_normalize_mode(value, expected):
+    assert bot_control.normalize_mode(value) == expected
+
+
+@pytest.mark.parametrize("value", ["off", "stop", "graceful", True, False, 0, 1.5, ["gs"], {"a": 1}])
+def test_normalize_mode_rejects_what_forager_rejects(value):
+    with pytest.raises(bot_control.InvalidModeError):
+        bot_control.normalize_mode(value, "short_mode")
+
+
+@pytest.mark.parametrize("raw", ["off", "true", "1", "foo"])
+def test_start_with_invalid_short_mode_returns_409_without_writing(client, app, env, docker, raw):
+    set_short_mode(env, raw)
+    original = env.read_text()
+    resp = post(client, "/api/bot/start", {"riesgo": "bajo"})
+    assert resp.status_code == 409, resp.data
+    assert "short_mode" in resp.get_json()["error"]
+    assert env.read_text() == original
+    assert list(env.parent.glob("new.json.bak-*")) == []
+    assert docker.actions() == []
+    assert audit_lines(app)[-1]["result"] == "error"
+
+
+@pytest.mark.parametrize("raw", ["GS", "Graceful_Stop", "gs", "graceful-stop"])
+def test_start_treats_stop_aliases_as_stop(client, app, env, docker, raw):
+    set_short_mode(env, raw)
+    state_path(app).write_text(json.dumps({"short_mode_before_stop": "tp_only"}))
+    assert post(client, "/api/bot/start", {"riesgo": "bajo"}).status_code == 200
+    assert hjson.loads(env.read_text())["short_mode"] == "tp_only"
+    assert "short_mode_before_stop" not in json.loads(state_path(app).read_text())
+
+
+def test_stop_does_not_save_stop_alias_as_previous(client, app, env, docker):
+    set_short_mode(env, "GS")
+    assert post(client, "/api/bot/stop", {"modo": "graceful"}).status_code == 200
+    assert "short_mode_before_stop" not in json.loads(state_path(app).read_text())
+    assert post(client, "/api/bot/start", {"riesgo": "bajo"}).status_code == 200
+    assert hjson.loads(env.read_text())["short_mode"] == "normal"
+
+
+def test_stop_saves_normalized_short_mode(client, app, env, docker):
+    set_short_mode(env, "TP-Only")
+    assert post(client, "/api/bot/stop", {"modo": "graceful"}).status_code == 200
+    assert json.loads(state_path(app).read_text())["short_mode_before_stop"] == "tp_only"
+
+
+def test_stop_graceful_with_invalid_short_mode_not_saved(client, app, env, docker):
+    set_short_mode(env, "off")
+    state_path(app).write_text(json.dumps({"short_mode_before_stop": "panic"}))
+    assert post(client, "/api/bot/stop", {"modo": "graceful"}).status_code == 200
+    cfg = hjson.loads(env.read_text())
+    assert cfg["long_mode"] == cfg["short_mode"] == "graceful_stop"
+    assert "short_mode_before_stop" not in json.loads(state_path(app).read_text())
+    assert post(client, "/api/bot/start", {"riesgo": "bajo"}).status_code == 200
+    assert hjson.loads(env.read_text())["short_mode"] == "normal"
+
+
+@pytest.mark.parametrize("saved", ["off", 7, None, "", "gs"])
+def test_start_with_invalid_saved_short_mode_falls_back_to_normal(client, app, env, docker, saved):
+    set_short_mode(env, "graceful_stop")
+    state_path(app).write_text(json.dumps({"short_mode_before_stop": saved}))
+    assert post(client, "/api/bot/start", {"riesgo": "bajo"}).status_code == 200
+    assert hjson.loads(env.read_text())["short_mode"] == "normal"
+
+
+def test_status_normalizes_modes(client, env, docker):
+    env.write_text(FORAGER_HJSON.replace("n_longs: 4", "n_longs: 4\n  long_mode: GS\n  short_mode: Graceful_Stop"))
+    data = client.get("/api/bot/status").get_json()
+    assert data["long_mode"] == data["short_mode"] == "graceful_stop"
+
+
+def test_status_with_invalid_mode_does_not_fail(client, env, docker):
+    set_short_mode(env, "off")
+    resp = client.get("/api/bot/status")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["riesgo"] == "medio"
+    assert data["long_mode"] == "normal"
+    assert data["short_mode"] == "off"
+    assert "short_mode" in data["message"] and "rechaza" in data["message"]
