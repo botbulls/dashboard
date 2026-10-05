@@ -17,6 +17,7 @@ import futuresboard.scraper
 from futuresboard import auth
 from futuresboard import blueprint
 from futuresboard import db
+from futuresboard import telegram_notify
 from futuresboard.config import Config
 
 
@@ -93,5 +94,6 @@ def init_app(config: Config | None = None):
         futuresboard.scraper.auto_scrape(app)
 
     app.logger.setLevel(logging.INFO)
+    telegram_notify.log_startup_state(app.logger)
 
     return app
