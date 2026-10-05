@@ -469,3 +469,43 @@ def test_main_once_habilitado(tmp_path, tg_env, tg, notifier_env, monkeypatch):
     assert notifier.main(["--once", "-c", str(tmp_path)]) == 0
     assert (tmp_path / notifier.STATE_FILE_NAME).exists()
     assert tg.calls == []                       # todo sano, sin resumen: nada que avisar
+
+
+def test_resumen_suma_ordenes_restantes_por_simbolo():
+    resumen = {
+        "posiciones_cerradas": [],
+        "ordenes_canceladas": [],
+        "errores": ["x"],
+        "restante": {
+            "posiciones": [{"symbol": "ETHUSDT", "lado": "SHORT", "cantidad": "1"}],
+            "ordenes": [{"symbol": "BTCUSDT", "cantidad": 12}, {"symbol": "ETHUSDT", "cantidad": 3}],
+            "ordenes_algo": [{"symbol": "BTCUSDT", "cantidad": 2}],
+            "verificado": True,
+        },
+    }
+    text = telegram_notify.format_resumen(resumen)
+    assert "Quedó abierto: 1 posiciones, 15 órdenes, 2 condicionales" in text
+    assert "órdenes BTCUSDT: 12" in text and "órdenes ETHUSDT: 3" in text
+    assert "condicionales BTCUSDT: 2" in text and "posición ETHUSDT SHORT 1" in text
+
+
+def test_resumen_sin_restante_no_muestra_quedo_abierto():
+    resumen = {"restante": {"posiciones": [], "ordenes": [], "ordenes_algo": [], "verificado": True}}
+    assert "Quedó abierto" not in telegram_notify.format_resumen(resumen)
+
+
+def test_evento_apagar_parcial_cuenta_ordenes_restantes(client, env, docker, binance, tg_env, tg):  # noqa: F811
+    binance.add_position("ETHUSDT", "-1")
+    binance.stuck.add(("ETHUSDT", "BOTH"))
+    binance.orders = [{"symbol": "BTCUSDT", "orderId": i} for i in range(12)]
+    real_request = binance.request
+
+    def cancel_sin_efecto(method, url, **kwargs):  # Binance confirma la cancelación pero quedan abiertas
+        if method == "DELETE" and "/fapi/v1/allOpenOrders" in url:
+            return FakeResponse(200, {"code": 200, "msg": "done"})
+        return real_request(method, url, **kwargs)
+
+    binance.request = cancel_sin_efecto
+    resp = post(client, "/api/bot/stop", {"modo": "apagar"})
+    assert resp.status_code == 502
+    assert "Quedó abierto: 1 posiciones, 12 órdenes" in tg.texts[0]

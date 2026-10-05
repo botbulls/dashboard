@@ -151,6 +151,13 @@ def _items(rows: Any, fmt: Callable[[Dict[str, Any]], str]) -> str:
     return "\n".join(lines)
 
 
+def _cantidad(row: Dict[str, Any]) -> int:
+    try:
+        return int(row.get("cantidad") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def format_resumen(resumen: Dict[str, Any]) -> str:
     cerradas = resumen.get("posiciones_cerradas") or []
     canceladas = resumen.get("ordenes_canceladas") or []
@@ -160,7 +167,7 @@ def format_resumen(resumen: Dict[str, Any]) -> str:
     if cerradas:
         out.append(_items(cerradas, lambda r: f"{esc(r.get('symbol'))} {esc(r.get('lado'))} "
                                               f"{esc(r.get('cantidad'))}"))
-    total_ord = sum(int(r.get("cantidad") or 0) for r in canceladas if isinstance(r, dict))
+    total_ord = sum(_cantidad(r) for r in canceladas if isinstance(r, dict))
     out.append(f"Órdenes canceladas: {total_ord}")
     if canceladas:
         out.append(_items(canceladas, lambda r: f"{esc(r.get('symbol'))} ({esc(r.get('tipo'))}): "
@@ -168,12 +175,22 @@ def format_resumen(resumen: Dict[str, Any]) -> str:
     out.append(f"Errores: {len(errores)}")
     if errores:
         out.append(_items([{"e": e} for e in errores], lambda r: esc(r["e"])))
-    quedan = (len(restante.get("posiciones") or []) + len(restante.get("ordenes") or [])
-              + len(restante.get("ordenes_algo") or []))
-    if quedan:
-        out.append(f"Quedó abierto: {len(restante.get('posiciones') or [])} posiciones, "
-                   f"{len(restante.get('ordenes') or [])} órdenes, "
-                   f"{len(restante.get('ordenes_algo') or [])} condicionales")
+    # restante.ordenes / ordenes_algo traen una fila por símbolo ({symbol, cantidad}): se suman las
+    # cantidades, no las filas. restante.posiciones trae una fila por posición.
+    pos_rest = [r for r in (restante.get("posiciones") or []) if isinstance(r, dict)]
+    ord_rest = [r for r in (restante.get("ordenes") or []) if isinstance(r, dict)]
+    algo_rest = [r for r in (restante.get("ordenes_algo") or []) if isinstance(r, dict)]
+    n_ord = sum(_cantidad(r) for r in ord_rest)
+    n_algo = sum(_cantidad(r) for r in algo_rest)
+    if pos_rest or n_ord or n_algo:
+        out.append(f"Quedó abierto: {len(pos_rest)} posiciones, {n_ord} órdenes, {n_algo} condicionales")
+        if pos_rest:
+            out.append(_items(pos_rest, lambda r: f"posición {esc(r.get('symbol'))} {esc(r.get('lado'))} "
+                                                  f"{esc(r.get('cantidad'))}"))
+        if ord_rest:
+            out.append(_items(ord_rest, lambda r: f"órdenes {esc(r.get('symbol'))}: {_cantidad(r)}"))
+        if algo_rest:
+            out.append(_items(algo_rest, lambda r: f"condicionales {esc(r.get('symbol'))}: {_cantidad(r)}"))
     if not restante.get("verificado", False):
         out.append("⚠️ Estado final sin verificar: revisar en Binance.")
     if resumen.get("algo_verificado") is False:
