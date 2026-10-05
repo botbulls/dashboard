@@ -823,6 +823,43 @@
             </div>
         </div>
 
+        <!-- Progreso de la acción del bot (paso a paso) -->
+        <style>
+         #botJobModal .bot-job-pasos { list-style: none; padding: 0; margin: 0; }
+         #botJobModal .bot-job-pasos li { display: flex; gap: .6rem; align-items: flex-start; padding: .35rem 0; border-bottom: 1px solid rgba(127, 127, 127, .2); }
+         #botJobModal .bot-job-pasos li:last-child { border-bottom: 0; }
+         #botJobModal .bot-job-icono { width: 1.25rem; flex: 0 0 1.25rem; text-align: center; font-weight: bold; }
+         #botJobModal .bot-job-pasos li[data-estado="ok"] .bot-job-icono { color: #198754; }
+         #botJobModal .bot-job-pasos li[data-estado="error"] .bot-job-icono { color: #dc3545; }
+         #botJobModal .bot-job-pasos li[data-estado="pendiente"],
+         #botJobModal .bot-job-pasos li[data-estado="omitido"] { opacity: .6; }
+         #botJobModal .bot-job-detalle { display: block; font-size: .8rem; opacity: .85; word-break: break-word; }
+         #botJobModal .bot-job-resumen ul { margin-bottom: .5rem; padding-left: 1.2rem; font-size: .85rem; }
+         #botJobModal .bot-job-resumen p { margin-bottom: .4rem; }
+        </style>
+        <div class="modal fade" id="botJobModal" tabindex="-1" aria-labelledby="botJobLabel" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false" style="z-index: 10050;">
+            <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="botJobLabel"><span data-bot-job="titulo">Acción en curso</span></h5>
+                    </div>
+                    <div class="modal-body">
+                        <div class="progress mb-2" style="height: 1.25rem;">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated" data-bot-job="barra" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-labelledby="botJobLabel">0%</div>
+                        </div>
+                        <p class="small mb-2" data-bot-job="estado" role="status" aria-live="polite">Iniciando...</p>
+                        <ol class="bot-job-pasos" data-bot-job="pasos" aria-label="Pasos de la acción"></ol>
+                        <div class="bot-job-resumen mt-3 d-none" data-bot-job="resumen" aria-live="polite"></div>
+                    </div>
+                    <div class="modal-footer">
+                        <span class="small me-auto" data-bot-job="nota">No cierres esta página si podés; si la recargás, el progreso se retoma.</span>
+                        <button type="button" class="btn btn-danger btn-sm d-none" data-bot-job="apagar" disabled>Apagar</button>
+                        <button type="button" class="btn btn-secondary btn-sm" data-bot-job="cerrar" disabled>Cerrar</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <script>
          (function () {
              const panel = document.getElementById('menu_admin');
@@ -840,6 +877,27 @@
              let pending = null;
              let lastStatus = null;
              let avisoTimer = null;
+             const jobEl = document.getElementById('botJobModal');
+             const jobQ = (k) => jobEl.querySelector(`[data-bot-job="${k}"]`);
+             const JOB_KEY = 'fbBotJobId';
+             const TITULOS = { start: 'START', graceful: 'Graceful stop', apagar: 'Apagar' };
+             const ICONOS = { ok: '✓', error: '✗', omitido: '–', pendiente: '·' };
+             const ESTADOS_PASO = { ok: 'listo', error: 'error', omitido: 'omitido', pendiente: 'pendiente', en_curso: 'en curso' };
+             let jobId = null;       // job que muestra el modal
+             let jobActivo = false;  // mientras sea true los botones quedan bloqueados
+             let jobCancelable = false;  // espera a forager: Apagar sigue disponible y la corta
+             let modalOculto = false;    // el modal se cerró con el job en curso (se sigue consultando)
+             const NOTA_EN_CURSO = 'No cierres esta página si podés; si la recargás, el progreso se retoma.';
+             const NOTA_CANCELABLE = 'La espera a forager es informativa: podés cerrar esta ventana o usar Apagar, que la corta.';
+             let pollTimer = null;
+             let ultimoEstadoAnunciado = '';
+
+             function guardarJob(id) {
+                 try { if (id) sessionStorage.setItem(JOB_KEY, id); else sessionStorage.removeItem(JOB_KEY); } catch (e) { /* sin storage */ }
+             }
+             function jobGuardado() {
+                 try { return sessionStorage.getItem(JOB_KEY); } catch (e) { return null; }
+             }
 
              function csrfToken() {
                  const m = document.querySelector('meta[name="csrf-token"]');
@@ -861,9 +919,7 @@
              respuesta.addEventListener('click', limpiarAviso);
 
              // Resumen de Apagar: órdenes canceladas, posiciones cerradas, errores y lo que quedó abierto.
-             function avisoResumen(tipo, msg, r) {
-                 clearTimeout(avisoTimer);  // queda visible hasta que se haga click
-                 respuesta.className = tipo;
+             function construirResumen(msg, r) {
                  const nodos = [];
                  const add = (tag, texto) => {
                      const el = document.createElement(tag);
@@ -897,12 +953,20 @@
                  lista('QUEDÓ ABIERTO (revisar en Binance):', quedan);
                  if (!r.completo && rest.verificado === false) add('p', 'No se pudo verificar el estado final en Binance: revisar a mano.');
                  lista('Errores:', r.errores || []);
-                 respuesta.replaceChildren(...nodos);
+                 return nodos;
              }
 
              function setButtonsDisabled(disabled) {
-                 buttons.forEach((b) => { b.disabled = disabled; });
-                 riesgoSelect.disabled = disabled;
+                 const bloquear = disabled || jobActivo;
+                 buttons.forEach((b) => {
+                     // Durante la espera a forager Apagar queda habilitado: el backend corta la espera.
+                     const apagarPermitido = !disabled && jobActivo && jobCancelable && b.getAttribute('data-bot-accion') === 'apagar';
+                     b.disabled = bloquear && !apagarPermitido;
+                 });
+                 riesgoSelect.disabled = bloquear;
+             }
+             function actualizarBotones() {
+                 setButtonsDisabled(!lastStatus || !lastStatus.enabled);
              }
 
              function render(status) {
@@ -924,6 +988,7 @@
                  const pendiente = status.config_pending === true ? ' (pendiente de reinicio)' : '';
                  estadoEl.textContent = `${c.name || 'passivbot'}: ${c.status || 'desconocido'} · riesgo ${riesgo}${pendiente} · ${modos}`;
                  setButtonsDisabled(false);
+                 if (jobActivo) return;  // con una acción en curso no se habilita nada
                  if (status.presets && status.presets[riesgo]) {
                      riesgoSelect.value = riesgo;
                  }
@@ -993,7 +1058,241 @@
                  if (pending && pending.check) confirmAccept.disabled = !confirmCheck.checked;
              });
 
+             // ---- Progreso de la acción (job) ----
+
+             function mensajeFinal(job) {
+                 const d = job.resultado || {};
+                 if (job.estado === 'interrumpido') return { tipo: 'error', msg: d.error || 'La acción se interrumpió.' };
+                 if (d.resumen) {
+                     const okCierre = job.estado === 'ok' && d.ok;
+                     const algoSinVerificar = d.resumen.algo_verificado === false;
+                     let msg = d.error || 'Cierre parcial.';
+                     if (okCierre) {
+                         msg = algoSinVerificar
+                             ? 'passivbot detenido. Se cerraron las posiciones y órdenes normales, pero las órdenes condicionales NO se pudieron verificar (demo/testnet): revisar en Binance.'
+                             : 'passivbot detenido. Se cerraron todas las posiciones y órdenes.';
+                     }
+                     return { tipo: okCierre && !algoSinVerificar ? 'bien' : 'error', msg };
+                 }
+                 if (job.estado !== 'ok' || !d.ok) return { tipo: 'error', msg: d.error || 'La acción falló.' };
+                 let msg = 'Acción aplicada.';
+                 if (d.warning) msg += ' ' + d.warning;
+                 return { tipo: 'bien', msg };
+             }
+
+             function renderJob(job) {
+                 const terminado = job.estado !== 'en_curso';
+                 jobQ('titulo').textContent = `${TITULOS[job.accion] || job.accion}${job.params && job.params.riesgo ? ' (riesgo ' + job.params.riesgo + ')' : ''}`;
+                 const pct = Math.max(0, Math.min(100, job.porcentaje || 0));
+                 const barra = jobQ('barra');
+                 barra.style.width = pct + '%';
+                 barra.textContent = pct + '%';
+                 barra.setAttribute('aria-valuenow', String(pct));
+                 barra.classList.toggle('progress-bar-animated', !terminado);
+                 barra.classList.toggle('progress-bar-striped', !terminado);
+                 barra.classList.toggle('bg-success', job.estado === 'ok');
+                 barra.classList.toggle('bg-danger', terminado && job.estado !== 'ok');
+
+                 const ol = jobQ('pasos');
+                 const items = (job.pasos || []).map((p) => {
+                     const li = document.createElement('li');
+                     li.setAttribute('data-estado', p.estado);
+                     const icono = document.createElement('span');
+                     icono.className = 'bot-job-icono';
+                     icono.setAttribute('aria-hidden', 'true');
+                     if (p.estado === 'en_curso') {
+                         const sp = document.createElement('span');
+                         sp.className = 'spinner-border spinner-border-sm';
+                         sp.setAttribute('role', 'presentation');
+                         icono.appendChild(sp);
+                     } else {
+                         icono.textContent = ICONOS[p.estado] || '·';
+                     }
+                     const cuerpo = document.createElement('span');
+                     const titulo = document.createElement('span');
+                     let texto = p.titulo;
+                     // La espera a forager muestra su cuenta regresiva en el detalle (no como x/y segundos).
+                     if (p.progreso && p.progreso.total && p.clave !== 'forager') texto += ` (${p.progreso.actual}/${p.progreso.total})`;
+                     titulo.textContent = texto;
+                     const sr = document.createElement('span');
+                     sr.className = 'visually-hidden';
+                     sr.textContent = ` — ${ESTADOS_PASO[p.estado] || p.estado}`;
+                     cuerpo.append(titulo, sr);
+                     if (p.detalle) {
+                         const det = document.createElement('span');
+                         det.className = 'bot-job-detalle';
+                         det.textContent = p.detalle;
+                         cuerpo.appendChild(det);
+                     }
+                     li.append(icono, cuerpo);
+                     return li;
+                 });
+                 ol.replaceChildren(...items);
+
+                 // aria-live: anunciar solo cambios de paso o el final, no cada segundo de la cuenta regresiva.
+                 const actual = (job.pasos || []).find((p) => p.estado === 'en_curso');
+                 const anuncio = terminado
+                     ? (job.estado === 'ok' ? 'Acción terminada.' : (job.estado === 'interrumpido' ? 'Acción interrumpida.' : 'La acción terminó con error.'))
+                     : (actual ? `En curso: ${actual.titulo}` : 'En curso...');
+                 if (anuncio !== ultimoEstadoAnunciado) {
+                     jobQ('estado').textContent = anuncio;
+                     ultimoEstadoAnunciado = anuncio;
+                 }
+
+                 const resumenEl = jobQ('resumen');
+                 const cerrar = jobQ('cerrar');
+                 const apagarBtn = jobQ('apagar');
+                 const cancelable = !terminado && job.cancelable === true;
+                 if (cancelable !== jobCancelable) {
+                     jobCancelable = cancelable;
+                     actualizarBotones();
+                 }
+                 apagarBtn.classList.toggle('d-none', !cancelable);
+                 apagarBtn.disabled = !cancelable;
+                 if (terminado) {
+                     const { tipo, msg } = mensajeFinal(job);
+                     const d = job.resultado || {};
+                     const nodos = d.resumen ? construirResumen(msg, d.resumen) : [(() => { const el = document.createElement('p'); el.textContent = msg; return el; })()];
+                     resumenEl.replaceChildren(...nodos);
+                     resumenEl.className = `bot-job-resumen mt-3 alert ${tipo === 'bien' ? 'alert-success' : 'alert-danger'}`;
+                     jobQ('nota').textContent = '';
+                     cerrar.disabled = false;
+                 } else {
+                     resumenEl.replaceChildren();
+                     resumenEl.className = 'bot-job-resumen mt-3 d-none';
+                     jobQ('nota').textContent = cancelable ? NOTA_CANCELABLE : NOTA_EN_CURSO;
+                     cerrar.disabled = !cancelable;
+                 }
+             }
+
+             function terminarJob(job) {
+                 jobActivo = false;
+                 jobCancelable = false;
+                 clearTimeout(pollTimer);
+                 pollTimer = null;
+                 const { tipo, msg } = mensajeFinal(job);
+                 aviso(tipo, msg);
+                 // Si el modal se había cerrado durante la espera, volver a mostrarlo con el resumen
+                 // (salvo que el usuario esté confirmando otra acción).
+                 if (modalOculto && !confirmEl.classList.contains('show')) {
+                     modalOculto = false;
+                     bootstrap.Modal.getOrCreateInstance(jobEl).show();
+                 }
+                 cargarEstado();
+             }
+
+             function pedirJob(id) {
+                 return fetch(`/api/bot/jobs/${encodeURIComponent(id)}`, { cache: 'no-cache', credentials: 'same-origin' })
+                     .then((r) => {
+                         if (r.redirected) {
+                             const err = new Error('Sesión expirada: volvé a iniciar sesión para ver el progreso.');
+                             err.sesion = true;
+                             throw err;
+                         }
+                         if (r.status === 404) return null;
+                         return r.json();
+                     });
+             }
+
+             function poll() {
+                 if (!jobId) return;
+                 const id = jobId;
+                 pedirJob(id)
+                     .then((job) => {
+                         if (id !== jobId) return;
+                         if (!job) {
+                             jobQ('estado').textContent = 'No se encontró la acción (vencida o reiniciada). Revisá el estado del bot.';
+                             jobQ('cerrar').disabled = false;
+                             jobActivo = false;
+                             cargarEstado();
+                             return;
+                         }
+                         renderJob(job);
+                         if (job.estado === 'en_curso') {
+                             pollTimer = setTimeout(poll, 1000);
+                         } else {
+                             terminarJob(job);
+                         }
+                     })
+                     .catch((e) => {
+                         if (e && e.sesion) {
+                             // Sin sesión no se puede seguir: dejar cerrar el modal (la acción sigue en el servidor).
+                             jobQ('estado').textContent = e.message;
+                             jobQ('cerrar').disabled = false;
+                             jobActivo = false;
+                             return;
+                         }
+                         // Un error de red no corta el seguimiento: se reintenta.
+                         jobQ('estado').textContent = 'Sin conexión con el dashboard: reintentando...';
+                         pollTimer = setTimeout(poll, 2000);
+                     });
+             }
+
+             function mostrarJob(job) {
+                 clearTimeout(pollTimer);
+                 jobId = job.id;
+                 jobActivo = job.estado === 'en_curso';
+                 jobCancelable = false;
+                 modalOculto = false;
+                 ultimoEstadoAnunciado = '';
+                 guardarJob(job.id);
+                 setButtonsDisabled(true);
+                 renderJob(job);
+                 bootstrap.Modal.getOrCreateInstance(jobEl).show();
+                 if (jobActivo) {
+                     pollTimer = setTimeout(poll, 1000);
+                 } else {
+                     terminarJob(job);
+                 }
+             }
+
+             function ocultarJobEnCurso() {
+                 // El job sigue en el servidor: se sigue consultando y al terminar se muestra el resumen.
+                 modalOculto = true;
+                 bootstrap.Modal.getOrCreateInstance(jobEl).hide();
+             }
+
+             jobQ('apagar').addEventListener('click', () => {
+                 if (!jobActivo || !jobCancelable) return;
+                 // Primero se cierra el modal de progreso (no se apilan modales) y después se confirma.
+                 jobEl.addEventListener('hidden.bs.modal', () => pedirConfirmacion('apagar'), { once: true });
+                 ocultarJobEnCurso();
+             });
+
+             // Si se cancela la confirmación con un job en curso oculto, volver a mostrar su progreso.
+             confirmEl.addEventListener('hidden.bs.modal', () => {
+                 if (pending && jobId && jobActivo && modalOculto) {
+                     modalOculto = false;
+                     bootstrap.Modal.getOrCreateInstance(jobEl).show();
+                 }
+             });
+
+             jobQ('cerrar').addEventListener('click', () => {
+                 if (jobActivo) {
+                     if (jobCancelable) ocultarJobEnCurso();
+                     return;
+                 }
+                 jobId = null;
+                 guardarJob(null);
+                 bootstrap.Modal.getOrCreateInstance(jobEl).hide();
+                 cargarEstado();
+             });
+
+             // La acción nueva no arrancó: si había un job en curso con el modal cerrado, se vuelve a él.
+             function volverAlJobOculto() {
+                 if (jobId && modalOculto) {
+                     jobActivo = true;
+                     modalOculto = false;
+                     bootstrap.Modal.getOrCreateInstance(jobEl).show();
+                     actualizarBotones();
+                     return;
+                 }
+                 jobActivo = false;
+                 cargarEstado();
+             }
+
              function ejecutar(p) {
+                 jobActivo = true;
                  setButtonsDisabled(true);
                  aviso('', 'Procesando...');
                  fetch(p.url, {
@@ -1004,28 +1303,47 @@
                  })
                      .then((r) => {
                          if (r.redirected) throw new Error('Sesión expirada: volvé a iniciar sesión.');
-                         return r.json().then((d) => ({ ok: r.ok, d }));
+                         return r.json().then((d) => ({ status: r.status, d }));
                      })
-                     .then(({ ok, d }) => {
-                         if (d && d.resumen) {
-                             const okCierre = ok && d.ok;
-                             const algoSinVerificar = d.resumen.algo_verificado === false;
-                             let msgCierre = d.error || 'Cierre parcial.';
-                             if (okCierre) {
-                                 msgCierre = algoSinVerificar
-                                     ? 'passivbot detenido. Se cerraron las posiciones y órdenes normales, pero las órdenes condicionales NO se pudieron verificar (demo/testnet): revisar en Binance.'
-                                     : 'passivbot detenido. Se cerraron todas las posiciones y órdenes.';
-                             }
-                             avisoResumen(okCierre && !algoSinVerificar ? 'bien' : 'error', msgCierre, d.resumen);
+                     .then(({ status, d }) => {
+                         if (status === 202 && d.job) {
+                             limpiarAviso();
+                             mostrarJob(d.job);
                              return;
                          }
-                         if (!ok || !d.ok) throw new Error(d.error || 'La acción falló.');
-                         let msg = 'Acción aplicada.';
-                         if (d.warning) msg += ' ' + d.warning;
-                         aviso('bien', msg);
+                         if (status === 409 && d.job_id) {
+                             // Ya hay una acción en curso: mostrar su progreso.
+                             aviso('error', d.error || 'Ya hay una acción en curso.');
+                             return pedirJob(d.job_id).then((job) => {
+                                 if (job) mostrarJob(job);
+                                 else volverAlJobOculto();
+                             });
+                         }
+                         throw new Error((d && d.error) || 'La acción falló.');
                      })
-                     .catch((e) => aviso('error', e.message || 'La acción falló.'))
-                     .finally(() => { cargarEstado(); });
+                     .catch((e) => {
+                         aviso('error', e.message || 'La acción falló.');
+                         volverAlJobOculto();
+                     });
+             }
+
+             // Al cargar la página: retomar la acción en curso (o mostrar una que quedó interrumpida).
+             function retomarJob() {
+                 return fetch('/api/bot/jobs/activo', { cache: 'no-cache', credentials: 'same-origin' })
+                     .then((r) => (r.ok && !r.redirected ? r.json() : null))
+                     .then((d) => {
+                         if (d && d.job) {
+                             mostrarJob(d.job);
+                             return;
+                         }
+                         const guardado = jobGuardado();
+                         if (!guardado) return;
+                         return pedirJob(guardado).then((job) => {
+                             if (job && job.estado !== 'ok') mostrarJob(job);
+                             else guardarJob(null);
+                         });
+                     })
+                     .catch(() => { /* sin sesión o sin red: no hay nada que retomar */ });
              }
 
              confirmAccept.addEventListener('click', () => {
@@ -1040,7 +1358,16 @@
              buttons.forEach((b) => {
                  b.addEventListener('click', () => {
                      if (b.disabled) return;
-                     pedirConfirmacion(b.getAttribute('data-bot-accion'));
+                     const accion = b.getAttribute('data-bot-accion');
+                     if (jobEl.classList.contains('show')) {
+                         // Apagar del panel con el modal de progreso abierto (espera a forager):
+                         // primero se cierra ese modal, igual que con su botón Apagar.
+                         if (!jobActivo || !jobCancelable) return;
+                         jobEl.addEventListener('hidden.bs.modal', () => pedirConfirmacion(accion), { once: true });
+                         ocultarJobEnCurso();
+                         return;
+                     }
+                     pedirConfirmacion(accion);
                  });
              });
 
@@ -1055,6 +1382,7 @@
              icon.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') toggle(e); });
 
              setButtonsDisabled(true);
+             retomarJob();
          })();
         </script>
 

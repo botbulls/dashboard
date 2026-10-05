@@ -85,6 +85,70 @@ LOCK_FILE_NAME = ".bot_control.lock"
 _CONTAINER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
+# --------------------------------------------------------------------------------------
+# Progreso por pasos
+# --------------------------------------------------------------------------------------
+
+# Estados de un paso.
+PASO_PENDIENTE = "pendiente"
+PASO_EN_CURSO = "en_curso"
+PASO_OK = "ok"
+PASO_ERROR = "error"
+PASO_OMITIDO = "omitido"
+
+# Catálogo de pasos por acción, en orden: (clave, título). START y Graceful stop comparten pasos.
+START_STEPS: List[tuple] = [
+    ("validar", "Validar configuración"),
+    ("backup", "Backup de la config"),
+    ("escribir", "Escribir config"),
+    ("docker", "Iniciar / reiniciar passivbot"),
+    ("verificar", "Verificar contenedor en ejecución"),
+    ("forager", "Esperando a forager"),
+]
+GRACEFUL_STEPS: List[tuple] = list(START_STEPS)
+APAGAR_STEPS: List[tuple] = [
+    ("detener", "Detener passivbot"),
+    ("verificar_detenido", "Verificar que passivbot está detenido"),
+    ("cancelar_ordenes", "Cancelar órdenes"),
+    ("cancelar_condicionales", "Cancelar órdenes condicionales"),
+    ("cerrar_posiciones", "Cerrar posiciones"),
+    ("verificacion", "Verificación final"),
+]
+
+# Espera informativa tras START/Graceful: forager tarda en abrir los pares (no bloquea más que esto).
+ENV_FORAGER_WARMUP = "FUTURESBOARD_FORAGER_WARMUP_SECONDS"
+DEFAULT_FORAGER_WARMUP_SECONDS = 90
+MAX_FORAGER_WARMUP_SECONDS = 900
+# Cada cuánto se actualiza la cuenta regresiva y cada cuánto se consulta el contenedor.
+WARMUP_TICK_SECONDS = 1.0
+WARMUP_CHECK_SECONDS = 5.0
+
+
+class Reporter:
+    """Recibe el avance de una acción paso a paso. La implementación por defecto no hace nada.
+
+    ``bot_control`` no conoce Flask ni los jobs: quien ejecuta la acción inyecta un reporter
+    (ver ``futuresboard.jobs``). ``actual``/``total`` son opcionales (ej. 2/5 símbolos).
+    """
+
+    def step(self, clave: str, estado: str, detalle: Optional[str] = None,
+             actual: Optional[int] = None, total: Optional[int] = None) -> None:
+        return None
+
+
+NULL_REPORTER = Reporter()
+
+
+def forager_warmup_seconds() -> int:
+    """Segundos de la espera informativa a forager (env, default 90, entre 0 y 900)."""
+    raw = os.environ.get(ENV_FORAGER_WARMUP, "").strip()
+    try:
+        value = int(raw) if raw else DEFAULT_FORAGER_WARMUP_SECONDS
+    except ValueError:
+        value = DEFAULT_FORAGER_WARMUP_SECONDS
+    return max(0, min(MAX_FORAGER_WARMUP_SECONDS, value))
+
+
 class BotControlError(Exception):
     """Error con mensaje apto para mostrar al usuario.
 
@@ -419,13 +483,17 @@ def _order_counts(orders: List[Dict[str, Any]]) -> Dict[str, int]:
     return counts
 
 
-def close_all_futures(client: BinanceFuturesClient) -> Dict[str, Any]:
+def close_all_futures(client: BinanceFuturesClient, reporter: Optional[Reporter] = None) -> Dict[str, Any]:
     """Cancela TODAS las órdenes abiertas (normales y algo/condicionales) y cierra TODAS las
     posiciones a mercado. Verifica con hasta ``CLOSE_ROUNDS`` rondas.
 
     Nunca lanza por errores de Binance: los junta en ``errores``. ``completo`` es True solo si la
     lectura final confirma 0 posiciones y 0 órdenes.
+
+    Progreso (``reporter``): la primera ronda reporta cancelar órdenes (x/y símbolos), cancelar
+    condicionales y cerrar posiciones (x/y); las lecturas siguientes son la verificación (ronda n/3).
     """
+    rep = reporter or NULL_REPORTER
     resumen: Dict[str, Any] = {
         "completo": False,
         "rondas": 0,
@@ -470,8 +538,15 @@ def close_all_futures(client: BinanceFuturesClient) -> Dict[str, Any]:
             positions, ok = [], False
         return ok, orders, algo, positions
 
-    def cancel(orders: List[Dict[str, Any]], tipo: str) -> None:
-        for symbol, count in sorted(_order_counts(orders).items()):
+    # Pasos de la primera ronda que terminaron con errores (se re-marcan ok si la verificación cierra todo).
+    con_errores: Dict[str, str] = {}
+
+    def cancel(orders: List[Dict[str, Any]], tipo: str, clave: Optional[str] = None) -> None:
+        counts = sorted(_order_counts(orders).items())
+        total, hechos, antes = len(counts), 0, len(errores)
+        if clave:
+            rep.step(clave, PASO_EN_CURSO, f"0/{total} símbolos", 0, total)
+        for symbol, count in counts:
             try:
                 if tipo == "algo":
                     client.cancel_all_algo_orders(symbol)
@@ -480,18 +555,55 @@ def close_all_futures(client: BinanceFuturesClient) -> Dict[str, Any]:
             except Exception as exc:
                 errores.append(f"Cancelar órdenes {tipo} de {symbol}: {_exc_text(exc)}")
                 continue
+            finally:
+                hechos += 1
+                if clave:
+                    rep.step(clave, PASO_EN_CURSO, f"{hechos}/{total} símbolos ({symbol})", hechos, total)
             resumen["ordenes_canceladas"].append({"symbol": symbol, "tipo": tipo, "cantidad": count})
+        if clave:
+            if not total:
+                rep.step(clave, PASO_OK, "No había órdenes abiertas.")
+            elif len(errores) > antes:
+                detalle = f"{total} símbolos, {len(errores) - antes} con error (se reintenta en la verificación)."
+                con_errores[clave] = detalle
+                rep.step(clave, PASO_ERROR, detalle, total, total)
+            else:
+                ordenes = sum(c for _, c in counts)
+                rep.step(clave, PASO_OK, f"{ordenes} órdenes en {total} símbolos.", total, total)
 
-    def close(positions: List[Dict[str, Any]]) -> None:
+    def close(positions: List[Dict[str, Any]], reportar: bool = False) -> None:
+        total, antes = len(positions), len(errores)
+        cerradas_antes = len(resumen["posiciones_cerradas"])
+        if reportar:
+            rep.step("cerrar_posiciones", PASO_EN_CURSO, f"0/{total} posiciones", 0, total)
+        try:
+            _close(positions, reportar, total)
+        finally:
+            if reportar:
+                cerradas = len(resumen["posiciones_cerradas"]) - cerradas_antes
+                if len(errores) > antes:
+                    detalle = (f"{cerradas}/{total} posiciones, {len(errores) - antes} errores "
+                               "(se reintenta en la verificación).")
+                    con_errores["cerrar_posiciones"] = detalle
+                    rep.step("cerrar_posiciones", PASO_ERROR, detalle, cerradas, total)
+                else:
+                    rep.step("cerrar_posiciones", PASO_OK, f"{cerradas}/{total} posiciones cerradas.", total, total)
+
+    def _close(positions: List[Dict[str, Any]], reportar: bool, total: int) -> None:
+        if not positions:
+            return
         if state["info"] is None:
             try:
                 state["info"] = client.exchange_info()
             except Exception as exc:
                 errores.append(f"Lectura de exchangeInfo: {_exc_text(exc)}")
                 return
-        for p in positions:
+        for idx, p in enumerate(positions, start=1):
             view = _pos_view(p)
             symbol, lado = view["symbol"], view["lado"]
+            if reportar:
+                rep.step("cerrar_posiciones", PASO_EN_CURSO, f"{idx}/{total} posiciones ({symbol} {lado})",
+                         idx - 1, total)
             amt = _dec(p.get("positionAmt"))
             filters = lot_filters(state["info"], symbol)
             if not filters:
@@ -519,12 +631,31 @@ def close_all_futures(client: BinanceFuturesClient) -> Dict[str, Any]:
             if residual > 0 and sent == len(chunks):
                 errores.append(f"{symbol} {lado}: residuo {_fmt(residual)} por debajo del step/mínimo.")
 
+    def algo_omitido() -> None:
+        rep.step("cancelar_condicionales", PASO_OMITIDO,
+                 "Endpoint de órdenes condicionales no disponible en demo/testnet: sin verificar.")
+
     def rounds() -> None:
         for ronda in range(1, CLOSE_ROUNDS + 2):
+            if ronda > 1:
+                vuelta = ronda - 1
+                rep.step("verificacion", PASO_EN_CURSO, f"Ronda {vuelta}/{CLOSE_ROUNDS}: leyendo Binance",
+                         vuelta - 1, CLOSE_ROUNDS)
             ok, orders, algo, positions = snapshot()
             if ok and not orders and not algo and not positions:
                 resumen["completo"] = True
                 resumen["restante"]["verificado"] = True
+                if ronda == 1:
+                    rep.step("cancelar_ordenes", PASO_OK, "No había órdenes abiertas.")
+                    if state["algo"]:
+                        rep.step("cancelar_condicionales", PASO_OK, "No había órdenes condicionales.")
+                    else:
+                        algo_omitido()
+                    rep.step("cerrar_posiciones", PASO_OK, "No había posiciones abiertas.")
+                for clave, detalle in con_errores.items():
+                    rep.step(clave, PASO_OK, f"{detalle} Resuelto al reintentar.")
+                rep.step("verificacion", PASO_OK, "Sin posiciones ni órdenes abiertas en Binance.",
+                         CLOSE_ROUNDS, CLOSE_ROUNDS)
                 return
             if ronda > CLOSE_ROUNDS:
                 resumen["restante"] = {
@@ -533,14 +664,28 @@ def close_all_futures(client: BinanceFuturesClient) -> Dict[str, Any]:
                     "ordenes_algo": [{"symbol": s, "cantidad": c} for s, c in sorted(_order_counts(algo).items())],
                     "verificado": ok,
                 }
+                if ok:
+                    detalle = (f"Quedaron abiertas {len(positions)} posiciones, {len(orders)} órdenes y "
+                               f"{len(algo)} órdenes condicionales tras {CLOSE_ROUNDS} rondas.")
+                else:
+                    detalle = "No se pudo leer el estado final en Binance: revisar a mano."
+                rep.step("verificacion", PASO_ERROR, detalle, CLOSE_ROUNDS, CLOSE_ROUNDS)
                 return
             resumen["rondas"] = ronda
+            if ronda > 1:
+                rep.step("verificacion", PASO_EN_CURSO,
+                         f"Ronda {ronda - 1}/{CLOSE_ROUNDS}: reintentando ({len(orders) + len(algo)} órdenes, "
+                         f"{len(positions)} posiciones)", ronda - 1, CLOSE_ROUNDS)
+            primera = ronda == 1
             # Primero las órdenes (para que ninguna reabra posición), después las posiciones.
-            cancel(orders, "normal")
-            cancel(algo, "algo")
-            if positions:
+            cancel(orders, "normal", "cancelar_ordenes" if primera else None)
+            if primera and not state["algo"]:
+                algo_omitido()
+            else:
+                cancel(algo, "algo", "cancelar_condicionales" if primera else None)
+            if positions or primera:
                 try:
-                    close(positions)
+                    close(positions, reportar=primera)
                 except Exception as exc:  # defensivo: un dato inesperado no debe perder el resumen
                     errores.append(f"Cierre de posiciones: {_exc_text(exc)}")
             if ROUND_PAUSE_SECONDS:
@@ -552,6 +697,7 @@ def close_all_futures(client: BinanceFuturesClient) -> Dict[str, Any]:
         errores.append(f"Cierre interrumpido: {_exc_text(exc)}")
         resumen["completo"] = False
         resumen["restante"]["verificado"] = False
+        rep.step("verificacion", PASO_ERROR, f"Cierre interrumpido: {_exc_text(exc)}")
     return resumen
 
 
@@ -585,7 +731,8 @@ def _prune_backups(path: pathlib.Path) -> None:
             old.unlink()
 
 
-def write_forager_config(path: pathlib.Path, updates: Dict[str, Any]) -> pathlib.Path:
+def write_forager_config(path: pathlib.Path, updates: Dict[str, Any],
+                         reporter: Optional[Reporter] = None) -> pathlib.Path:
     """Aplica ``updates`` al HJSON de forager de forma atomica.
 
     1. backup con timestamp (copia exacta, conserva comentarios),
@@ -596,6 +743,8 @@ def write_forager_config(path: pathlib.Path, updates: Dict[str, Any]) -> pathlib
     Devuelve la ruta del backup. Nota: el round-trip de hjson no conserva comentarios;
     el backup si. Si el original era JSON estricto se escribe JSON.
     """
+    rep = reporter or NULL_REPORTER
+    rep.step("backup", PASO_EN_CURSO)
     try:
         original_text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -618,6 +767,8 @@ def write_forager_config(path: pathlib.Path, updates: Dict[str, Any]) -> pathlib
     tmp_name = None
     try:
         shutil.copy2(path, backup)
+        rep.step("backup", PASO_OK, backup.name)
+        rep.step("escribir", PASO_EN_CURSO)
         fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(new_text)
@@ -638,6 +789,7 @@ def write_forager_config(path: pathlib.Path, updates: Dict[str, Any]) -> pathlib
         if tmp_name and os.path.exists(tmp_name):
             os.unlink(tmp_name)
     _prune_backups(path)
+    rep.step("escribir", PASO_OK, ", ".join(f"{k}={v}" for k, v in updates.items()))
     return backup
 
 
@@ -761,6 +913,22 @@ def _saved_short_mode(value: Any) -> Optional[str]:
 # --------------------------------------------------------------------------------------
 
 
+class LockHandle:
+    """Lock tomado con ``Store.try_lock``. ``release`` es idempotente."""
+
+    def __init__(self, fh: Any) -> None:
+        self._fh = fh
+
+    def release(self) -> None:
+        fh, self._fh = self._fh, None
+        if fh is None:
+            return
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            fh.close()
+
+
 class Store:
     def __init__(self, data_dir: pathlib.Path) -> None:
         self.data_dir = data_dir
@@ -778,6 +946,20 @@ class Store:
                 yield
             finally:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+    def try_lock(self) -> Optional["LockHandle"]:
+        """Toma el mismo lock que ``lock()`` sin esperar. None si otra acción lo tiene.
+
+        El handle se puede liberar desde otro hilo (el job que ejecuta la acción).
+        """
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        fh = open(self.lock_path, "a")
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.close()
+            return None
+        return LockHandle(fh)
 
     def load_state(self) -> Dict[str, Any]:
         try:
@@ -880,7 +1062,7 @@ def _start_or_restart(docker: DockerClient, name: str, info: Dict[str, Any]) -> 
 
 def _apply_and_restart(settings: Settings, store: Store, docker: DockerClient, info: Dict[str, Any],
                        path: pathlib.Path, updates: Dict[str, Any], prev_state: Dict[str, Any],
-                       new_state: Dict[str, Any]) -> tuple:
+                       new_state: Dict[str, Any], reporter: Optional[Reporter] = None) -> tuple:
     """Escribe la config + estado y reinicia passivbot. Si Docker rechaza la accion, revierte.
 
     - Error con respuesta HTTP (4xx/5xx, contenedor inexistente): Docker no aplico la accion, se
@@ -889,10 +1071,16 @@ def _apply_and_restart(settings: Settings, store: Store, docker: DockerClient, i
       (revertir podria dejar el archivo distinto de lo que forager ya cargo). El mensaje lo dice y
       /api/bot/status muestra "pendiente de reinicio" comparando mtime vs StartedAt.
     """
-    backup = write_forager_config(path, updates)
+    rep = reporter or NULL_REPORTER
+    rep.step("validar", PASO_OK, f"Contenedor {settings.container}: {info.get('status')}")
+    backup = write_forager_config(path, updates, rep)
     store.save_state(new_state)
     try:
-        return _start_or_restart(docker, settings.container, info), backup
+        rep.step("docker", PASO_EN_CURSO,
+                 f"{'Reiniciando' if info.get('running') else 'Iniciando'} {settings.container}")
+        action = _start_or_restart(docker, settings.container, info)
+        rep.step("docker", PASO_OK, f"docker {action}")
+        return action, backup
     except DockerError as exc:
         if exc.uncertain:
             err = DockerError(
@@ -912,10 +1100,31 @@ def _apply_and_restart(settings: Settings, store: Store, docker: DockerClient, i
         raise DockerError(f"{exc} Se restauro la config de forager; no se aplico ningun cambio.") from exc
 
 
-def start_bot(settings: Settings, store: Store, riesgo: Any,
-              docker: Optional[DockerClient] = None) -> Dict[str, Any]:
+def validate_riesgo(riesgo: Any) -> str:
     if not isinstance(riesgo, str) or riesgo not in RISK_PRESETS:
         raise ValueError("riesgo invalido: usar bajo, medio o alto")
+    return riesgo
+
+
+def validate_stop(settings: Settings, modo: Any) -> str:
+    """Validaciones sin I/O de STOP (enum y soporte de modos). Lanza antes de crear un job."""
+    if not isinstance(modo, str) or modo not in STOP_MODES:
+        raise ValueError("modo invalido: usar graceful o apagar")
+    settings.require_enabled()
+    if modo == "graceful" and not settings.modes_supported:
+        err = BotControlError(
+            "Graceful stop no disponible: forager no lee long_mode/short_mode del HJSON "
+            f"(habilitar {ENV_MODES_SUPPORTED}=1 solo con forager parcheado)."
+        )
+        err.status_code = 409
+        raise err
+    return modo
+
+
+def start_bot(settings: Settings, store: Store, riesgo: Any,
+              docker: Optional[DockerClient] = None, reporter: Optional[Reporter] = None) -> Dict[str, Any]:
+    validate_riesgo(riesgo)
+    (reporter or NULL_REPORTER).step("validar", PASO_EN_CURSO)
     settings.require_enabled()
     path = settings.require_config()
     docker = docker or DockerClient(settings.docker_url)
@@ -944,30 +1153,23 @@ def start_bot(settings: Settings, store: Store, riesgo: Any,
         "short_mode": new_short,
     }
     state.pop("short_mode_before_stop", None)
-    action, backup = _apply_and_restart(settings, store, docker, info, path, updates, prev_state, state)
+    action, backup = _apply_and_restart(settings, store, docker, info, path, updates, prev_state, state,
+                                        reporter)
     return {"ok": True, "riesgo": riesgo, "docker_action": action, "config": updates,
             "backup": backup.name}
 
 
 def stop_bot(settings: Settings, store: Store, modo: Any,
              docker: Optional[DockerClient] = None,
-             binance: Optional[BinanceFuturesClient] = None) -> Dict[str, Any]:
-    if not isinstance(modo, str) or modo not in STOP_MODES:
-        raise ValueError("modo invalido: usar graceful o apagar")
-    settings.require_enabled()
+             binance: Optional[BinanceFuturesClient] = None,
+             reporter: Optional[Reporter] = None) -> Dict[str, Any]:
+    validate_stop(settings, modo)
     docker = docker or DockerClient(settings.docker_url)
 
     if modo == "apagar":
-        return _apagar(settings, docker, binance)
+        return _apagar(settings, docker, binance, reporter)
 
-    if not settings.modes_supported:
-        err = BotControlError(
-            "Graceful stop no disponible: forager no lee long_mode/short_mode del HJSON "
-            f"(habilitar {ENV_MODES_SUPPORTED}=1 solo con forager parcheado)."
-        )
-        err.status_code = 409
-        raise err
-
+    (reporter or NULL_REPORTER).step("validar", PASO_EN_CURSO)
     path = settings.require_config()
     info = _inspect_existing(docker, settings.container)
     cfg = read_forager_config(path)
@@ -985,13 +1187,14 @@ def stop_bot(settings: Settings, store: Store, modo: Any,
         state["short_mode_before_stop"] = current_short
 
     updates = {"long_mode": MODE_GRACEFUL_STOP, "short_mode": MODE_GRACEFUL_STOP}
-    action, backup = _apply_and_restart(settings, store, docker, info, path, updates, prev_state, state)
+    action, backup = _apply_and_restart(settings, store, docker, info, path, updates, prev_state, state,
+                                        reporter)
     return {"ok": True, "modo": modo, "docker_action": action, "config": updates,
             "backup": backup.name}
 
 
 def _apagar(settings: Settings, docker: DockerClient,
-            binance: Optional[BinanceFuturesClient]) -> Dict[str, Any]:
+            binance: Optional[BinanceFuturesClient], reporter: Optional[Reporter] = None) -> Dict[str, Any]:
     """Detiene passivbot y después cancela todas las órdenes y cierra todas las posiciones.
 
     Si el stop falla (error HTTP, timeout, contenedor inexistente) o el contenedor sigue
@@ -999,14 +1202,19 @@ def _apagar(settings: Settings, docker: DockerClient,
     """
     if binance is None:
         raise DisabledError("Apagar requiere el cliente de Binance Futures configurado.")
+    rep = reporter or NULL_REPORTER
+    rep.step("detener", PASO_EN_CURSO, f"docker stop {settings.container} (hasta {STOP_TIMEOUT_SECONDS} s)")
     result = docker.stop(settings.container)
+    rep.step("detener", PASO_OK, "Detenido." if result == "ok" else "Ya estaba detenido.")
+    rep.step("verificar_detenido", PASO_EN_CURSO)
     info = docker.inspect(settings.container)
     if info["status"] == "not_found":
         raise DockerError(f"El contenedor {settings.container} no existe. No se cerró nada en Binance.")
     if info["running"]:
         raise DockerError("passivbot sigue corriendo después del stop. No se cerró nada en Binance.")
+    rep.step("verificar_detenido", PASO_OK, f"Estado: {info.get('status')}")
 
-    resumen = close_all_futures(binance)
+    resumen = close_all_futures(binance, rep)
     base = {"modo": "apagar", "docker_action": "stop", "docker_result": result, "resumen": resumen}
     if not resumen["completo"]:
         raise PartialCloseError(
@@ -1017,3 +1225,88 @@ def _apagar(settings: Settings, docker: DockerClient,
         base["warning"] = ("Órdenes condicionales sin verificar: el endpoint no existe en demo/testnet. "
                            "Revisar en Binance.")
     return {"ok": True, **base}
+
+
+# --------------------------------------------------------------------------------------
+# Después de START / Graceful stop: verificar el contenedor y esperar a forager
+# --------------------------------------------------------------------------------------
+
+
+def verify_running(settings: Settings, docker: Optional[DockerClient] = None,
+                   reporter: Optional[Reporter] = None) -> Dict[str, Any]:
+    """Confirma que passivbot quedó corriendo tras start/restart. DockerError si no."""
+    rep = reporter or NULL_REPORTER
+    docker = docker or DockerClient(settings.docker_url)
+    rep.step("verificar", PASO_EN_CURSO)
+    info = docker.inspect(settings.container)
+    if not info["running"]:
+        raise DockerError(
+            f"passivbot no quedó en ejecución tras el reinicio (estado {info['status']}). "
+            "La config ya quedó escrita: revisar los logs del contenedor."
+        )
+    rep.step("verificar", PASO_OK, f"{settings.container}: {info['status']}")
+    return info
+
+
+def wait_for_forager(settings: Settings, seconds: int, docker: Optional[DockerClient] = None,
+                     reporter: Optional[Reporter] = None, cancel: Any = None) -> str:
+    """Espera informativa mientras forager abre los pares (cuenta regresiva de ``seconds``).
+
+    No hace nada en passivbot: solo reporta el tiempo restante y consulta el contenedor cada
+    ``WARMUP_CHECK_SECONDS``. Si se cae, DockerError. ``cancel`` (``threading.Event``) corta la
+    espera (otra acción del panel la reemplaza) y el paso queda omitido. Devuelve el estado final
+    del paso ("ok" u "omitido").
+    """
+    rep = reporter or NULL_REPORTER
+    docker = docker or DockerClient(settings.docker_url)
+    total = max(0, int(seconds))
+    start = time.monotonic()
+    last_check = start
+    rep.step("forager", PASO_EN_CURSO, f"Forager abre los pares en ~{total} s.", 0, total)
+    while True:
+        elapsed = time.monotonic() - start
+        if elapsed >= total:
+            break
+        pause = min(WARMUP_TICK_SECONDS, total - elapsed) if WARMUP_TICK_SECONDS > 0 else total - elapsed
+        if cancel is not None:
+            if cancel.wait(pause):
+                rep.step("forager", PASO_OMITIDO, "Espera interrumpida por otra acción del panel.")
+                return PASO_OMITIDO
+        else:
+            time.sleep(pause)
+        elapsed = min(total, time.monotonic() - start)
+        restante = max(0, int(round(total - elapsed)))
+        rep.step("forager", PASO_EN_CURSO, f"Quedan ~{restante} s (estimado).", int(elapsed), total)
+        if time.monotonic() - last_check >= WARMUP_CHECK_SECONDS:
+            last_check = time.monotonic()
+            try:
+                info = docker.inspect(settings.container)
+            except DockerError:
+                continue  # un corte breve del proxy no invalida la espera; la consulta final decide
+            if cancel is not None and cancel.is_set():
+                continue  # la cortó otra acción (ej. Apagar detuvo passivbot): no es un error
+            if not info["running"]:
+                raise DockerError(f"passivbot se detuvo mientras forager arrancaba (estado {info['status']}).")
+
+    def cortada() -> bool:
+        if cancel is not None and cancel.is_set():
+            rep.step("forager", PASO_OMITIDO, "Espera interrumpida por otra acción del panel.")
+            return True
+        return False
+
+    if cortada():
+        return PASO_OMITIDO
+    try:
+        info = docker.inspect(settings.container)
+    except DockerError:
+        if cortada():
+            return PASO_OMITIDO
+        raise
+    if not info["running"] and cortada():
+        # Otra acción (ej. Apagar) ya detuvo passivbot mientras se consultaba: no es un error.
+        return PASO_OMITIDO
+    if not info["running"]:
+        raise DockerError(f"passivbot se detuvo mientras forager arrancaba (estado {info['status']}).")
+    rep.step("forager", PASO_OK, "passivbot sigue en ejecución; forager ya debería estar operando los pares.",
+             total, total)
+    return PASO_OK
