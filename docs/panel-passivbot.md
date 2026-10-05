@@ -63,12 +63,13 @@ Browser ──(sesión + CSRF)──> dashboard (Flask)
 |---|---|---|---|
 | GET | `/api/bot/status` | – | Estado del contenedor, preset de riesgo deducido (`bajo`/`medio`/`alto`/`personalizado`/`desconocido`), `twe_long`, `twe_short`, `long_mode`, `short_mode`, `enabled`, `modes_supported`, `config_pending`. |
 | POST | `/api/bot/start` | `{"riesgo": "bajo"\|"medio"\|"alto"}` | Escribe `twe_long`/`twe_short` del preset, `long_mode=normal`, `short_mode` (ver abajo); `start` si está detenido, `restart` si corre. |
-| POST | `/api/bot/stop` | `{"modo": "graceful"\|"apagar"}` | `graceful`: `long_mode=short_mode=graceful_stop` + start o restart (requiere `FUTURESBOARD_FORAGER_SUPPORTS_MODES=1`, si no 409). `apagar`: `stop` del contenedor, no toca la config. |
+| POST | `/api/bot/stop` | `{"modo": "graceful"\|"apagar"}` | `graceful`: `long_mode=short_mode=graceful_stop` + start o restart (requiere `FUTURESBOARD_FORAGER_SUPPORTS_MODES=1`, si no 409). `apagar`: `stop` del contenedor y después cancela **todas** las órdenes y cierra **todas** las posiciones de USDⓈ-M Futures a mercado (ver "Apagar" abajo); no toca la config. |
 
 Presets (históricos del guardian): bajo 4/1, medio 6/2, alto 8/3 (`twe_long`/`twe_short`).
 
-Códigos: 400 parámetro inválido · 403 CSRF · 409 graceful no soportado · 415 sin JSON ·
-502 docker-proxy/contenedor · 503 panel no configurado.
+Códigos: 400 parámetro inválido · 403 CSRF · 409 graceful no soportado / exchange distinto de
+Binance en Apagar · 415 sin JSON · 502 docker-proxy/contenedor o cierre parcial en Binance ·
+503 panel no configurado o faltan credenciales de Binance.
 
 ### Lo que muestra el estado
 
@@ -99,8 +100,75 @@ START y Graceful stop siguen este orden:
 
 El log de auditoría guarda el mensaje de error completo, incluida la restauración o el backup.
 
-**Apagar**: las posiciones y órdenes abiertas quedan en el exchange sin gestión del bot. La UI
-exige tildar esa advertencia antes de confirmar.
+### Apagar: detener y cerrar todo en Binance
+
+`POST /api/bot/stop {"modo": "apagar"}` hace, en este orden y bajo el lock de acciones:
+
+1. **Detiene passivbot** con el cliente Docker (`POST /containers/{name}/stop`, `304` = ya estaba
+   detenido) y confirma con `GET /containers/{name}/json` que no corre. Si el stop falla (error
+   HTTP, timeout, contenedor inexistente) o sigue corriendo: **502 y no se toca Binance**. Cerrar
+   con el bot vivo haría que vuelva a abrir.
+2. **Cancela todas las órdenes abiertas**: `GET /fapi/v1/openOrders` (sin `symbol`) y, por cada
+   símbolo con órdenes, `DELETE /fapi/v1/allOpenOrders?symbol=`. Lo mismo con las órdenes
+   condicionales (STOP/TP/trailing), que Binance movió al servicio algo:
+   `GET /fapi/v1/openAlgoOrders` + `DELETE /fapi/v1/algoOpenOrders?symbol=`.
+3. **Cierra todas las posiciones a mercado**: `GET /fapi/v2/positionRisk`, filas con
+   `positionAmt != 0`. `POST /fapi/v1/order` con `type=MARKET`, `side` opuesto al signo y
+   `newOrderRespType=RESULT`:
+   - one-way (`positionSide=BOTH`): `reduceOnly=true`, sin `positionSide`;
+   - hedge (`positionSide` LONG/SHORT): `positionSide` de la fila y **sin** `reduceOnly` (Binance
+     no lo acepta en hedge). Un símbolo con LONG y SHORT genera dos cierres.
+
+   El modo se deduce del `positionSide` de cada fila (no hace falta consultar
+   `/fapi/v1/positionSide/dual`). Cantidad = `abs(positionAmt)` redondeada **hacia abajo** al
+   `stepSize` de `MARKET_LOT_SIZE` (o `LOT_SIZE` si el primero falta o es 0), partida en varias
+   órdenes de a lo sumo `maxQty` (alineado al step). `exchangeInfo` se pide una sola vez.
+4. **Verifica**: hasta 3 rondas de leer → cancelar → cerrar, con 1 s entre rondas, y una lectura
+   final. Terminado = 0 posiciones, 0 órdenes y 0 órdenes algo.
+5. **Resumen** en la respuesta (`resumen`) y en la auditoría (`detail`): `ordenes_canceladas`
+   (símbolo, tipo `normal`/`algo`, cantidad), `posiciones_cerradas` (símbolo, lado, modo,
+   cantidad, órdenes enviadas), `errores`, `rondas`, `restante` (lo que quedó abierto +
+   `verificado`) y `algo_verificado`.
+
+Resultado: **200** si quedó todo en cero. **502** si quedó algo abierto o no se pudo verificar
+(passivbot igual queda detenido); el JSON trae `error` + `resumen.restante` y la UI lo muestra.
+
+Cliente Binance: las mismas credenciales y base URL que el scraper (`API_KEY`, `API_SECRET`,
+`API_BASE_URL` de `config.json`; con `BINANCE_TESTNET` / `FUTURESBOARD_BINANCE_TESTNET=1`
+apunta a `https://demo-fapi.binance.com`). Firma HMAC-SHA256 del query string, header
+`X-MBX-APIKEY`, `recvWindow=5000`, timeout de 10 s por request. Los errores muestran solo método,
+ruta y `code`/`msg` de Binance: nunca la URL firmada, la key ni el secret. Si `EXCHANGE` no es
+`binance` → 409; si faltan credenciales → 503 (en ambos casos antes de detener el contenedor).
+
+Decisiones:
+
+- Las órdenes se cancelan **antes** de cerrar posiciones, para que ninguna orden pendiente
+  reabra una posición mientras se cierra.
+- Si `GET /fapi/v1/openAlgoOrders` devuelve 404:
+  - **producción** (sin `BINANCE_TESTNET`): el endpoint existe en Binance, así que un 404 indica
+    base URL o proxy mal configurados. Las órdenes condicionales quedan **sin verificar** →
+    `restante.verificado=false` y **502** ("No se pudo verificar órdenes condicionales"). Se
+    reintenta la lectura en cada ronda;
+  - **demo/testnet** (`BINANCE_TESTNET` activo): se omiten, se anota en `errores` y el resumen trae
+    `algo_verificado=false`. Puede terminar en 200, pero con `warning` y la UI **no** dice "se
+    cerraron todas": avisa que las condicionales no se verificaron.
+- Una respuesta que no es la esperada **nunca** cuenta como "vacío": un 200 sin JSON (proxy, WAF,
+  página de mantenimiento) es error, y `openOrders`/`openAlgoOrders`/`positionRisk` tienen que
+  devolver una lista de objetos (un objeto u otra cosa es error). Esas lecturas fallidas dejan
+  `verificado=false` → 502.
+- Cualquier excepción inesperada durante el cierre (no solo errores de Binance) se anota en
+  `errores` por paso y el resumen parcial se conserva: la respuesta es 502 con `resumen` y la
+  auditoría lo registra, en lugar de un 500 "Error interno." sin detalle.
+- Un remanente menor que `minQty`/`stepSize` no se puede cerrar con `quantity` y queda en
+  `restante` → 502. En la práctica `positionAmt` siempre es múltiplo del step.
+- Un error en una orden o cancelación no corta el proceso: se anota en `errores` y la ronda
+  siguiente reintenta sobre lo que siga abierto.
+- Doble click: el lock de archivo serializa; la segunda ejecución encuentra todo cerrado
+  (`stop` → 304) y devuelve 200 con 0 acciones.
+
+La UI pide confirmación con un texto que aclara que se cierran **todas** las posiciones a mercado
+y se cancelan **todas** las órdenes (irreversible) y exige tildar el checkbox. Al terminar
+muestra el resumen (y, si fue parcial, lo que quedó abierto).
 
 ### Decisión sobre `short_mode` en START
 
@@ -130,6 +198,7 @@ falla (`EBUSY`) o passivbot sigue viendo el inode viejo.
 
 `<directorio de la DB>/bot_actions.log`, una línea JSON por acción:
 `ts`, `user`, `action`, `params`, `result` (`ok`/`rechazado`/`error`), `detail`, `remote_addr`.
+En Apagar, `detail` incluye `resumen: {...}` con el JSON del cierre.
 
 ## Variables de entorno
 
@@ -140,6 +209,10 @@ falla (`EBUSY`) o passivbot sigue viendo el inode viejo.
 | `FUTURESBOARD_FORAGER_CONFIG` | (vacía) | Ruta del HJSON de forager dentro del contenedor del dashboard. Sin ella START y graceful quedan deshabilitados; Apagar funciona. |
 | `FUTURESBOARD_FORAGER_SUPPORTS_MODES` | `0` | Habilita Graceful stop. Activar solo con forager parcheado (ver arriba). |
 | `FUTURESBOARD_SECRET_KEY` | aleatoria | Ya existente. Fijarla para que las sesiones (y el token CSRF) sobrevivan reinicios. |
+
+Apagar no agrega variables: usa `API_KEY` / `API_SECRET` / `API_BASE_URL` / `EXCHANGE` de
+`config.json` y el modo de prueba existente (`FUTURESBOARD_BINANCE_TESTNET`). La API key
+necesita permiso de **trading de futuros** (antes el dashboard solo leía).
 
 Se eliminan `FUTURESBOARD_ADMIN_URL`, `FUTURESBOARD_BOT_URL`, `FUTURESBOARD_BOT_SERVICE_NAME`
 y `FUTURESBOARD_BOT_SERVICE_PORT`.
@@ -216,7 +289,7 @@ Esa config no está incluida ni probada en este PR.
 ## Prerrequisitos de deploy (fuera del alcance de este PR)
 
 El panel le da a cualquier sesión logueada la capacidad de arrancar el bot con riesgo "alto" o
-apagarlo dejando posiciones sin gestión. Antes, eso requería además la contraseña de admin
+apagarlo cerrando todas las posiciones a mercado. Antes, eso requería además la contraseña de admin
 separada (que este PR elimina). Hoy la app tiene:
 
 - usuario por defecto `cliente17` / `123456` sembrado en `auth.py` (`_ensure_database_schema`),
