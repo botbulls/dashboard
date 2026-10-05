@@ -127,8 +127,8 @@ El log de auditoría guarda el mensaje de error completo, incluida la restauraci
    final. Terminado = 0 posiciones, 0 órdenes y 0 órdenes algo.
 5. **Resumen** en la respuesta (`resumen`) y en la auditoría (`detail`): `ordenes_canceladas`
    (símbolo, tipo `normal`/`algo`, cantidad), `posiciones_cerradas` (símbolo, lado, modo,
-   cantidad, órdenes enviadas), `errores`, `rondas` y `restante` (lo que quedó abierto +
-   `verificado`).
+   cantidad, órdenes enviadas), `errores`, `rondas`, `restante` (lo que quedó abierto +
+   `verificado`) y `algo_verificado`.
 
 Resultado: **200** si quedó todo en cero. **502** si quedó algo abierto o no se pudo verificar
 (passivbot igual queda detenido); el JSON trae `error` + `resumen.restante` y la UI lo muestra.
@@ -144,8 +144,21 @@ Decisiones:
 
 - Las órdenes se cancelan **antes** de cerrar posiciones, para que ninguna orden pendiente
   reabra una posición mientras se cierra.
-- Si `GET /fapi/v1/openAlgoOrders` devuelve 404 (endpoint no disponible en ese entorno, ej. demo),
-  se omiten las órdenes algo y se anota en `errores`; no fuerza el 502 por sí solo.
+- Si `GET /fapi/v1/openAlgoOrders` devuelve 404:
+  - **producción** (sin `BINANCE_TESTNET`): el endpoint existe en Binance, así que un 404 indica
+    base URL o proxy mal configurados. Las órdenes condicionales quedan **sin verificar** →
+    `restante.verificado=false` y **502** ("No se pudo verificar órdenes condicionales"). Se
+    reintenta la lectura en cada ronda;
+  - **demo/testnet** (`BINANCE_TESTNET` activo): se omiten, se anota en `errores` y el resumen trae
+    `algo_verificado=false`. Puede terminar en 200, pero con `warning` y la UI **no** dice "se
+    cerraron todas": avisa que las condicionales no se verificaron.
+- Una respuesta que no es la esperada **nunca** cuenta como "vacío": un 200 sin JSON (proxy, WAF,
+  página de mantenimiento) es error, y `openOrders`/`openAlgoOrders`/`positionRisk` tienen que
+  devolver una lista de objetos (un objeto u otra cosa es error). Esas lecturas fallidas dejan
+  `verificado=false` → 502.
+- Cualquier excepción inesperada durante el cierre (no solo errores de Binance) se anota en
+  `errores` por paso y el resumen parcial se conserva: la respuesta es 502 con `resumen` y la
+  auditoría lo registra, en lugar de un 500 "Error interno." sin detalle.
 - Un remanente menor que `minQty`/`stepSize` no se puede cerrar con `quantity` y queda en
   `restante` → 502. En la práctica `positionAmt` siempre es múltiplo del step.
 - Un error en una orden o cancelación no corta el proceso: se anota en `errores` y la ronda
