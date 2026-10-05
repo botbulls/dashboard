@@ -1571,7 +1571,8 @@ def _binance_futures_client() -> bot_control.BinanceFuturesClient:
         err.status_code = 409
         raise err
     return bot_control.BinanceFuturesClient(cfg.get("API_BASE_URL") or "", cfg.get("API_KEY") or "",
-                                            cfg.get("API_SECRET") or "")
+                                            cfg.get("API_SECRET") or "",
+                                            algo_optional=bool(cfg.get("BINANCE_TESTNET")))
 
 
 @app.route("/api/last-order", methods=["GET"])

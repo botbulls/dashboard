@@ -29,10 +29,20 @@ FORAGER_HJSON = """{
 class FakeResponse:
     def __init__(self, status_code, payload=None):
         self.status_code = status_code
-        self._payload = payload or {}
+        self._payload = {} if payload is None else payload
 
     def json(self):
         return self._payload
+
+
+class FakeTextResponse:
+    """200 sin JSON (proxy, WAF o página de mantenimiento)."""
+
+    def __init__(self, status_code=200):
+        self.status_code = status_code
+
+    def json(self):
+        raise ValueError("not json")
 
 
 class FakeDocker:
@@ -115,6 +125,8 @@ class FakeBinance:
         self.stuck = set()        # (symbol, positionSide) cuyas órdenes "se llenan" sin reducir
         self.algo_status = None   # código HTTP para GET openAlgoOrders (ej. 404)
         self.positions_status = None
+        self.non_json = set()     # paths que responden 200 con HTML/texto (no JSON)
+        self.as_dict = set()      # paths que responden 200 con un objeto JSON en vez de lista
         self.calls = []           # (method, path, params, headers)
 
     def add_position(self, symbol, amt, side=None):
@@ -138,6 +150,10 @@ class FakeBinance:
         params = dict(parse_qsl(u.query))
         self.calls.append((method, u.path, params, kwargs.get("headers") or {}))
         key = (method, u.path)
+        if u.path in self.non_json:
+            return FakeTextResponse(200)
+        if u.path in self.as_dict:
+            return FakeResponse(200, {"symbol": "BTCUSDT", "positionAmt": "1"})
         if key == ("GET", "/fapi/v1/openOrders"):
             return FakeResponse(200, list(self.orders))
         if key == ("GET", "/fapi/v1/openAlgoOrders"):
@@ -836,13 +852,112 @@ def test_apagar_reintenta_ordenes_que_reaparecen(client, env, docker, binance):
     assert resp.get_json()["resumen"]["rondas"] == 2
 
 
-def test_apagar_algo_no_disponible_no_bloquea(client, env, docker, binance):
+def test_apagar_algo_404_en_produccion_es_502(client, app, env, docker, binance):
+    # En producción el endpoint de órdenes algo existe: un 404 es mala config (URL/proxy), no
+    # "no hay órdenes condicionales". No se puede anunciar un cierre total.
+    binance.algo_status = 404
+    binance.add_position("BTCUSDT", "1")
+    resp = apagar(client)
+    assert resp.status_code == 502, resp.data
+    r = resp.get_json()["resumen"]
+    assert r["completo"] is False and r["restante"]["verificado"] is False
+    assert any("órdenes condicionales" in e for e in r["errores"])
+    assert binance.positions == {}  # las posiciones se cierran igual
+    # Se reintenta leer en cada ronda (no se "apaga" la verificación tras el primer 404).
+    algo_reads = [p for m, p in binance.paths() if p == "/fapi/v1/openAlgoOrders"]
+    assert len(algo_reads) == bot_control.CLOSE_ROUNDS + 1
+    assert audit_lines(app)[-1]["result"] == "error"
+
+
+def test_apagar_algo_404_en_testnet_se_omite_y_avisa(client, app, env, docker, binance):
+    app.config["BINANCE_TESTNET"] = True
     binance.algo_status = 404
     binance.add_position("BTCUSDT", "1")
     resp = apagar(client)
     assert resp.status_code == 200, resp.data
-    assert any("algo" in e for e in resp.get_json()["resumen"]["errores"])
+    data = resp.get_json()
+    assert data["resumen"]["algo_verificado"] is False
+    assert "condicionales" in data["warning"]
+    assert any("demo/testnet" in e for e in data["resumen"]["errores"])
     assert [p for m, p in binance.paths() if p == "/fapi/v1/openAlgoOrders"] == ["/fapi/v1/openAlgoOrders"]
+
+
+def test_apagar_normal_algo_verificado(client, env, docker, binance):
+    resp = apagar(client)
+    assert resp.get_json()["resumen"]["algo_verificado"] is True
+    assert "warning" not in resp.get_json()
+
+
+@pytest.mark.parametrize("path", ["/fapi/v2/positionRisk", "/fapi/v1/openOrders", "/fapi/v1/openAlgoOrders"])
+def test_apagar_200_sin_json_no_es_cierre_total(client, env, docker, binance, path):
+    binance.add_position("BTCUSDT", "1")
+    binance.non_json.add(path)
+    resp = apagar(client)
+    assert resp.status_code == 502, resp.data
+    r = resp.get_json()["resumen"]
+    assert r["completo"] is False and r["restante"]["verificado"] is False
+    assert any("sin JSON" in e for e in r["errores"])
+
+
+def test_cliente_200_sin_json_en_todo_no_da_falso_ok():
+    class AlwaysHtml:
+        def request(self, *a, **k):
+            return FakeTextResponse(200)
+
+    client = bot_control.BinanceFuturesClient(BINANCE_BASE, "k", "s", session=AlwaysHtml())
+    old = bot_control.ROUND_PAUSE_SECONDS
+    bot_control.ROUND_PAUSE_SECONDS = 0
+    try:
+        r = bot_control.close_all_futures(client)
+    finally:
+        bot_control.ROUND_PAUSE_SECONDS = old
+    assert r["completo"] is False and r["restante"]["verificado"] is False
+
+
+@pytest.mark.parametrize("path", ["/fapi/v2/positionRisk", "/fapi/v1/openOrders"])
+def test_apagar_objeto_en_vez_de_lista_es_502_con_resumen(client, app, env, docker, binance, path):
+    binance.orders = [{"symbol": "ETHUSDT"}]
+    binance.add_position("BTCUSDT", "1")
+    binance.as_dict.add(path)
+    resp = apagar(client)
+    assert resp.status_code == 502, resp.data
+    r = resp.get_json()["resumen"]
+    assert r["completo"] is False and r["restante"]["verificado"] is False
+    assert any("se esperaba una lista" in e for e in r["errores"])
+    assert "resumen" in audit_lines(app)[-1]["detail"]
+
+
+def test_apagar_error_inesperado_conserva_resumen(client, app, env, docker, binance, monkeypatch):
+    binance.orders = [{"symbol": "ETHUSDT"}]
+    binance.add_position("BTCUSDT", "1")
+
+    def boom(*a, **k):
+        raise AttributeError("'str' object has no attribute 'get'")
+
+    monkeypatch.setattr(bot_control, "split_quantity", boom)
+    resp = apagar(client)
+    assert resp.status_code == 502, resp.data
+    r = resp.get_json()["resumen"]
+    assert {(o["symbol"], o["tipo"]) for o in r["ordenes_canceladas"]} == {("ETHUSDT", "normal")}
+    assert any("error inesperado (AttributeError)" in e for e in r["errores"])
+    assert r["restante"]["posiciones"][0]["symbol"] == "BTCUSDT"
+    last = audit_lines(app)[-1]
+    assert last["result"] == "error" and "ETHUSDT" in last["detail"]
+
+
+def test_close_all_futures_red_de_seguridad(monkeypatch):
+    binance = FakeBinance()
+    binance.orders = [{"symbol": "ETHUSDT"}]
+    client = bot_control.BinanceFuturesClient(BINANCE_BASE, "k", "s", session=binance)
+    monkeypatch.setattr(bot_control, "ROUND_PAUSE_SECONDS", 0)
+
+    def boom(_):
+        raise KeyError("x")
+
+    monkeypatch.setattr(bot_control, "_order_counts", boom)
+    r = bot_control.close_all_futures(client)
+    assert r["completo"] is False and r["restante"]["verificado"] is False
+    assert any("Cierre interrumpido" in e for e in r["errores"])
 
 
 def test_apagar_sin_poder_verificar_es_502(client, env, docker, binance):

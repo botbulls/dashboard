@@ -225,7 +225,7 @@ class BinanceFuturesClient:
     """
 
     def __init__(self, base_url: str, api_key: str, api_secret: str,
-                 session: Optional[requests.Session] = None) -> None:
+                 session: Optional[requests.Session] = None, algo_optional: bool = False) -> None:
         if not base_url or not api_key or not api_secret:
             raise DisabledError(
                 "Apagar requiere API_KEY, API_SECRET y API_BASE_URL de Binance Futures configurados."
@@ -234,6 +234,9 @@ class BinanceFuturesClient:
         self._api_key = api_key
         self._api_secret = api_secret.encode("utf-8")
         self.http = session or requests.Session()
+        # Solo en demo/testnet: si el endpoint de órdenes algo no existe (404) se puede omitir.
+        # En producción el endpoint existe, así que un 404 es un error de configuración.
+        self.algo_optional = bool(algo_optional)
 
     def _request(self, method: str, path: str, params: Optional[Dict[str, Any]] = None,
                  signed: bool = True) -> Any:
@@ -264,16 +267,27 @@ class BinanceFuturesClient:
                 http_status=resp.status_code,
                 code=code,
             )
+        if data is None:
+            # 200 sin JSON (proxy, WAF, página de mantenimiento): no es una respuesta de Binance.
+            raise BinanceError(f"Binance respondió {resp.status_code} sin JSON válido en {method} {path}.",
+                               http_status=resp.status_code)
         return data
 
+    def _list(self, path: str) -> List[Dict[str, Any]]:
+        return _require_list(self._request("GET", path), path)
+
     def open_orders(self) -> List[Dict[str, Any]]:
-        return list(self._request("GET", "/fapi/v1/openOrders") or [])
+        return self._list("/fapi/v1/openOrders")
 
     def open_algo_orders(self) -> List[Dict[str, Any]]:
-        data = self._request("GET", "/fapi/v1/openAlgoOrders")
+        path = "/fapi/v1/openAlgoOrders"
+        data = self._request("GET", path)
         if isinstance(data, dict):  # defensivo: algunas variantes envuelven la lista
-            data = data.get("orders") or data.get("rows") or []
-        return list(data or [])
+            for key in ("orders", "rows"):
+                if isinstance(data.get(key), list):
+                    data = data[key]
+                    break
+        return _require_list(data, path)
 
     def cancel_all_open_orders(self, symbol: str) -> None:
         self._request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
@@ -282,11 +296,14 @@ class BinanceFuturesClient:
         self._request("DELETE", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
 
     def positions(self) -> List[Dict[str, Any]]:
-        rows = self._request("GET", "/fapi/v2/positionRisk") or []
+        rows = self._list("/fapi/v2/positionRisk")
         return [r for r in rows if _dec(r.get("positionAmt")) != 0]
 
     def exchange_info(self) -> Dict[str, Any]:
-        return self._request("GET", "/fapi/v1/exchangeInfo", signed=False) or {}
+        data = self._request("GET", "/fapi/v1/exchangeInfo", signed=False)
+        if not isinstance(data, dict):
+            raise BinanceError("Respuesta inesperada de Binance en GET /fapi/v1/exchangeInfo (no es un objeto).")
+        return data
 
     def market_order(self, symbol: str, side: str, quantity: str, position_side: Optional[str],
                      reduce_only: bool) -> Dict[str, Any]:
@@ -348,6 +365,19 @@ def split_quantity(amount: decimal.Decimal, step: decimal.Decimal, min_qty: deci
     return chunks, amount - sum(chunks, decimal.Decimal(0))
 
 
+def _require_list(data: Any, path: str) -> List[Dict[str, Any]]:
+    """Exige una lista de objetos: cualquier otra forma (dict, texto) no se toma como "vacío"."""
+    if not isinstance(data, list) or not all(isinstance(x, dict) for x in data):
+        raise BinanceError(f"Respuesta inesperada de Binance en GET {path} (se esperaba una lista de objetos).")
+    return data
+
+
+def _exc_text(exc: Exception) -> str:
+    if isinstance(exc, BinanceError):
+        return str(exc)
+    return f"error inesperado ({exc.__class__.__name__})"
+
+
 def _pos_view(p: Dict[str, Any]) -> Dict[str, Any]:
     amt = _dec(p.get("positionAmt"))
     pside = str(p.get("positionSide") or "BOTH").upper()
@@ -379,6 +409,8 @@ def close_all_futures(client: BinanceFuturesClient) -> Dict[str, Any]:
         "posiciones_cerradas": [],
         "errores": [],
         "restante": {"posiciones": [], "ordenes": [], "ordenes_algo": [], "verificado": False},
+        # False solo en demo/testnet cuando el endpoint de órdenes algo no existe y se omitió.
+        "algo_verificado": True,
     }
     errores: List[str] = resumen["errores"]
     state = {"algo": True, "info": None}
@@ -387,25 +419,30 @@ def close_all_futures(client: BinanceFuturesClient) -> Dict[str, Any]:
         ok = True
         try:
             orders = client.open_orders()
-        except BinanceError as exc:
-            errores.append(f"Lectura de órdenes: {exc}")
+        except Exception as exc:
+            errores.append(f"Lectura de órdenes: {_exc_text(exc)}")
             orders, ok = [], False
         algo: List[Dict[str, Any]] = []
         if state["algo"]:
             try:
                 algo = client.open_algo_orders()
-            except BinanceError as exc:
-                if exc.http_status == 404:
-                    # El endpoint no existe en este entorno (ej. demo): no hay órdenes algo que cerrar.
+            except Exception as exc:
+                if (isinstance(exc, BinanceError) and exc.http_status == 404
+                        and getattr(client, "algo_optional", False)):
+                    # Solo demo/testnet: el endpoint puede no existir ahí. Se omite, pero el
+                    # resumen lo marca (algo_verificado=False) para no anunciar un cierre total.
                     state["algo"] = False
-                    errores.append("Órdenes algo/condicionales: endpoint no disponible en este entorno (se omite).")
+                    resumen["algo_verificado"] = False
+                    errores.append("Órdenes condicionales: endpoint no disponible en demo/testnet "
+                                   "(se omiten, sin verificar).")
                 else:
-                    errores.append(f"Lectura de órdenes algo: {exc}")
+                    # En producción el endpoint existe: un 404 (o cualquier fallo) queda sin verificar.
+                    errores.append(f"No se pudo verificar órdenes condicionales: {_exc_text(exc)}")
                     ok = False
         try:
             positions = client.positions()
-        except BinanceError as exc:
-            errores.append(f"Lectura de posiciones: {exc}")
+        except Exception as exc:
+            errores.append(f"Lectura de posiciones: {_exc_text(exc)}")
             positions, ok = [], False
         return ok, orders, algo, positions
 
@@ -416,8 +453,8 @@ def close_all_futures(client: BinanceFuturesClient) -> Dict[str, Any]:
                     client.cancel_all_algo_orders(symbol)
                 else:
                     client.cancel_all_open_orders(symbol)
-            except BinanceError as exc:
-                errores.append(f"Cancelar órdenes {tipo} de {symbol}: {exc}")
+            except Exception as exc:
+                errores.append(f"Cancelar órdenes {tipo} de {symbol}: {_exc_text(exc)}")
                 continue
             resumen["ordenes_canceladas"].append({"symbol": symbol, "tipo": tipo, "cantidad": count})
 
@@ -425,8 +462,8 @@ def close_all_futures(client: BinanceFuturesClient) -> Dict[str, Any]:
         if state["info"] is None:
             try:
                 state["info"] = client.exchange_info()
-            except BinanceError as exc:
-                errores.append(f"Lectura de exchangeInfo: {exc}")
+            except Exception as exc:
+                errores.append(f"Lectura de exchangeInfo: {_exc_text(exc)}")
                 return
         for p in positions:
             view = _pos_view(p)
@@ -447,8 +484,8 @@ def close_all_futures(client: BinanceFuturesClient) -> Dict[str, Any]:
             for chunk in chunks:
                 try:
                     client.market_order(symbol, side, _fmt(chunk), lado if hedge else None, reduce_only=not hedge)
-                except BinanceError as exc:
-                    errores.append(f"Cerrar {symbol} {lado} ({_fmt(chunk)}): {exc}")
+                except Exception as exc:
+                    errores.append(f"Cerrar {symbol} {lado} ({_fmt(chunk)}): {_exc_text(exc)}")
                     break
                 closed += chunk
                 sent += 1
@@ -458,28 +495,39 @@ def close_all_futures(client: BinanceFuturesClient) -> Dict[str, Any]:
             if residual > 0 and sent == len(chunks):
                 errores.append(f"{symbol} {lado}: residuo {_fmt(residual)} por debajo del step/mínimo.")
 
-    for ronda in range(1, CLOSE_ROUNDS + 2):
-        ok, orders, algo, positions = snapshot()
-        if ok and not orders and not algo and not positions:
-            resumen["completo"] = True
-            resumen["restante"]["verificado"] = True
-            break
-        if ronda > CLOSE_ROUNDS:
-            resumen["restante"] = {
-                "posiciones": [_pos_view(p) for p in positions],
-                "ordenes": [{"symbol": s, "cantidad": c} for s, c in sorted(_order_counts(orders).items())],
-                "ordenes_algo": [{"symbol": s, "cantidad": c} for s, c in sorted(_order_counts(algo).items())],
-                "verificado": ok,
-            }
-            break
-        resumen["rondas"] = ronda
-        # Primero las órdenes (para que ninguna reabra posición), después las posiciones.
-        cancel(orders, "normal")
-        cancel(algo, "algo")
-        if positions:
-            close(positions)
-        if ROUND_PAUSE_SECONDS:
-            time.sleep(ROUND_PAUSE_SECONDS)
+    def rounds() -> None:
+        for ronda in range(1, CLOSE_ROUNDS + 2):
+            ok, orders, algo, positions = snapshot()
+            if ok and not orders and not algo and not positions:
+                resumen["completo"] = True
+                resumen["restante"]["verificado"] = True
+                return
+            if ronda > CLOSE_ROUNDS:
+                resumen["restante"] = {
+                    "posiciones": [_pos_view(p) for p in positions],
+                    "ordenes": [{"symbol": s, "cantidad": c} for s, c in sorted(_order_counts(orders).items())],
+                    "ordenes_algo": [{"symbol": s, "cantidad": c} for s, c in sorted(_order_counts(algo).items())],
+                    "verificado": ok,
+                }
+                return
+            resumen["rondas"] = ronda
+            # Primero las órdenes (para que ninguna reabra posición), después las posiciones.
+            cancel(orders, "normal")
+            cancel(algo, "algo")
+            if positions:
+                try:
+                    close(positions)
+                except Exception as exc:  # defensivo: un dato inesperado no debe perder el resumen
+                    errores.append(f"Cierre de posiciones: {_exc_text(exc)}")
+            if ROUND_PAUSE_SECONDS:
+                time.sleep(ROUND_PAUSE_SECONDS)
+
+    try:
+        rounds()
+    except Exception as exc:  # defensivo: nunca perder el resumen parcial (respuesta y auditoría)
+        errores.append(f"Cierre interrumpido: {_exc_text(exc)}")
+        resumen["completo"] = False
+        resumen["restante"]["verificado"] = False
     return resumen
 
 
@@ -892,4 +940,7 @@ def _apagar(settings: Settings, docker: DockerClient,
             "passivbot quedó detenido pero el cierre fue parcial: revisar lo que quedó abierto en Binance.",
             payload=base,
         )
+    if not resumen.get("algo_verificado", True):
+        base["warning"] = ("Órdenes condicionales sin verificar: el endpoint no existe en demo/testnet. "
+                           "Revisar en Binance.")
     return {"ok": True, **base}
