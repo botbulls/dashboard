@@ -1358,7 +1358,16 @@
              buttons.forEach((b) => {
                  b.addEventListener('click', () => {
                      if (b.disabled) return;
-                     pedirConfirmacion(b.getAttribute('data-bot-accion'));
+                     const accion = b.getAttribute('data-bot-accion');
+                     if (jobEl.classList.contains('show')) {
+                         // Apagar del panel con el modal de progreso abierto (espera a forager):
+                         // primero se cierra ese modal, igual que con su botón Apagar.
+                         if (!jobActivo || !jobCancelable) return;
+                         jobEl.addEventListener('hidden.bs.modal', () => pedirConfirmacion(accion), { once: true });
+                         ocultarJobEnCurso();
+                         return;
+                     }
+                     pedirConfirmacion(accion);
                  });
              });
 
