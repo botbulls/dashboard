@@ -102,6 +102,10 @@ services:
   notifier:
     build: .                      # misma imagen que el dashboard
     command: ["python", "-m", "futuresboard.notifier"]
+    # La imagen trae un HEALTHCHECK contra /health del dashboard (gunicorn); el notifier no sirve
+    # HTTP, así que se desactiva para que el contenedor no quede "unhealthy".
+    healthcheck:
+      disable: true
     restart: unless-stopped
     environment:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}

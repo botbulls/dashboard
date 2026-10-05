@@ -341,7 +341,8 @@ El panel le da a cualquier sesión logueada la capacidad de arrancar el bot con 
 apagarlo cerrando todas las posiciones a mercado. Antes, eso requería además la contraseña de admin
 separada (que este PR elimina). Hoy la app tiene:
 
-- servidor de desarrollo de Flask en HTTP plano en `:80` (CMD del Dockerfile + `80:5000`).
+- HTTP plano en `:80` (`80:5000`); desde `dev/prod-ready-health` la imagen sirve con gunicorn en
+  lugar del dev server de Flask (ver [produccion.md](produccion.md)).
 
 Resuelto en `dev/login-hardening` (ver [login.md](login.md)): sin usuario por defecto (los que
 tengan `123456` quedan bloqueados hasta `flask set-password`), cookie `Secure`/`HttpOnly`/`Lax`,
