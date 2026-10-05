@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
-- Panel de passivbot: START, Graceful stop y Apagar corren como job en segundo plano (`202` + `job_id`) con progreso paso a paso en un modal; nuevos `GET /api/bot/jobs/<id>` y `GET /api/bot/jobs/activo`, y `FUTURESBOARD_FORAGER_WARMUP_SECONDS` (ver `docs/panel-progreso.md`)
+- Panel de passivbot: START, Graceful stop y Apagar corren como job en segundo plano (`202` + `job_id`) con progreso paso a paso en un modal; nuevos `GET /api/bot/jobs/<id>` y `GET /api/bot/jobs/activo`, y `FUTURESBOARD_FORAGER_WARMUP_SECONDS` (ver `docs/panel-progreso.md`); durante la espera a forager el modal deja cerrar y ofrece Apagar, que la corta sin esperar al job anterior, y un worker nuevo de gunicorn no marca `interrumpido` un job que sigue vivo en otro proceso
 - Match all of the details from [passivbot](https://github.com/enarjord/passivbot)s telegram commands `/position` and `/open_orders` commands
 - Store and display historical unrealized PnL
 - Tidy up repeated code into functions

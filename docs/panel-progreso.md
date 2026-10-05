@@ -23,6 +23,7 @@ Forma del job:
   "params": {"riesgo": "medio"},
   "estado": "en_curso | ok | error | interrumpido",
   "porcentaje": 66,
+  "cancelable": false,
   "pasos": [
     {"clave": "cancelar_ordenes", "titulo": "Cancelar órdenes", "estado": "en_curso",
      "detalle": "2/5 símbolos (ETHUSDT)", "progreso": {"actual": 2, "total": 5}}
@@ -37,6 +38,8 @@ Forma del job:
 - Estados de paso: `pendiente`, `en_curso`, `ok`, `error`, `omitido`. `progreso` es opcional.
 - `resultado` y `http_status` aparecen al terminar: son el JSON y el código HTTP que devolvía la
   acción síncrona (incluido el `resumen` de Apagar), así la UI y las integraciones leen lo mismo.
+- `cancelable`: `true` mientras START o Graceful stop están en la espera a forager. Ahí se puede
+  lanzar Apagar (corta la espera) y la UI deja cerrar el modal.
 - `porcentaje`: pasos terminados sobre el total, más la fracción del paso en curso si informa
   `progreso`. Llega a 100 solo al terminar.
 
@@ -73,6 +76,18 @@ pide otra acción (por ejemplo Apagar), el POST corta la espera (el paso queda `
 START termina `ok`) y la acción nueva arranca. Bloquear un Apagar 90 s por una cuenta regresiva
 informativa no tenía sentido.
 
+- El job se marca `cancelable` **antes** de soltar el lock, así un Apagar que llega justo en ese
+  momento no recibe 409: espera hasta 2 s a que el lock se libere.
+- El POST no espera a que el job cortado termine (puede estar trabado hasta 10 s en una consulta
+  a un proxy de Docker lento). Un job cortado deja de contar como activo (`/api/bot/jobs/activo`
+  devuelve el nuevo) y, cuando termina, no pisa `bot_job_last.json`, que ya es del job nuevo.
+- Si la consulta del contenedor durante la espera ve passivbot detenido porque la espera ya se
+  cortó (Apagar lo detuvo), el paso queda `omitido`, no `error`.
+- En la UI, mientras el job es `cancelable`, el modal muestra un botón **Apagar** y deja
+  **Cerrar** habilitado; el botón Apagar del panel también queda habilitado. Si se cierra el
+  modal, el progreso se sigue consultando y al terminar se vuelve a abrir con el resumen. Si se
+  cancela la confirmación de Apagar, vuelve el modal del job en curso.
+
 ## Registro, TTL y reinicios
 
 - Los jobs viven en memoria del proceso (gunicorn corre con 1 worker, ver `docs/produccion.md` en
@@ -81,10 +96,18 @@ informativa no tenía sentido.
 - El último job se persiste en `<directorio de datos>/bot_job_last.json` (escritura atómica) en
   cada cambio de paso.
 - Si el proceso se reinicia con un job en curso (deploy, crash, OOM), al arrancar la app lo marca
-  `interrumpido`: el paso que estaba en curso queda en `error` y los pendientes en `omitido`.
+  `interrumpido`, salvo que el job siga vivo en otro proceso (abajo): el paso que estaba en curso queda en `error` y los pendientes en `omitido`.
   Además escribe una línea `interrumpido` en `bot_actions.log` y manda la notificación de
   Telegram como fallo, porque una acción cortada a mitad (sobre todo Apagar) hay que revisarla a
   mano. La UI guarda el id del último job en `sessionStorage` y, al recargar, muestra ese estado.
+- **Job vivo en otro proceso.** En un reload de gunicorn (SIGHUP/USR2) el worker nuevo arranca
+  mientras el viejo todavía termina su acción (hasta `graceful_timeout`). Para no dar una falsa
+  alarma, cada job vivo tiene un lock compartido (`flock`) sobre `<datos>/bot_job.alive` desde que
+  se crea hasta que termina, también durante la espera a forager, que corre sin el lock de
+  acciones. Al arrancar, si ese lock o el de acciones están tomados, no se toca el job: lo termina
+  y lo persiste el proceso que lo está corriendo. Se usa `flock` y no el pid guardado porque el
+  kernel suelta el lock cuando el proceso muere, y en un contenedor los pids se reusan después de
+  un reinicio.
 
 ## Auditoría y Telegram
 
