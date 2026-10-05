@@ -106,13 +106,11 @@ def test_log_de_arranque_deshabilitado(caplog):
 
 
 def test_app_loguea_estado_al_arrancar(tmp_path, caplog):
-    from unittest import mock
-
     from futuresboard.config import Config
 
     cfg = Config(CONFIG_DIR=tmp_path, DATABASE=tmp_path / "futures.db", API_KEY="x", API_SECRET="x",
                  DISABLE_AUTO_SCRAPE=True)
-    with caplog.at_level(logging.INFO), mock.patch("futuresboard.app._get_server_ip", return_value="127.0.0.1"):
+    with caplog.at_level(logging.INFO):
         init_app(cfg)
     assert "Notificaciones Telegram deshabilitadas" in caplog.text
 

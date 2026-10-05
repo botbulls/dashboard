@@ -254,10 +254,9 @@ def app(tmp_path):
         API_SECRET="x",
         DISABLE_AUTO_SCRAPE=True,
     )
-    with mock.patch("futuresboard.app._get_server_ip", return_value="127.0.0.1"):
-        application = init_app(cfg)
-        application.config["TESTING"] = True
-        yield application
+    application = init_app(cfg)
+    application.config["TESTING"] = True
+    yield application
 
 
 @pytest.fixture

@@ -196,6 +196,11 @@ def password_fingerprint(password_hash: str) -> str:
 
 SESSION_FINGERPRINT_KEY = "pw_fp"
 
+# Endpoints sin login (liveness; no exponen datos).
+LOGIN_EXEMPT_ENDPOINTS = {"ops.liveness"}
+# Endpoints que ademas del login aceptan "Authorization: Bearer <FUTURESBOARD_METRICS_TOKEN>".
+BEARER_TOKEN_ENDPOINTS = {"ops.metrics"}
+
 
 def _ensure_users_columns(conn: sqlite3.Connection) -> None:
     existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
@@ -443,6 +448,16 @@ def _require_login():
         return None
     if request.endpoint.startswith("static"):
         return None
+    if request.endpoint in LOGIN_EXEMPT_ENDPOINTS:
+        return None
+    if request.endpoint in BEARER_TOKEN_ENDPOINTS and (
+        request.headers.get("Authorization") or "username" not in session
+    ):
+        # Con token: se valida el token. Sin token ni sesion: 401 (no redirect al login,
+        # Prometheus no lo seguiria). Con sesion: sigue el chequeo normal de abajo.
+        from futuresboard.health import bearer_token_response
+
+        return bearer_token_response()
     if request.endpoint == "auth.login_page":
         return None
 

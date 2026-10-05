@@ -6,3 +6,8 @@ services:
       - ./config:/usr/src/futuresboard/config
     ports:
       - "80:5000"
+    # La imagen corre gunicorn (1 worker, scraper automatico incluido). Ver docs/produccion.md.
+    # environment:
+    #   FUTURESBOARD_SECRET_KEY: ${FUTURESBOARD_SECRET_KEY}   # fija, para que las sesiones sobrevivan reinicios
+    #   FUTURESBOARD_METRICS_TOKEN: ${FUTURESBOARD_METRICS_TOKEN}  # opcional, para /metrics sin login
+    #   FUTURESBOARD_LOG_FORMAT: json

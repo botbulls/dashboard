@@ -46,7 +46,7 @@ def main():
     args = parser.parse_args()
 
     if args.config_dir is None:
-        args.config_dir = pathlib.Path.cwd() / "config"
+        args.config_dir = futuresboard.app.default_config_dir()
     else:
         args.config_dir = args.config_dir.resolve()
 
@@ -55,6 +55,11 @@ def main():
         args.host = config.HOST
     if not args.port:
         args.port = config.PORT
+    if args.disable_auto_scraper or args.scrape_only:
+        # Antes el flag se parseaba pero nunca llegaba a la config, asi que el hilo de
+        # scraping arrancaba igual. Con --scrape-only tampoco queremos el hilo: el scrape
+        # se corre una vez en primer plano.
+        config.DISABLE_AUTO_SCRAPE = True
 
     # Run the application
     app = futuresboard.app.init_app(config)
