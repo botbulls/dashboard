@@ -90,18 +90,139 @@ def forager_cfg(tmp_path):
 
 @pytest.fixture
 def env(monkeypatch, forager_cfg):
-    monkeypatch.setenv(bot_control.ENV_DOCKER_URL, "http://docker-proxy:2375")
+    monkeypatch.setenv(bot_control.ENV_DOCKER_URL, DOCKER_BASE)
     monkeypatch.setenv(bot_control.ENV_CONTAINER, "client17-passivbot")
     monkeypatch.setenv(bot_control.ENV_FORAGER_CONFIG, str(forager_cfg))
     monkeypatch.setenv(bot_control.ENV_MODES_SUPPORTED, "1")
     return forager_cfg
 
 
+DOCKER_BASE = "http://docker-proxy:2375"
+BINANCE_BASE = "https://fapi.binance.com"
+
+
+class FakeBinance:
+    """Simula Binance USDⓈ-M Futures: posiciones, órdenes normales/algo, exchangeInfo y MARKET."""
+
+    def __init__(self):
+        self.dual = False
+        self.positions = {}       # (symbol, positionSide) -> Decimal
+        self.orders = []          # [{"symbol": ...}]
+        self.algo = []            # [{"symbol": ..., "algoId": ...}]
+        self.filters = {}         # symbol -> (step, min, max) de MARKET_LOT_SIZE
+        self.lot_size = {}        # symbol -> (step, min, max) de LOT_SIZE (si no, igual a MARKET)
+        self.fail_orders = 0      # las primeras N órdenes MARKET fallan con -1001
+        self.stuck = set()        # (symbol, positionSide) cuyas órdenes "se llenan" sin reducir
+        self.algo_status = None   # código HTTP para GET openAlgoOrders (ej. 404)
+        self.positions_status = None
+        self.calls = []           # (method, path, params, headers)
+
+    def add_position(self, symbol, amt, side=None):
+        from decimal import Decimal
+
+        side = side or ("BOTH" if not self.dual else ("LONG" if Decimal(amt) > 0 else "SHORT"))
+        self.positions[(symbol, side)] = Decimal(amt)
+        self.filters.setdefault(symbol, ("0.001", "0.001", "1000"))
+
+    def market_orders(self):
+        return [p for m, path, p, _ in self.calls if m == "POST" and path == "/fapi/v1/order"]
+
+    def paths(self):
+        return [(m, path) for m, path, _, _ in self.calls]
+
+    def request(self, method, url, **kwargs):
+        from decimal import Decimal
+        from urllib.parse import parse_qsl, urlparse
+
+        u = urlparse(url)
+        params = dict(parse_qsl(u.query))
+        self.calls.append((method, u.path, params, kwargs.get("headers") or {}))
+        key = (method, u.path)
+        if key == ("GET", "/fapi/v1/openOrders"):
+            return FakeResponse(200, list(self.orders))
+        if key == ("GET", "/fapi/v1/openAlgoOrders"):
+            if self.algo_status:
+                return FakeResponse(self.algo_status, {"code": -5000, "msg": "Path not found"})
+            return FakeResponse(200, list(self.algo))
+        if key == ("DELETE", "/fapi/v1/allOpenOrders"):
+            self.orders = [o for o in self.orders if o["symbol"] != params["symbol"]]
+            return FakeResponse(200, {"code": 200, "msg": "The operation of cancel all open order is done."})
+        if key == ("DELETE", "/fapi/v1/algoOpenOrders"):
+            self.algo = [o for o in self.algo if o["symbol"] != params["symbol"]]
+            return FakeResponse(200, {"code": 200, "msg": "success"})
+        if key == ("GET", "/fapi/v2/positionRisk"):
+            if self.positions_status:
+                return FakeResponse(self.positions_status, {"code": -1001, "msg": "Internal error"})
+            rows = [{"symbol": s, "positionSide": ps, "positionAmt": str(a)} for (s, ps), a in self.positions.items()]
+            rows.append({"symbol": "LTCUSDT", "positionSide": "BOTH", "positionAmt": "0.000"})
+            return FakeResponse(200, rows)
+        if key == ("GET", "/fapi/v1/exchangeInfo"):
+            symbols = []
+            for sym, (step, mn, mx) in self.filters.items():
+                lstep, lmn, lmx = self.lot_size.get(sym, (step, mn, mx))
+                symbols.append({"symbol": sym, "filters": [
+                    {"filterType": "LOT_SIZE", "stepSize": lstep, "minQty": lmn, "maxQty": lmx},
+                    {"filterType": "MARKET_LOT_SIZE", "stepSize": step, "minQty": mn, "maxQty": mx},
+                ]})
+            return FakeResponse(200, {"symbols": symbols})
+        if key == ("POST", "/fapi/v1/order"):
+            if self.fail_orders:
+                self.fail_orders -= 1
+                return FakeResponse(400, {"code": -1001, "msg": "Internal error; unable to process your request."})
+            symbol, qty = params["symbol"], Decimal(params["quantity"])
+            if self.dual:
+                if "reduceOnly" in params or params.get("positionSide") not in ("LONG", "SHORT"):
+                    return FakeResponse(400, {"code": -1106, "msg": "Parameter 'reduceonly' sent when not required."})
+                pside = params["positionSide"]
+            else:
+                if params.get("reduceOnly") != "true" or "positionSide" in params:
+                    return FakeResponse(400, {"code": -1106, "msg": "bad params one-way"})
+                pside = "BOTH"
+            step, mn, mx = (Decimal(x) for x in self.filters[symbol])
+            if step == 0:  # MARKET_LOT_SIZE sin step: Binance aplica LOT_SIZE
+                step, mn, mx = (Decimal(x) for x in self.lot_size[symbol])
+            if qty % step != 0 or qty < mn or qty > mx:
+                return FakeResponse(400, {"code": -1111, "msg": "Precision is over the maximum defined for this asset."})
+            amt = self.positions.get((symbol, pside), Decimal(0))
+            if (symbol, pside) not in self.stuck:
+                amt = amt - qty if params["side"] == "SELL" else amt + qty
+                self.positions[(symbol, pside)] = amt
+                if amt == 0:
+                    del self.positions[(symbol, pside)]
+            return FakeResponse(200, {"symbol": symbol, "status": "FILLED", "executedQty": str(qty)})
+        return FakeResponse(404, {"code": -5000, "msg": "Path not found"})
+
+
+class Router:
+    """requests.Session falso: enruta al docker-proxy o a Binance según la URL."""
+
+    def __init__(self, docker, binance):
+        self.docker = docker
+        self.binance = binance
+        self.log = []
+
+    def request(self, method, url, **kwargs):
+        target = "docker" if url.startswith(DOCKER_BASE) else "binance"
+        self.log.append(target)
+        return getattr(self, target).request(method, url, **kwargs)
+
+
 @pytest.fixture
-def docker(monkeypatch):
-    fake = FakeDocker()
-    monkeypatch.setattr(bot_control.requests, "Session", lambda: fake)
-    return fake
+def router(monkeypatch):
+    r = Router(FakeDocker(), FakeBinance())
+    monkeypatch.setattr(bot_control.requests, "Session", lambda: r)
+    monkeypatch.setattr(bot_control, "ROUND_PAUSE_SECONDS", 0)
+    return r
+
+
+@pytest.fixture
+def docker(router):
+    return router.docker
+
+
+@pytest.fixture
+def binance(router):
+    return router.binance
 
 
 @pytest.fixture
@@ -240,10 +361,13 @@ def test_start_when_stopped_uses_start(client, env, docker):
     assert docker.actions() == ["start"]
 
 
-def test_stop_apagar(client, app, env, docker):
+def test_stop_apagar(client, app, env, docker, binance):
     resp = post(client, "/api/bot/stop", {"modo": "apagar"})
     assert resp.status_code == 200
-    assert "sin gestion" in resp.get_json()["warning"]
+    data = resp.get_json()
+    assert data["ok"] is True
+    assert data["resumen"]["completo"] is True
+    assert data["resumen"]["rondas"] == 0  # no había nada abierto
     assert docker.actions() == ["stop"]
     assert env.read_text() == FORAGER_HJSON  # apagar no toca la config
     assert audit_lines(app)[-1]["params"] == {"modo": "apagar"}
@@ -544,3 +668,248 @@ def test_status_config_pending(client, env, docker):
 
 def test_status_without_started_at_pending_unknown(client, env, docker):
     assert client.get("/api/bot/status").get_json()["config_pending"] is None
+
+
+# ---------------------------------------------------------------- apagar: cierre en Binance
+
+
+def apagar(client):
+    return post(client, "/api/bot/stop", {"modo": "apagar"})
+
+
+def test_apagar_one_way_cancela_y_cierra(client, app, env, router, docker, binance):
+    binance.add_position("BTCUSDT", "0.5")
+    binance.add_position("ETHUSDT", "-2")
+    binance.orders = [{"symbol": "BTCUSDT"}, {"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}]
+    binance.algo = [{"symbol": "XRPUSDT", "algoId": 1}]
+
+    resp = apagar(client)
+    assert resp.status_code == 200, resp.data
+    data = resp.get_json()
+    r = data["resumen"]
+    assert r["completo"] is True and r["rondas"] == 1
+    assert {(o["symbol"], o["tipo"], o["cantidad"]) for o in r["ordenes_canceladas"]} == {
+        ("BTCUSDT", "normal", 2), ("ETHUSDT", "normal", 1), ("XRPUSDT", "algo", 1)}
+    closed = {(p["symbol"], p["lado"], p["modo"], p["cantidad"]) for p in r["posiciones_cerradas"]}
+    assert closed == {("BTCUSDT", "LONG", "one-way", "0.5"), ("ETHUSDT", "SHORT", "one-way", "2")}
+    orders = binance.market_orders()
+    assert {(o["symbol"], o["side"], o["quantity"]) for o in orders} == {("BTCUSDT", "SELL", "0.5"), ("ETHUSDT", "BUY", "2")}
+    assert all(o["reduceOnly"] == "true" and "positionSide" not in o and o["type"] == "MARKET" for o in orders)
+    assert binance.positions == {} and binance.orders == [] and binance.algo == []
+    # Primero se detiene el contenedor; recién después se toca Binance. Órdenes antes que posiciones.
+    assert router.log[:2] == ["docker", "docker"] and "docker" not in router.log[2:]
+    paths = binance.paths()
+    assert paths.index(("DELETE", "/fapi/v1/allOpenOrders")) < paths.index(("POST", "/fapi/v1/order"))
+
+
+def test_apagar_hedge_ambos_lados_mismo_simbolo(client, env, docker, binance):
+    binance.dual = True
+    binance.add_position("BTCUSDT", "1.2", "LONG")
+    binance.add_position("BTCUSDT", "-0.3", "SHORT")
+    resp = apagar(client)
+    assert resp.status_code == 200, resp.data
+    orders = binance.market_orders()
+    assert {(o["side"], o["positionSide"], o["quantity"]) for o in orders} == {
+        ("SELL", "LONG", "1.2"), ("BUY", "SHORT", "0.3")}
+    assert all("reduceOnly" not in o for o in orders)
+    lados = {(p["lado"], p["modo"]) for p in resp.get_json()["resumen"]["posiciones_cerradas"]}
+    assert lados == {("LONG", "hedge"), ("SHORT", "hedge")}
+
+
+def test_apagar_parte_por_max_qty(client, env, docker, binance):
+    binance.add_position("DOGEUSDT", "-250")
+    binance.filters["DOGEUSDT"] = ("1", "1", "100")
+    resp = apagar(client)
+    assert resp.status_code == 200, resp.data
+    assert [o["quantity"] for o in binance.market_orders()] == ["100", "100", "50"]
+    cerrada = resp.get_json()["resumen"]["posiciones_cerradas"][0]
+    assert cerrada["cantidad"] == "250" and cerrada["ordenes"] == 3
+
+
+def test_apagar_usa_lot_size_si_market_lot_size_es_cero(client, env, docker, binance):
+    binance.add_position("ETHUSDT", "3")
+    binance.filters["ETHUSDT"] = ("0", "0", "0")
+    binance.lot_size["ETHUSDT"] = ("0.01", "0.01", "2")
+    resp = apagar(client)
+    assert resp.status_code == 200, resp.data
+    assert [o["quantity"] for o in binance.market_orders()] == ["2", "1"]
+
+
+def test_apagar_redondea_hacia_abajo_y_reporta_residuo(client, env, docker, binance):
+    binance.add_position("BTCUSDT", "0.12345")
+    resp = apagar(client)
+    assert resp.status_code == 502
+    data = resp.get_json()
+    assert data["ok"] is False
+    assert {o["quantity"] for o in binance.market_orders()} == {"0.123"}
+    restante = data["resumen"]["restante"]
+    assert restante["posiciones"] == [{"symbol": "BTCUSDT", "lado": "LONG", "modo": "one-way", "cantidad": "0.00045"}]
+    assert any("menor al mínimo" in e for e in data["resumen"]["errores"])
+
+
+def test_apagar_fallo_al_detener_no_cierra_nada(client, app, env, docker, binance):
+    binance.add_position("BTCUSDT", "1")
+    binance.orders = [{"symbol": "BTCUSDT"}]
+    docker.fail_action = 500
+    resp = apagar(client)
+    assert resp.status_code == 502
+    assert binance.calls == []
+    assert audit_lines(app)[-1]["result"] == "error"
+
+
+def test_apagar_timeout_al_detener_no_cierra_nada(client, env, docker, binance):
+    binance.add_position("BTCUSDT", "1")
+    docker.timeout_action = True
+    assert apagar(client).status_code == 502
+    assert binance.calls == []
+
+
+def test_apagar_contenedor_sigue_corriendo_no_cierra(client, env, docker, binance):
+    binance.add_position("BTCUSDT", "1")
+    orig = docker.request
+
+    def stop_sin_efecto(method, url, **kw):
+        resp = orig(method, url, **kw)
+        docker.running = True
+        return resp
+
+    docker.request = stop_sin_efecto
+    resp = apagar(client)
+    assert resp.status_code == 502
+    assert "sigue corriendo" in resp.get_json()["error"]
+    assert binance.calls == []
+
+
+def test_apagar_contenedor_inexistente_no_cierra(client, env, docker, binance):
+    docker.exists = False
+    binance.add_position("BTCUSDT", "1")
+    assert apagar(client).status_code == 502
+    assert binance.calls == []
+
+
+def test_apagar_cierre_parcial_502(client, app, env, docker, binance):
+    binance.add_position("BTCUSDT", "1")
+    binance.add_position("ETHUSDT", "-1")
+    binance.stuck.add(("ETHUSDT", "BOTH"))
+    resp = apagar(client)
+    assert resp.status_code == 502
+    data = resp.get_json()
+    assert "parcial" in data["error"]
+    r = data["resumen"]
+    assert r["completo"] is False and r["rondas"] == bot_control.CLOSE_ROUNDS
+    assert r["restante"]["verificado"] is True
+    assert r["restante"]["posiciones"] == [{"symbol": "ETHUSDT", "lado": "SHORT", "modo": "one-way", "cantidad": "1"}]
+    assert data["docker_action"] == "stop"
+    # BTC se cerró una sola vez; ETH se reintentó en cada ronda.
+    eth = [o for o in binance.market_orders() if o["symbol"] == "ETHUSDT"]
+    assert len(eth) == bot_control.CLOSE_ROUNDS
+    last = audit_lines(app)[-1]
+    assert last["result"] == "error" and "ETHUSDT" in last["detail"] and "resumen" in last["detail"]
+
+
+def test_apagar_reintenta_si_falla_una_orden(client, env, docker, binance):
+    binance.add_position("BTCUSDT", "1")
+    binance.fail_orders = 1
+    resp = apagar(client)
+    assert resp.status_code == 200, resp.data
+    r = resp.get_json()["resumen"]
+    assert r["rondas"] == 2
+    assert len(binance.market_orders()) == 2
+    assert any("-1001" in e for e in r["errores"])
+
+
+def test_apagar_reintenta_ordenes_que_reaparecen(client, env, docker, binance):
+    binance.orders = [{"symbol": "BTCUSDT"}]
+    orig = binance.request
+    state = {"n": 0}
+
+    def reaparece(method, url, **kw):
+        resp = orig(method, url, **kw)
+        if method == "DELETE" and state["n"] == 0:
+            state["n"] = 1
+            binance.orders.append({"symbol": "BTCUSDT"})
+        return resp
+
+    binance.request = reaparece
+    resp = apagar(client)
+    assert resp.status_code == 200
+    assert resp.get_json()["resumen"]["rondas"] == 2
+
+
+def test_apagar_algo_no_disponible_no_bloquea(client, env, docker, binance):
+    binance.algo_status = 404
+    binance.add_position("BTCUSDT", "1")
+    resp = apagar(client)
+    assert resp.status_code == 200, resp.data
+    assert any("algo" in e for e in resp.get_json()["resumen"]["errores"])
+    assert [p for m, p in binance.paths() if p == "/fapi/v1/openAlgoOrders"] == ["/fapi/v1/openAlgoOrders"]
+
+
+def test_apagar_sin_poder_verificar_es_502(client, env, docker, binance):
+    binance.positions_status = 500
+    resp = apagar(client)
+    assert resp.status_code == 502
+    assert resp.get_json()["resumen"]["restante"]["verificado"] is False
+
+
+def test_apagar_auditoria_y_sin_secretos(client, app, env, docker, binance):
+    app.config["API_KEY"] = "KEYabc123visible"
+    app.config["API_SECRET"] = "SECRETxyz789"
+    binance.add_position("BTCUSDT", "1")
+    binance.fail_orders = 1
+    resp = apagar(client)
+    assert resp.status_code == 200
+    last = audit_lines(app)[-1]
+    assert last["action"] == "stop" and last["result"] == "ok"
+    assert last["params"] == {"modo": "apagar"}
+    assert "resumen" in last["detail"] and "BTCUSDT" in last["detail"]
+    audit_text = (pathlib.Path(app.config["DATABASE"]).parent / bot_control.AUDIT_LOG_NAME).read_text()
+    for secret in ("KEYabc123visible", "SECRETxyz789", "signature"):
+        assert secret not in audit_text
+        assert secret not in resp.get_data(as_text=True)
+    # Firma HMAC-SHA256 del query string (sin la firma) con el secret, y API key en el header.
+    import hashlib
+    import hmac as _hmac
+    from urllib.parse import urlencode
+
+    method, path, params, headers = binance.calls[0]
+    assert headers["X-MBX-APIKEY"] == "KEYabc123visible"
+    sig = params.pop("signature")
+    expected = _hmac.new(b"SECRETxyz789", urlencode(params).encode(), hashlib.sha256).hexdigest()
+    assert sig == expected
+
+
+def test_apagar_exchange_no_binance_409(client, app, env, docker, binance):
+    app.config["EXCHANGE"] = "bybit"
+    resp = apagar(client)
+    assert resp.status_code == 409
+    assert docker.actions() == [] and binance.calls == []
+
+
+def test_apagar_sin_credenciales_503(client, app, env, docker, binance):
+    app.config["API_SECRET"] = ""
+    resp = apagar(client)
+    assert resp.status_code == 503
+    assert docker.actions() == [] and binance.calls == []
+
+
+def test_split_quantity():
+    from decimal import Decimal as D
+
+    assert bot_control.split_quantity(D("250"), D("1"), D("1"), D("100")) == ([D(100), D(100), D(50)], D(0))
+    chunks, rest = bot_control.split_quantity(D("0.12345"), D("0.001"), D("0.001"), D("0"))
+    assert chunks == [D("0.123")] and rest == D("0.00045")
+    assert bot_control.split_quantity(D("0.0004"), D("0.001"), D("0.001"), D("10")) == ([], D("0.0004"))
+    # maxQty no múltiplo del step: se alinea hacia abajo.
+    chunks, _ = bot_control.split_quantity(D("10"), D("0.5"), D("0.5"), D("4.7"))
+    assert chunks == [D("4.5"), D("4.5"), D("1.0")]
+
+
+def test_lot_filters_fallback():
+    info = {"symbols": [{"symbol": "X", "filters": [
+        {"filterType": "LOT_SIZE", "stepSize": "0.01", "minQty": "0.01", "maxQty": "500"},
+        {"filterType": "MARKET_LOT_SIZE", "stepSize": "0", "minQty": "0", "maxQty": "120"},
+    ]}]}
+    f = bot_control.lot_filters(info, "X")
+    assert str(f["step"]) == "0.01" and str(f["max"]) == "120" and str(f["min"]) == "0.01"
+    assert bot_control.lot_filters(info, "Y") is None

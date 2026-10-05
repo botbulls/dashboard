@@ -13,18 +13,24 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import decimal
 import fcntl
+import hashlib
+import hmac
 import json
 import os
 import pathlib
 import re
 import shutil
 import tempfile
+import time
 from typing import Any
 from typing import Dict
 from typing import Iterator
+from typing import List
 from typing import Optional
 from urllib.parse import quote
+from urllib.parse import urlencode
 
 import hjson
 import requests
@@ -62,9 +68,17 @@ _CONTAINER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 
 class BotControlError(Exception):
-    """Error con mensaje apto para mostrar al usuario."""
+    """Error con mensaje apto para mostrar al usuario.
+
+    ``payload`` (opcional) se agrega al JSON de error de la API (ej. el resumen de un apagado
+    con cierre parcial).
+    """
 
     status_code = 500
+
+    def __init__(self, message: str = "", payload: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(message)
+        self.payload: Dict[str, Any] = payload or {}
 
 
 class DisabledError(BotControlError):
@@ -174,6 +188,299 @@ class DockerClient:
 
     def stop(self, name: str) -> str:
         return self._action(name, "stop", {"t": STOP_TIMEOUT_SECONDS})
+
+
+# --------------------------------------------------------------------------------------
+# Binance USDⓈ-M Futures (cierre de posiciones y órdenes al Apagar)
+# --------------------------------------------------------------------------------------
+
+BINANCE_RECV_WINDOW = 5000
+# Rondas de cancelar + cerrar; después de la última se hace una lectura final de verificación.
+CLOSE_ROUNDS = 3
+# Pausa entre una ronda con acciones y la lectura siguiente (los tests la ponen en 0).
+ROUND_PAUSE_SECONDS = 1.0
+_MAX_ERROR_MSG = 200
+
+
+class BinanceError(BotControlError):
+    status_code = 502
+
+    def __init__(self, message: str, http_status: Optional[int] = None, code: Any = None) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+        self.code = code
+
+
+class PartialCloseError(BotControlError):
+    """passivbot quedó detenido pero quedaron posiciones u órdenes abiertas (o sin verificar)."""
+
+    status_code = 502
+
+
+class BinanceFuturesClient:
+    """Cliente mínimo de la API REST de USDⓈ-M Futures.
+
+    Firma igual que el scraper (HMAC-SHA256 del query string con API_SECRET, header
+    X-MBX-APIKEY), pero con timeout, sesión reutilizada y errores sin URL/firma/credenciales.
+    """
+
+    def __init__(self, base_url: str, api_key: str, api_secret: str,
+                 session: Optional[requests.Session] = None) -> None:
+        if not base_url or not api_key or not api_secret:
+            raise DisabledError(
+                "Apagar requiere API_KEY, API_SECRET y API_BASE_URL de Binance Futures configurados."
+            )
+        self.base_url = base_url.rstrip("/")
+        self._api_key = api_key
+        self._api_secret = api_secret.encode("utf-8")
+        self.http = session or requests.Session()
+
+    def _request(self, method: str, path: str, params: Optional[Dict[str, Any]] = None,
+                 signed: bool = True) -> Any:
+        query_params = dict(params or {})
+        headers: Dict[str, str] = {}
+        if signed:
+            query_params["recvWindow"] = BINANCE_RECV_WINDOW
+            query_params["timestamp"] = int(time.time() * 1000)
+        query = urlencode(query_params)
+        if signed:
+            signature = hmac.new(self._api_secret, query.encode("utf-8"), hashlib.sha256).hexdigest()
+            query = f"{query}&signature={signature}"
+            headers["X-MBX-APIKEY"] = self._api_key
+        url = f"{self.base_url}{path}" + (f"?{query}" if query else "")
+        try:
+            resp = self.http.request(method, url, headers=headers, timeout=HTTP_TIMEOUT_SECONDS)
+        except requests.RequestException as exc:
+            raise BinanceError(f"Sin respuesta de Binance en {method} {path} ({exc.__class__.__name__}).") from exc
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+        code = data.get("code") if isinstance(data, dict) else None
+        if resp.status_code != 200 or (code is not None and code not in (0, 200)):
+            msg = str(data.get("msg", "")) if isinstance(data, dict) else ""
+            raise BinanceError(
+                f"Binance respondió {resp.status_code} en {method} {path}: {code} {msg[:_MAX_ERROR_MSG]}".rstrip(),
+                http_status=resp.status_code,
+                code=code,
+            )
+        return data
+
+    def open_orders(self) -> List[Dict[str, Any]]:
+        return list(self._request("GET", "/fapi/v1/openOrders") or [])
+
+    def open_algo_orders(self) -> List[Dict[str, Any]]:
+        data = self._request("GET", "/fapi/v1/openAlgoOrders")
+        if isinstance(data, dict):  # defensivo: algunas variantes envuelven la lista
+            data = data.get("orders") or data.get("rows") or []
+        return list(data or [])
+
+    def cancel_all_open_orders(self, symbol: str) -> None:
+        self._request("DELETE", "/fapi/v1/allOpenOrders", {"symbol": symbol})
+
+    def cancel_all_algo_orders(self, symbol: str) -> None:
+        self._request("DELETE", "/fapi/v1/algoOpenOrders", {"symbol": symbol})
+
+    def positions(self) -> List[Dict[str, Any]]:
+        rows = self._request("GET", "/fapi/v2/positionRisk") or []
+        return [r for r in rows if _dec(r.get("positionAmt")) != 0]
+
+    def exchange_info(self) -> Dict[str, Any]:
+        return self._request("GET", "/fapi/v1/exchangeInfo", signed=False) or {}
+
+    def market_order(self, symbol: str, side: str, quantity: str, position_side: Optional[str],
+                     reduce_only: bool) -> Dict[str, Any]:
+        params: Dict[str, Any] = {"symbol": symbol, "side": side, "type": "MARKET", "quantity": quantity,
+                                  "newOrderRespType": "RESULT"}
+        if position_side:
+            params["positionSide"] = position_side
+        if reduce_only:
+            params["reduceOnly"] = "true"
+        return self._request("POST", "/fapi/v1/order", params) or {}
+
+
+def _dec(value: Any) -> decimal.Decimal:
+    try:
+        return decimal.Decimal(str(value))
+    except (decimal.InvalidOperation, ValueError, TypeError):
+        return decimal.Decimal(0)
+
+
+def _fmt(value: decimal.Decimal) -> str:
+    text = format(value.normalize(), "f")
+    return text if text != "-0" else "0"
+
+
+def lot_filters(exchange_info: Dict[str, Any], symbol: str) -> Optional[Dict[str, decimal.Decimal]]:
+    """stepSize / minQty / maxQty para órdenes MARKET (MARKET_LOT_SIZE, o LOT_SIZE si falta o es 0)."""
+    for sym in exchange_info.get("symbols") or []:
+        if sym.get("symbol") != symbol:
+            continue
+        filters = {f.get("filterType"): f for f in sym.get("filters") or []}
+        market, lot = filters.get("MARKET_LOT_SIZE") or {}, filters.get("LOT_SIZE") or {}
+        out = {}
+        for key, name in (("step", "stepSize"), ("min", "minQty"), ("max", "maxQty")):
+            value = _dec(market.get(name))
+            out[key] = value if value > 0 else _dec(lot.get(name))
+        if out["step"] <= 0:
+            return None
+        return out
+    return None
+
+
+def split_quantity(amount: decimal.Decimal, step: decimal.Decimal, min_qty: decimal.Decimal,
+                   max_qty: decimal.Decimal) -> tuple:
+    """Redondea ``amount`` hacia abajo al ``step`` y lo parte en órdenes de a lo sumo ``max_qty``.
+
+    Devuelve (lista de cantidades, residuo no cerrable). Un tramo menor que ``min_qty`` no se
+    envía (Binance lo rechaza) y queda en el residuo.
+    """
+    total = (amount // step) * step
+    cap = (max_qty // step) * step if max_qty > 0 else total
+    chunks: List[decimal.Decimal] = []
+    remaining = total
+    while remaining > 0 and cap > 0:
+        chunk = min(remaining, cap)
+        if chunk < min_qty:
+            break
+        chunks.append(chunk)
+        remaining -= chunk
+    return chunks, amount - sum(chunks, decimal.Decimal(0))
+
+
+def _pos_view(p: Dict[str, Any]) -> Dict[str, Any]:
+    amt = _dec(p.get("positionAmt"))
+    pside = str(p.get("positionSide") or "BOTH").upper()
+    lado = pside if pside in ("LONG", "SHORT") else ("LONG" if amt > 0 else "SHORT")
+    return {"symbol": p.get("symbol"), "lado": lado, "modo": "hedge" if pside in ("LONG", "SHORT") else "one-way",
+            "cantidad": _fmt(abs(amt))}
+
+
+def _order_counts(orders: List[Dict[str, Any]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for o in orders:
+        sym = o.get("symbol")
+        if sym:
+            counts[sym] = counts.get(sym, 0) + 1
+    return counts
+
+
+def close_all_futures(client: BinanceFuturesClient) -> Dict[str, Any]:
+    """Cancela TODAS las órdenes abiertas (normales y algo/condicionales) y cierra TODAS las
+    posiciones a mercado. Verifica con hasta ``CLOSE_ROUNDS`` rondas.
+
+    Nunca lanza por errores de Binance: los junta en ``errores``. ``completo`` es True solo si la
+    lectura final confirma 0 posiciones y 0 órdenes.
+    """
+    resumen: Dict[str, Any] = {
+        "completo": False,
+        "rondas": 0,
+        "ordenes_canceladas": [],
+        "posiciones_cerradas": [],
+        "errores": [],
+        "restante": {"posiciones": [], "ordenes": [], "ordenes_algo": [], "verificado": False},
+    }
+    errores: List[str] = resumen["errores"]
+    state = {"algo": True, "info": None}
+
+    def snapshot() -> tuple:
+        ok = True
+        try:
+            orders = client.open_orders()
+        except BinanceError as exc:
+            errores.append(f"Lectura de órdenes: {exc}")
+            orders, ok = [], False
+        algo: List[Dict[str, Any]] = []
+        if state["algo"]:
+            try:
+                algo = client.open_algo_orders()
+            except BinanceError as exc:
+                if exc.http_status == 404:
+                    # El endpoint no existe en este entorno (ej. demo): no hay órdenes algo que cerrar.
+                    state["algo"] = False
+                    errores.append("Órdenes algo/condicionales: endpoint no disponible en este entorno (se omite).")
+                else:
+                    errores.append(f"Lectura de órdenes algo: {exc}")
+                    ok = False
+        try:
+            positions = client.positions()
+        except BinanceError as exc:
+            errores.append(f"Lectura de posiciones: {exc}")
+            positions, ok = [], False
+        return ok, orders, algo, positions
+
+    def cancel(orders: List[Dict[str, Any]], tipo: str) -> None:
+        for symbol, count in sorted(_order_counts(orders).items()):
+            try:
+                if tipo == "algo":
+                    client.cancel_all_algo_orders(symbol)
+                else:
+                    client.cancel_all_open_orders(symbol)
+            except BinanceError as exc:
+                errores.append(f"Cancelar órdenes {tipo} de {symbol}: {exc}")
+                continue
+            resumen["ordenes_canceladas"].append({"symbol": symbol, "tipo": tipo, "cantidad": count})
+
+    def close(positions: List[Dict[str, Any]]) -> None:
+        if state["info"] is None:
+            try:
+                state["info"] = client.exchange_info()
+            except BinanceError as exc:
+                errores.append(f"Lectura de exchangeInfo: {exc}")
+                return
+        for p in positions:
+            view = _pos_view(p)
+            symbol, lado = view["symbol"], view["lado"]
+            amt = _dec(p.get("positionAmt"))
+            filters = lot_filters(state["info"], symbol)
+            if not filters:
+                errores.append(f"{symbol} {lado}: sin filtros de cantidad en exchangeInfo.")
+                continue
+            chunks, residual = split_quantity(abs(amt), filters["step"], filters["min"], filters["max"])
+            if not chunks:
+                errores.append(f"{symbol} {lado}: cantidad {_fmt(abs(amt))} menor al mínimo operable.")
+                continue
+            hedge = view["modo"] == "hedge"
+            side = "SELL" if amt > 0 else "BUY"
+            closed = decimal.Decimal(0)
+            sent = 0
+            for chunk in chunks:
+                try:
+                    client.market_order(symbol, side, _fmt(chunk), lado if hedge else None, reduce_only=not hedge)
+                except BinanceError as exc:
+                    errores.append(f"Cerrar {symbol} {lado} ({_fmt(chunk)}): {exc}")
+                    break
+                closed += chunk
+                sent += 1
+            if sent:
+                resumen["posiciones_cerradas"].append({"symbol": symbol, "lado": lado, "modo": view["modo"],
+                                                       "cantidad": _fmt(closed), "ordenes": sent})
+            if residual > 0 and sent == len(chunks):
+                errores.append(f"{symbol} {lado}: residuo {_fmt(residual)} por debajo del step/mínimo.")
+
+    for ronda in range(1, CLOSE_ROUNDS + 2):
+        ok, orders, algo, positions = snapshot()
+        if ok and not orders and not algo and not positions:
+            resumen["completo"] = True
+            resumen["restante"]["verificado"] = True
+            break
+        if ronda > CLOSE_ROUNDS:
+            resumen["restante"] = {
+                "posiciones": [_pos_view(p) for p in positions],
+                "ordenes": [{"symbol": s, "cantidad": c} for s, c in sorted(_order_counts(orders).items())],
+                "ordenes_algo": [{"symbol": s, "cantidad": c} for s, c in sorted(_order_counts(algo).items())],
+                "verificado": ok,
+            }
+            break
+        resumen["rondas"] = ronda
+        # Primero las órdenes (para que ninguna reabra posición), después las posiciones.
+        cancel(orders, "normal")
+        cancel(algo, "algo")
+        if positions:
+            close(positions)
+        if ROUND_PAUSE_SECONDS:
+            time.sleep(ROUND_PAUSE_SECONDS)
+    return resumen
 
 
 # --------------------------------------------------------------------------------------
@@ -529,16 +836,15 @@ def start_bot(settings: Settings, store: Store, riesgo: Any,
 
 
 def stop_bot(settings: Settings, store: Store, modo: Any,
-             docker: Optional[DockerClient] = None) -> Dict[str, Any]:
+             docker: Optional[DockerClient] = None,
+             binance: Optional[BinanceFuturesClient] = None) -> Dict[str, Any]:
     if not isinstance(modo, str) or modo not in STOP_MODES:
         raise ValueError("modo invalido: usar graceful o apagar")
     settings.require_enabled()
     docker = docker or DockerClient(settings.docker_url)
 
     if modo == "apagar":
-        result = docker.stop(settings.container)
-        return {"ok": True, "modo": modo, "docker_action": "stop", "docker_result": result,
-                "warning": "Las posiciones y ordenes abiertas quedan en el exchange sin gestion."}
+        return _apagar(settings, docker, binance)
 
     if not settings.modes_supported:
         err = BotControlError(
@@ -561,3 +867,29 @@ def stop_bot(settings: Settings, store: Store, modo: Any,
     action, backup = _apply_and_restart(settings, store, docker, info, path, updates, prev_state, state)
     return {"ok": True, "modo": modo, "docker_action": action, "config": updates,
             "backup": backup.name}
+
+
+def _apagar(settings: Settings, docker: DockerClient,
+            binance: Optional[BinanceFuturesClient]) -> Dict[str, Any]:
+    """Detiene passivbot y después cancela todas las órdenes y cierra todas las posiciones.
+
+    Si el stop falla (error HTTP, timeout, contenedor inexistente) o el contenedor sigue
+    corriendo, se corta con error SIN tocar Binance: cerrar con el bot vivo haría que reabra.
+    """
+    if binance is None:
+        raise DisabledError("Apagar requiere el cliente de Binance Futures configurado.")
+    result = docker.stop(settings.container)
+    info = docker.inspect(settings.container)
+    if info["status"] == "not_found":
+        raise DockerError(f"El contenedor {settings.container} no existe. No se cerró nada en Binance.")
+    if info["running"]:
+        raise DockerError("passivbot sigue corriendo después del stop. No se cerró nada en Binance.")
+
+    resumen = close_all_futures(binance)
+    base = {"modo": "apagar", "docker_action": "stop", "docker_result": result, "resumen": resumen}
+    if not resumen["completo"]:
+        raise PartialCloseError(
+            "passivbot quedó detenido pero el cierre fue parcial: revisar lo que quedó abierto en Binance.",
+            payload=base,
+        )
+    return {"ok": True, **base}

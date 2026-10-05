@@ -1507,15 +1507,19 @@ def _run_bot_action(action: str, params: dict, fn):
     except ValueError as exc:
         status, payload, outcome = 400, {"ok": False, "error": str(exc)}, "rechazado"
     except bot_control.BotControlError as exc:
-        status, payload, outcome = exc.status_code, {"ok": False, "error": str(exc)}, "error"
+        status, outcome = exc.status_code, "error"
+        payload = {**exc.payload, "ok": False, "error": str(exc)}
     except Exception:  # pragma: no cover - defensivo
         current_app.logger.exception("Error en accion de bot %s", action)
         status, payload, outcome = 500, {"ok": False, "error": "Error interno."}, "error"
     else:
         status, payload, outcome = 200, result, "ok"
+    detail = payload.get("error") or payload.get("docker_action", "")
+    if payload.get("resumen") is not None:
+        # Apagar: el resumen del cierre (órdenes canceladas, posiciones cerradas, errores, restante).
+        detail = f"{detail} | resumen: {json.dumps(payload['resumen'], ensure_ascii=False)}"
     try:
-        store.audit(user, action, params, outcome, payload.get("error") or payload.get("docker_action", ""),
-                    request.remote_addr)
+        store.audit(user, action, params, outcome, detail, request.remote_addr)
     except OSError:
         current_app.logger.exception("No se pudo escribir el log de auditoria")
     return _json_response(payload, status)
@@ -1548,8 +1552,26 @@ def bot_stop():
     modo = body.get("modo") if isinstance(body, dict) else None
     settings = bot_control.Settings()
     return _run_bot_action(
-        "stop", {"modo": modo}, lambda store: bot_control.stop_bot(settings, store, modo)
+        "stop",
+        {"modo": modo},
+        lambda store: bot_control.stop_bot(
+            settings, store, modo, binance=_binance_futures_client() if modo == "apagar" else None
+        ),
     )
+
+
+def _binance_futures_client() -> bot_control.BinanceFuturesClient:
+    """Cliente de Binance USDⓈ-M con las mismas credenciales/base URL que el scraper.
+
+    Con BINANCE_TESTNET activo, API_BASE_URL ya apunta a demo-fapi (ver config.py).
+    """
+    cfg = current_app.config
+    if str(cfg.get("EXCHANGE") or "").lower() != "binance":
+        err = bot_control.BotControlError("Apagar con cierre de posiciones solo está soportado para Binance Futures.")
+        err.status_code = 409
+        raise err
+    return bot_control.BinanceFuturesClient(cfg.get("API_BASE_URL") or "", cfg.get("API_KEY") or "",
+                                            cfg.get("API_SECRET") or "")
 
 
 @app.route("/api/last-order", methods=["GET"])
