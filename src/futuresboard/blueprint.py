@@ -24,6 +24,7 @@ from flask import current_app
 from typing_extensions import TypedDict
 
 from futuresboard import bot_control
+from futuresboard import jobs
 from futuresboard import telegram_notify
 from futuresboard import db
 from futuresboard.config import BINANCE_FUTURES_MAINNET_URL
@@ -1499,36 +1500,63 @@ def _bot_store() -> bot_control.Store:
     return bot_control.Store(pathlib.Path(current_app.config["DATABASE"]).parent)
 
 
-def _run_bot_action(action: str, params: dict, fn):
+JOBS_EXTENSION = "futuresboard_bot_jobs"
+
+
+@app.record_once
+def _init_bot_jobs(state) -> None:
+    """Registro de jobs del panel (uno por app/proceso). Recupera un job cortado por un reinicio."""
+    store = bot_control.Store(pathlib.Path(state.app.config["DATABASE"]).parent)
+    registry = jobs.JobRegistry(store)
+    state.app.extensions[JOBS_EXTENSION] = registry
+    jobs.recover_interrupted(registry, state.app.logger)
+
+
+def _bot_jobs() -> jobs.JobRegistry:
+    return current_app.extensions[JOBS_EXTENSION]
+
+
+def _reject(action: str, params: dict, status: int, payload: dict, outcome: str):
+    """Rechazo síncrono (antes de crear el job): se audita y, si corresponde, se notifica."""
     store = _bot_store()
     user = session.get("username") or "?"
     try:
-        with store.lock():
-            result = fn(store)
-    except ValueError as exc:
-        status, payload, outcome = 400, {"ok": False, "error": str(exc)}, "rechazado"
-    except bot_control.BotControlError as exc:
-        status, outcome = exc.status_code, "error"
-        payload = {**exc.payload, "ok": False, "error": str(exc)}
-    except Exception:  # pragma: no cover - defensivo
-        current_app.logger.exception("Error en accion de bot %s", action)
-        status, payload, outcome = 500, {"ok": False, "error": "Error interno."}, "error"
-    else:
-        status, payload, outcome = 200, result, "ok"
-    detail = payload.get("error") or payload.get("docker_action", "")
-    if payload.get("resumen") is not None:
-        # Apagar: el resumen del cierre (órdenes canceladas, posiciones cerradas, errores, restante).
-        detail = f"{detail} | resumen: {json.dumps(payload['resumen'], ensure_ascii=False)}"
-    try:
-        store.audit(user, action, params, outcome, detail, request.remote_addr)
+        store.audit(user, action, params, outcome, jobs.audit_detail(payload), request.remote_addr)
     except OSError:
         current_app.logger.exception("No se pudo escribir el log de auditoria")
     try:
-        # Asíncrono y sin efecto en la respuesta: un fallo de Telegram no cambia status ni payload.
         telegram_notify.notify_bot_action(action, params, outcome, payload, user)
     except Exception:  # pragma: no cover - notify_bot_action ya no lanza
         current_app.logger.warning("No se pudo notificar la accion %s a Telegram", action)
     return _json_response(payload, status)
+
+
+def _run_bot_action(action: str, params: dict, validate, work):
+    """Valida de forma síncrona y lanza la acción como job (202 + job_id).
+
+    ``validate()`` no hace I/O contra Docker ni Binance: enum, panel habilitado, modos y
+    credenciales. Sus errores responden 400/403/409/503 en el momento, sin crear job.
+    ``work(store, settings, extra, reporter)`` corre en el hilo del job.
+    """
+    try:
+        settings, extra = validate()
+    except ValueError as exc:
+        return _reject(action, params, 400, {"ok": False, "error": str(exc)}, "rechazado")
+    except bot_control.BotControlError as exc:
+        return _reject(action, params, exc.status_code, {**exc.payload, "ok": False, "error": str(exc)}, "error")
+
+    store = _bot_store()
+    ctx = jobs.JobContext(store, settings, session.get("username") or "?", request.remote_addr,
+                          current_app.logger)
+    try:
+        job = jobs.launch(_bot_jobs(), action, params, ctx, lambda rep: work(store, settings, extra, rep))
+    except jobs.ActiveJobError as exc:
+        return _json_response(
+            {"ok": False, "error": "Ya hay una acción del panel en curso: esperá a que termine.",
+             "job_id": exc.job_id},
+            409,
+        )
+    return _json_response({"ok": True, "job_id": job.id, "job": job.to_dict()}, 202)
 
 
 @app.route("/api/bot/status", methods=["GET"])
@@ -1545,9 +1573,16 @@ def bot_status():
 def bot_start():
     body = request.get_json(silent=True) or {}
     riesgo = body.get("riesgo") if isinstance(body, dict) else None
-    settings = bot_control.Settings()
+
+    def validate():
+        bot_control.validate_riesgo(riesgo)
+        settings = bot_control.Settings()
+        settings.require_enabled()
+        return settings, None
+
     return _run_bot_action(
-        "start", {"riesgo": riesgo}, lambda store: bot_control.start_bot(settings, store, riesgo)
+        "start", {"riesgo": riesgo}, validate,
+        lambda store, settings, _extra, rep: bot_control.start_bot(settings, store, riesgo, reporter=rep),
     )
 
 
@@ -1556,14 +1591,33 @@ def bot_start():
 def bot_stop():
     body = request.get_json(silent=True) or {}
     modo = body.get("modo") if isinstance(body, dict) else None
-    settings = bot_control.Settings()
+
+    def validate():
+        settings = bot_control.Settings()
+        bot_control.validate_stop(settings, modo)
+        # El cliente de Binance se arma acá: lee la config de la app (no disponible en el hilo).
+        return settings, (_binance_futures_client() if modo == "apagar" else None)
+
     return _run_bot_action(
-        "stop",
-        {"modo": modo},
-        lambda store: bot_control.stop_bot(
-            settings, store, modo, binance=_binance_futures_client() if modo == "apagar" else None
-        ),
+        "stop", {"modo": modo}, validate,
+        lambda store, settings, binance, rep: bot_control.stop_bot(settings, store, modo, binance=binance,
+                                                                  reporter=rep),
     )
+
+
+@app.route("/api/bot/jobs/activo", methods=["GET"])
+def bot_job_active():
+    """Job en curso (para reanudar el modal de progreso al recargar la página) o null."""
+    job = _bot_jobs().active()
+    return _json_response({"job": job.to_dict() if job is not None else None})
+
+
+@app.route("/api/bot/jobs/<job_id>", methods=["GET"])
+def bot_job(job_id):
+    data = _bot_jobs().get(job_id)
+    if data is None:
+        return _json_response({"ok": False, "error": "Acción inexistente o vencida."}, 404)
+    return _json_response(data)
 
 
 def _binance_futures_client() -> bot_control.BinanceFuturesClient:

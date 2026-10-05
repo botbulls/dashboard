@@ -104,6 +104,8 @@ def env(monkeypatch, forager_cfg):
     monkeypatch.setenv(bot_control.ENV_CONTAINER, "client17-passivbot")
     monkeypatch.setenv(bot_control.ENV_FORAGER_CONFIG, str(forager_cfg))
     monkeypatch.setenv(bot_control.ENV_MODES_SUPPORTED, "1")
+    # Sin la espera informativa a forager (90 s por defecto) en los tests.
+    monkeypatch.setenv(bot_control.ENV_FORAGER_WARMUP, "0")
     return forager_cfg
 
 
@@ -267,9 +269,45 @@ def client(app):
     return c
 
 
-def post(client, url, body, token="tok"):
+class JobResult:
+    """Resultado final de una acción lanzada como job, con la forma de la respuesta síncrona de antes.
+
+    ``status_code`` es el HTTP que habría devuelto la acción síncrona (``http_status`` del job) y
+    ``get_json()`` es el ``resultado``. ``job`` es el snapshot final y ``accepted`` la respuesta 202.
+    """
+
+    def __init__(self, accepted, job):
+        self.accepted = accepted
+        self.job = job
+        self.status_code = job["http_status"]
+        self.data = json.dumps(job["resultado"]).encode()
+
+    def get_json(self):
+        return json.loads(self.data)
+
+    def get_data(self, as_text=False):
+        return self.data.decode() if as_text else self.data
+
+
+def wait_job(client, job_id, timeout=10.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while True:
+        job = client.get(f"/api/bot/jobs/{job_id}").get_json()
+        if job["estado"] != "en_curso":
+            return job
+        assert time.monotonic() < deadline, f"el job {job_id} no terminó: {job}"
+        time.sleep(0.01)
+
+
+def post(client, url, body, token="tok", wait=True):
+    """POST a una acción del panel. Si se aceptó (202), espera el job y devuelve ``JobResult``."""
     headers = {"X-CSRF-Token": token} if token is not None else {}
-    return client.post(url, data=json.dumps(body), content_type="application/json", headers=headers)
+    resp = client.post(url, data=json.dumps(body), content_type="application/json", headers=headers)
+    if resp.status_code != 202 or not wait:
+        return resp
+    return JobResult(resp, wait_job(client, resp.get_json()["job_id"]))
 
 
 def audit_lines(app):
@@ -282,7 +320,8 @@ def audit_lines(app):
 
 @pytest.mark.parametrize(
     "method,url",
-    [("get", "/api/bot/status"), ("post", "/api/bot/start"), ("post", "/api/bot/stop")],
+    [("get", "/api/bot/status"), ("post", "/api/bot/start"), ("post", "/api/bot/stop"),
+     ("get", "/api/bot/jobs/activo"), ("get", "/api/bot/jobs/0123456789abcdef")],
 )
 def test_auth_required(app, env, docker, method, url):
     resp = getattr(app.test_client(), method)(url)
