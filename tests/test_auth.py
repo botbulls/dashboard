@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
-from unittest import mock
 
 import pytest
 from werkzeug.security import generate_password_hash
@@ -39,8 +38,7 @@ def make_app(tmp_path):
             API_SECRET="x",
             DISABLE_AUTO_SCRAPE=True,
         )
-        with mock.patch("futuresboard.app._get_server_ip", return_value="127.0.0.1"):
-            application = init_app(cfg)
+        application = init_app(cfg)
         application.config["TESTING"] = True
         return application
 
