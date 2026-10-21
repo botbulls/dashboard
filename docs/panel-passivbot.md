@@ -71,6 +71,11 @@ Códigos: 400 parámetro inválido · 403 CSRF · 409 graceful no soportado, `sh
 exchange distinto de Binance en Apagar · 415 sin JSON · 502 docker-proxy/contenedor o cierre parcial
 en Binance · 503 panel no configurado o faltan credenciales de Binance.
 
+Las acciones (POST) corren como job en segundo plano: responden `202` con un `job_id` y el
+progreso se consulta en `GET /api/bot/jobs/<id>`. Los códigos de arriba que dependen de Docker o
+Binance (502) llegan en el `http_status` del job; los demás siguen siendo inmediatos. Ver
+[panel-progreso.md](panel-progreso.md).
+
 ### Lo que muestra el estado
 
 Riesgo, TWE y modos se leen del HJSON, no del proceso: forager carga la config una sola vez al
@@ -214,7 +219,7 @@ falla (`EBUSY`) o passivbot sigue viendo el inode viejo.
 ### Auditoría
 
 `<directorio de la DB>/bot_actions.log`, una línea JSON por acción:
-`ts`, `user`, `action`, `params`, `result` (`ok`/`rechazado`/`error`), `detail`, `remote_addr`.
+`ts`, `user`, `action`, `params`, `result` (`ok`/`rechazado`/`error`/`interrumpido`), `detail`, `remote_addr`.
 En Apagar, `detail` incluye `resumen: {...}` con el JSON del cierre.
 
 ## Variables de entorno
