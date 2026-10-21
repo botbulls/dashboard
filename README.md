@@ -80,7 +80,7 @@ By default, when launching the web application, a separate thread is also starte
 */5 * * * * futuresboard --scrape-only
 ```
 
-In this case, don't forget to pass `--disable-auto-scraper` when running the web app.
+In this case, don't forget to pass `--disable-auto-scraper` (or set `FUTURESBOARD_DISABLE_AUTO_SCRAPE=1`) when running the web app. `--scrape-only` never starts the background thread.
 
 ## Quickstart (Docker)
 This repository includes a `Dockerfile` and `docker-compose.yaml`.
@@ -96,6 +96,8 @@ docker compose up --build
 
 3. Open:
    - `http://127.0.0.1/` (Compose maps host port **80** to container port **5000**)
+
+The image runs **gunicorn** (1 worker, several threads; the auto scraper runs inside that worker) and exposes `GET /health` for liveness. Health checks with thresholds (`/api/bot/health`), Prometheus metrics (`/metrics`), structured logs and all the environment variables are documented in [docs/produccion.md](docs/produccion.md).
 
 > Suggestion: If you want the database to persist across container recreation, mount a host volume for the container `data/` directory as well.
 

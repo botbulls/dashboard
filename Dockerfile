@@ -26,4 +26,17 @@ RUN SETUPTOOLS_SCM_PRETEND_VERSION_FOR_FUTURESBOARD=1.0.0 python -m pip install 
 # Create data directory for database persistence
 RUN mkdir -p /usr/src/futuresboard/data
 
-CMD ["futuresboard", "--host", "0.0.0.0", "--port", "5000", "--disable-auto-scraper"]
+ENV PYTHONUNBUFFERED=1 \
+    FUTURESBOARD_PORT=5000
+
+EXPOSE 5000
+
+# Liveness: /health no requiere login ni toca DB/Docker/exchange.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ.get('FUTURESBOARD_PORT', '5000'), timeout=4)" || exit 1
+
+# gunicorn con 1 worker gthread: el scraper automatico corre como hilo dentro del worker
+# (ver src/futuresboard/gunicorn_conf.py). Lee ./config/config.json (o FUTURESBOARD_CONFIG_DIR).
+# Para desactivar el scraper: FUTURESBOARD_DISABLE_AUTO_SCRAPE=1.
+# Scrape puntual (cron): docker run ... futuresboard --scrape-only
+CMD ["gunicorn", "--config", "python:futuresboard.gunicorn_conf", "futuresboard.wsgi:app"]
