@@ -846,3 +846,296 @@ def test_telegram_en_cada_evento(h):
         assert esperado in textos
     assert "key-de-test" not in textos and "secret-de-test" not in textos and "signature" not in textos
 
+
+
+# ---------------------------------------------------------------- revisión adversarial (tope y préstamo)
+
+
+def _tope_pendiente_en_disco(h, intentos):
+    """Estado tal como queda en disco si el proceso muere durante el Apagar del tope (SIGTERM con el handler
+    por defecto: no corre ningún finally)."""
+    st = h.state()
+    st["tope"] = {"id": "t0pe", "generacion": st["base"]["generacion"], "disparado_en": "2023-11-14T22:13:20+00:00",
+                  "modo": "real", "capital": "100.00", "base": st["base"]["capital"], "limite": "19800.00",
+                  "pct": "10", "apagar": {"resultado": "pendiente", "intentos": intentos,
+                                          "ultimo_ms": None if intentos == 0 else h.fake.now_ms, "detalle": ""}}
+    rescate.save_state(h.data_dir, st)
+
+
+def test_apagar_cortado_antes_de_arrancar_se_ejecuta_en_el_proceso_nuevo(h):
+    h.configurar(tope=10)
+    h.fake.maint = Decimal("100")  # lejos de la liquidación: no inyecta
+    h.service().tick()
+    _tope_pendiente_en_disco(h, intentos=0)
+    h.avanzar(15)
+    h.service().tick()  # proceso nuevo (restart: unless-stopped)
+    ap = h.state()["tope"]["apagar"]
+    assert h.apagados == [1]
+    assert ap["resultado"] == "ok" and ap["intentos"] == 1
+
+
+def test_apagar_cortado_en_medio_cuenta_el_intento_reintenta_y_avisa(h):
+    h.configurar(tope=10)
+    h.fake.maint = Decimal("100")
+    h.service().tick()
+    _tope_pendiente_en_disco(h, intentos=1)
+    h.avanzar(15)
+    svc = h.service()
+    svc.tick()
+    ap = h.state()["tope"]["apagar"]
+    assert h.apagados == [1]  # se reintenta ya, sin esperar APAGAR_REINTENTO_MS
+    assert ap["resultado"] == "ok" and ap["intentos"] == 2
+    assert any("cortado por un reinicio" in t for t in h.sent)
+
+
+def test_apagar_cortado_en_el_ultimo_intento_pide_intervencion_manual(h):
+    h.configurar(tope=10)
+    h.fake.maint = Decimal("100")
+    h.service().tick()
+    _tope_pendiente_en_disco(h, intentos=rescate.APAGAR_MAX_INTENTOS)
+    h.avanzar(15)
+    h.service().tick()
+    assert h.apagados == []
+    assert h.state()["tope"]["apagar"]["resultado"] == "error"
+    assert any("intervención manual" in t for t in h.sent)
+
+
+def test_apagar_persiste_el_intento_antes_de_ejecutar(h):
+    h.configurar(tope=10)
+    h.fake.maint = Decimal("100")
+    svc = h.service()
+    svc.tick()
+    vistos = []
+
+    def apagar():
+        vistos.append(h.state()["tope"]["apagar"])
+        return h.apagar_result
+
+    svc._apagar = apagar
+    h.fake.margin = Decimal("-500")
+    svc.tick()
+    # Si el proceso muere acá adentro, el próximo ve el intento contado (no reintenta para siempre).
+    assert vistos and vistos[0]["resultado"] == "pendiente" and vistos[0]["intentos"] == 1
+
+
+def test_tope_real_no_queda_simulado_por_pasar_por_dry_run(h):
+    h.configurar(tope=10)
+    h.fake.maint = Decimal("100")
+    h.apagar_result = ("error", {"ok": False, "error": "docker-proxy caído"})
+    svc = h.service()
+    svc.tick()
+    h.fake.margin = Decimal("-500")
+    svc.tick()
+    assert len(h.apagados) == 1 and h.state()["tope"]["modo"] == "real"
+    h.avanzar(rescate.APAGAR_REINTENTO_MS / 1000 + 10)
+    h.service(mode="dry_run").tick()  # el operador reinicia en dry_run para diagnosticar
+    tope = h.state()["tope"]
+    assert tope["apagar"]["resultado"] == "error" and tope["modo"] == "real"
+    assert len(h.apagados) == 2  # el tope es real: el reintento es el Apagar real
+    h.apagar_result = ("ok", {"ok": True, "modo": "apagar"})
+    h.avanzar(rescate.APAGAR_REINTENTO_MS / 1000 + 10)
+    h.service().tick()
+    assert len(h.apagados) == 3 and h.state()["tope"]["apagar"]["resultado"] == "ok"
+
+
+@pytest.mark.parametrize("apagar", [True, False])
+def test_dry_run_con_prestamo_real_el_tope_es_real(h, apagar):
+    h.configurar(tope=30)
+    h.fake.maint = Decimal("100")
+    h.service().tick()  # base 22000 en real
+    st = h.state()
+    st["prestamo"]["real"] = "2000.00"
+    rescate.save_state(h.data_dir, st)
+    h.fake.margin, h.fake.spot = Decimal("10"), Decimal("10")
+    h.avanzar(15)
+    h.service(mode="dry_run", apagar=apagar).tick()
+    tope = h.state()["tope"]
+    assert tope["modo"] == "real"
+    assert "simulado" not in rescate.start_bloqueado(h.data_dir)
+    disparo = next(t for t in h.sent if "TOPE DE PÉRDIDA" in t)
+    assert not disparo.startswith("🧪")  # es plata real: sin [SIMULACIÓN]
+    if apagar:
+        assert h.apagados == [1] and tope["apagar"]["resultado"] == "ok"
+    else:
+        assert tope["apagar"]["resultado"] == "error" and "no disponible" in tope["apagar"]["detalle"]
+
+
+def test_inyeccion_publica_el_prestamo_antes_del_post(h):
+    h.configurar(reserva=5000, paso=1000)
+    h.fake.maint = Decimal("3000")  # sigue cerca de la liquidación aunque entre plata
+    vistos = []
+    original = h.fake._execute
+
+    def execute(tipo, amount):
+        vistos.append(h.loan_file()["loan_outstanding_usdt"])  # lo que lee passivbot cuando Binance acredita
+        return original(tipo, amount)
+
+    h.fake._execute = execute
+    svc = h.service()
+    svc.tick()
+    svc.tick()
+    assert vistos == [1000.0, 2000.0]
+
+
+def test_rechazo_revierte_el_prestamo_publicado(h):
+    h.configurar()
+    h.fake.transfer_mode = "reject"
+    vistos = []
+    original = h.fake.request
+
+    def request(method, url, **kw):
+        if method == "POST":
+            vistos.append(h.loan_file()["loan_outstanding_usdt"])
+        return original(method, url, **kw)
+
+    h.fake.request = request
+    h.service().tick()
+    assert vistos == [1000.0]
+    assert h.loan_file()["loan_outstanding_usdt"] == 0.0 and h.state()["prestamo"]["real"] == "0.00"
+    assert h.state()["ledger"][-1]["prestamo_despues"] == "0.00"
+
+
+@pytest.mark.parametrize("historial_caido", [False, True])
+def test_reinicio_con_inyeccion_enviando_aplica_el_prestamo(h, historial_caido):
+    h.configurar()
+    h.fake.transfer_mode, h.fake.ejecutar_ambigua, h.fake.history_visible = "timeout", True, False
+    h.service().tick()
+    st = h.state()
+    st["en_vuelo"]["estado"] = "enviando"  # estado escrito antes del POST por una versión anterior
+    st["en_vuelo"]["prestamo_aplicado"] = False
+    st["prestamo"]["real"] = "0.00"
+    rescate.save_state(h.data_dir, st)
+    rescate.write_loan_state(h.loan_path, Decimal(0), "real")
+    h.fake.transfer_mode = "ok"
+    if historial_caido:
+        h.fake.read_fail.add("/sapi/v1/asset/transfer")
+    h.avanzar(15)
+    svc = h.service()
+    svc.tick()
+    assert h.loan_file()["loan_outstanding_usdt"] == 1000.0  # conservador desde el primer ciclo
+    assert h.state()["prestamo"]["real"] == "1000.00" and h.state()["en_vuelo"]["estado"] == "incierto"
+    h.avanzar(60)
+    svc.tick()
+    assert h.loan_file()["loan_outstanding_usdt"] == 1000.0
+
+
+def _inyectar_real(h, tope=30):
+    h.configurar(tope=tope)
+    svc = h.service()
+    svc.tick()  # base 22000 + inyección de 1000 (ratio 2 < 3)
+    st = h.state()
+    assert st["base"]["capital"] == "22000.00" and st["prestamo"]["real"] == "1000.00"
+    h.fake.maint = Decimal("100")  # sin más inyecciones
+    return svc
+
+
+@pytest.mark.parametrize("como", ["deshabilitado", "config_invalida"])
+def test_tope_sigue_armado_con_prestamo_real_pendiente(h, como):
+    svc = _inyectar_real(h)
+    if como == "deshabilitado":
+        h.configurar(habilitado=False, reserva=None, tope=None)  # lo que manda el panel al destildar
+    else:
+        (h.data_dir / rescate.CONFIG_FILE_NAME).write_text("{roto")
+    h.fake.margin = Decimal("-4000")  # capital 19000 - 4000 = 15000 <= 15400 (22000 x 0.7)
+    h.avanzar(15)
+    svc.tick()
+    tope = h.state()["tope"]
+    assert tope is not None and tope["limite"] == "15400.00" and tope["modo"] == "real"
+    assert h.apagados == [1]
+    status = rescate.panel_status(h.data_dir)
+    assert status["tope"]["id"] == tope["id"]
+
+
+def test_tope_armado_por_prestamo_se_ve_en_el_panel(h):
+    _inyectar_real(h)
+    h.configurar(habilitado=False, reserva=None, tope=None)
+    h.service().tick()
+    status = rescate.panel_status(h.data_dir)
+    assert status["base"]["capital"] == "22000.00" and status["limite_tope"] == "15400.00"
+    assert status["tope_pct"] == "30" and status["tope_por_prestamo"] is True
+
+
+def test_rehabilitar_con_prestamo_real_mantiene_la_base(h):
+    svc = _inyectar_real(h)
+    h.configurar(habilitado=False, reserva=None, tope=None)
+    h.fake.margin = Decimal("-2000")  # capital 17000: perdió plata, todavía arriba de 15400
+    h.avanzar(15)
+    svc.tick()
+    h.configurar(tope=30)  # generación nueva
+    h.avanzar(15)
+    svc.tick()
+    st = h.state()
+    assert st["base"]["capital"] == "22000.00" and st["base"]["generacion"] == 2
+    assert st["tope"] is None
+    h.fake.margin = Decimal("-4000")
+    h.avanzar(15)
+    svc.tick()
+    assert h.state()["tope"]["limite"] == "15400.00" and h.apagados == [1]
+
+
+def test_tope_reconocido_con_prestamo_pendiente_no_se_redispara(h):
+    svc = _inyectar_real(h)
+    h.fake.margin = Decimal("-4000")
+    h.avanzar(15)
+    svc.tick()
+    tope = h.state()["tope"]
+    assert h.apagados == [1]
+    rescate.reconocer_tope(h.data_dir, tope["id"], "cliente17")
+    for _ in range(3):
+        h.avanzar(15)
+        svc.tick()
+    assert h.state()["tope"] is None and h.apagados == [1]
+    assert h.state()["prestamo"]["real"] == "1000.00"
+
+
+def test_spot_caido_evalua_el_tope_con_el_ultimo_spot(h):
+    h.configurar(tope=30)
+    h.fake.margin, h.fake.spot, h.fake.maint = Decimal("20000"), Decimal("2000"), Decimal("100")
+    svc = h.service()
+    svc.tick()
+    assert h.state()["base"]["capital"] == "22000.00"
+    h.fake.read_fail.add("/api/v3/account")
+    h.fake.margin = Decimal("13000")  # 13000 + 2000 = 15000 <= 15400
+    h.avanzar(15)
+    svc.tick()
+    tope = h.state()["tope"]
+    assert tope is not None and h.apagados == [1]
+    assert any("último saldo spot" in t for t in h.sent)
+
+
+def test_spot_caido_con_margen_sano_no_dispara(h):
+    h.configurar(tope=30)
+    h.fake.maint = Decimal("100")
+    svc = h.service()
+    svc.tick()  # base 22000 = 2000 de margen + 20000 de spot
+    h.fake.read_fail.add("/api/v3/account")
+    for _ in range(3):
+        h.avanzar(15)
+        svc.tick()
+    # Con "solo margin_balance" (2000 <= 15400) se cerraría todo a mercado por una caída de la API de spot.
+    assert h.state()["tope"] is None and h.apagados == []
+    assert h.fake.posts() == []
+
+
+def test_spot_caido_descuenta_la_inyeccion_posterior_a_la_lectura(h):
+    h.configurar(tope=30)
+    h.fake.margin, h.fake.spot, h.fake.maint = Decimal("20000"), Decimal("2000"), Decimal("7000")
+    svc = h.service()
+    svc.tick()  # lee spot 2000, después inyecta 1000 (ratio 2.86 < 3): spot real 1000
+    assert [p["amount"] for p in h.fake.posts()] == ["1000.00"]
+    h.fake.read_fail.add("/api/v3/account")
+    h.fake.margin = Decimal("14400")  # capital real 14400 + 1000 = 15400 <= 15400
+    h.avanzar(15)
+    svc.tick()
+    assert h.state()["tope"] is not None and h.apagados == [1]
+
+
+def test_futuros_caidos_avisa_que_el_tope_no_se_evalua(h):
+    h.configurar(tope=30)
+    svc = h.service()
+    svc.tick()
+    h.fake.read_fail.add("/fapi/v2/account")
+    h.avanzar(15)
+    svc.tick()
+    aviso = next(t for t in h.sent if "No se pudo leer la cuenta" in t)
+    assert "tope de pérdida" in aviso

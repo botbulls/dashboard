@@ -75,19 +75,35 @@ Un ciclo cada `FUTURESBOARD_RESCATE_INTERVAL` segundos (default 15). En cada cic
    (`GET /api/v3/account`, campo `free`). No se usa ccxt `binanceusdm.fetch_balance({'type': 'spot'})`,
    que en ccxt 4.1.72 igual consulta futuros. Una respuesta incompleta o inválida es error: nunca se toma
    como 0.
+   - Si falla **futuros**: no se hace nada más ese ciclo y el aviso dice que el tope no se puede evaluar.
+   - Si falla **solo spot**: no hay transferencias ni conciliación, pero el tope se sigue evaluando con
+     `equity de futuros + último spot leído OK` (menos lo que creció el préstamo real desde esa lectura) y
+     el aviso lo dice. No se usa solo la equity de futuros: con la reserva en spot, una caída de la API de
+     spot cerraría todo a mercado. Sin ningún spot leído antes, el aviso dice que el tope quedó desarmado.
 2. **Conciliación** de una transferencia en vuelo (ver abajo). Mientras haya una, no se hace otra.
 3. **Base**: al habilitar (o volver a habilitar) en el panel se abre una generación nueva. El primer
    ciclo con lectura OK fija `base = capital_total` (`equity de futuros + USDT libre en spot`). Mientras no
    hay base el tope no está armado y **no se presta nada**; el panel lo muestra como "base pendiente".
-4. **Tope de pérdida total**: si `capital_total <= base × (1 - tope%)`:
+   La base guarda también el % de tope vigente. Volver a habilitar **con un préstamo real pendiente** no
+   fija una base nueva sobre el capital ya perdido: se mantiene la anterior.
+4. **Tope de pérdida total**: si `capital_total <= base × (1 - tope%)`. Se evalúa con el rescate
+   habilitado y también, mientras haya un **préstamo real pendiente**, con el rescate deshabilitado o con
+   `rescate_config.json` inválido (usa la última base y su %: la reserva prestada sigue en futuros). Una
+   base cuyo tope ya se disparó no se vuelve a armar así, para que reconocerlo no lo re-dispare.
    - se registra el disparo y se persiste **antes** de actuar (desde ese momento el panel bloquea START);
    - se ejecuta **exactamente** la rutina de Apagar del panel (`bot_control.stop_bot(..., "apagar")`:
      detener passivbot, cancelar órdenes normales y condicionales, cerrar posiciones a mercado y
      verificar), tomando el **mismo lock de archivo** que las acciones del panel (espera hasta 180 s si
      hay una acción en curso). Queda en `bot_actions.log` con usuario `rescate (tope de pérdida)`;
    - aviso por Telegram (disparo + resultado del Apagar con el resumen del cierre);
+   - cada intento se persiste **antes** de ejecutarlo. Si el proceso muere en medio (deploy, OOM, reinicio
+     del host), el ciclo siguiente lo cuenta como intento cortado, avisa por Telegram y reintenta en el
+     momento;
    - si Apagar falla, se reintenta cada 2 min hasta completar 3 intentos; después, aviso de intervención
-     manual;
+     manual. El reintento no depende de poder leer la cuenta;
+   - el tope es **real** si el servicio está en `real` o si hay un préstamo real pendiente (aunque el
+     servicio esté en `dry_run`), y ahí siempre ejecuta el Apagar real. Que sea simulado lo decide el modo
+     del tope, nunca el del proceso que lo reintenta;
    - START queda bloqueado (409) hasta **reconocerlo** en el panel. Reconocer deshabilita el rescate:
      volver a habilitarlo fija una base nueva.
 5. **Inyección** (spot → futuros, `MAIN_UMFUTURE`) solo si el rescate está habilitado, hay base, no hay
@@ -113,8 +129,10 @@ transferencia. Por eso:
   del USDT libre en spot: bajó/subió exactamente el monto → ejecutada; no cambió → no ejecutada; cambió
   otra cosa → aviso de conciliación manual (y no se hacen transferencias nuevas).
 - Con `tranId`, el historial confirma el estado: `CONFIRMED` cierra, `FAILED` revierte, `PENDING` espera.
-- **Inyección**: el préstamo se suma al recibir el `tranId` (o ante un resultado ambiguo, por las dudas)
-  y se reescribe `loan_state.json`; si la conciliación prueba que no se ejecutó, se revierte.
+- **Inyección**: el préstamo se suma y se reescribe `loan_state.json` **antes** del POST (passivbot puede
+  ver la plata en la wallet por websocket antes de que llegue la respuesta). Si Binance la rechaza, o la
+  conciliación prueba que no se ejecutó o quedó `FAILED`, se revierte. Al arrancar, una inyección real en
+  vuelo siempre cuenta en el préstamo publicado.
 - **Devolución**: el préstamo baja **solo** con la transferencia confirmada (`CONFIRMED` en el historial
   o variación del saldo spot). Hasta entonces passivbot sigue viendo el préstamo completo (lado conservador).
 
@@ -125,11 +143,11 @@ El ledger (últimas 200 transferencias) y los eventos (últimos 100) quedan en `
 | Modo | Qué hace |
 |---|---|
 | `off` (default) | No opera. Solo, al arrancar, si `loan_state.json` quedó con un préstamo **simulado**, lo reescribe con el préstamo real (para no achicar a passivbot para siempre). |
-| `dry_run` | Lee la cuenta y calcula todo; **no llama a `/sapi`**. Registra lo que HARÍA, actualiza el préstamo **simulado** y escribe `loan_state.json` con `"mode": "dry_run"` (sirve en dev para probar el dimensionamiento de passivbot). Para decidir, el margen y lo retirable se calculan como si lo simulado se hubiera movido. El tope **no ejecuta Apagar**: registra "tope disparado (simulado)", avisa y bloquea START igual (para probar el reconocimiento). |
+| `dry_run` | Lee la cuenta y calcula todo; **no llama a `/sapi`**. Registra lo que HARÍA, actualiza el préstamo **simulado** y escribe `loan_state.json` con `"mode": "dry_run"` (sirve en dev para probar el dimensionamiento de passivbot). Para decidir, el margen y lo retirable se calculan como si lo simulado se hubiera movido. El tope **no ejecuta Apagar**: registra "tope disparado (simulado)", avisa y bloquea START igual (para probar el reconocimiento). Excepción: con un préstamo real pendiente el tope es real y ejecuta el Apagar real (si no está disponible, queda en error con aviso, nunca "simulado"). |
 | `real` | Transfiere de verdad. Al arrancar verifica `GET /sapi/v1/account/apiRestrictions` y se niega a transferir si no se cumple `ipRestrict=true`, `permitsUniversalTransfer=true`, `enableWithdrawals=false` y `enableInternalTransfer=false` (se verifica una vez por arranque: corregir la key y reiniciar). Bloqueado en testnet/Demo (Demo no tiene `/sapi`) y sin `FUTURESBOARD_DOCKER_URL` (el tope no podría apagar). |
 
 Un modo bloqueado (permisos, testnet) frena las **transferencias**; el tope de pérdida sigue vigilando
-con el rescate habilitado.
+con el rescate habilitado (o con un préstamo real pendiente).
 
 ## Panel
 

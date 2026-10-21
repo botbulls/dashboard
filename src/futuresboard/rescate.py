@@ -507,6 +507,30 @@ def tope_activo(state: Dict[str, Any], cfg: Dict[str, Any]) -> Optional[Dict[str
     return None
 
 
+def tope_armado(state: Dict[str, Any], cfg: Dict[str, Any]) -> Optional[Tuple[Dict[str, Any], Decimal, bool]]:
+    """(base, pct, por_préstamo) con la que se evalúa el tope de pérdida, o None si no está armado.
+
+    * Rescate habilitado: la base de la generación vigente y el % de la config.
+    * Deshabilitado (o con ``rescate_config.json`` inválido) con un préstamo REAL pendiente: la última base con
+      el % guardado en ella. La reserva prestada sigue expuesta en futuros, así que el tope no se desarma.
+      Una base cuyo tope ya se disparó no se vuelve a armar así: reconocerlo no puede re-dispararlo sobre la
+      misma pérdida (el préstamo puede quedar pendiente si la pérdida se comió parte de la reserva).
+    """
+    base = state.get("base")
+    if not isinstance(base, dict) or base.get("capital") is None:
+        return None
+    if cfg.get("habilitado") and base.get("generacion") == cfg.get("generacion"):
+        pct = cfg_dec(cfg, "tope_perdida_pct")
+        if pct is not None:
+            return base, pct, False
+    if real_pendiente(state) and not base.get("tope_id") and base.get("pct") is not None:
+        try:
+            return base, dec(base["pct"]), True
+        except ValueError:
+            return None
+    return None
+
+
 def start_bloqueado(data_dir: pathlib.Path) -> Optional[str]:
     """Mensaje si START está bloqueado por un tope de pérdida sin reconocer (None si no)."""
     path = data_dir / STATE_FILE_NAME
@@ -730,27 +754,30 @@ class RescateService:
     def _now_ms(self) -> int:
         return int(self.clock() * 1000)
 
-    def _notify(self, text: str) -> None:
-        prefix = "🧪 <b>[SIMULACIÓN]</b> " if self.mode == MODE_DRY_RUN else ""
+    def _notify(self, text: str, simulado: Optional[bool] = None) -> None:
+        """``simulado`` None = según el modo del servicio. Un tope real en un proceso dry_run va sin el prefijo."""
+        if simulado is None:
+            simulado = self.mode == MODE_DRY_RUN
+        prefix = "🧪 <b>[SIMULACIÓN]</b> " if simulado else ""
         try:
             self.send(prefix + text)
         except Exception:  # pragma: no cover - telegram_notify.send no lanza
             log.warning("No se pudo notificar a Telegram.")
 
-    def _alert(self, key: str, text: str) -> None:
+    def _alert(self, key: str, text: str, simulado: Optional[bool] = None) -> None:
         """Avisa solo si el mensaje de esa clave cambió (sin spam cada ciclo, ni en Telegram ni en el log)."""
         if self._alertas.get(key) != text:
             log.warning("%s", text)
             self._alertas[key] = text
-            self._notify(f"⚠️ <b>Rescate</b>: {esc(text)}")
+            self._notify(f"⚠️ <b>Rescate</b>: {esc(text)}", simulado)
 
     def _clear(self, key: str, recovery: Optional[str] = None) -> None:
         if self._alertas.pop(key, None) is not None and recovery:
             self._notify(f"✅ <b>Rescate</b>: {esc(recovery)}")
 
-    def _event(self, state: Dict[str, Any], tipo: str, texto: str) -> None:
+    def _event(self, state: Dict[str, Any], tipo: str, texto: str, mode: Optional[str] = None) -> None:
         log.info("[%s] %s", tipo, texto)
-        add_event(state, tipo, texto, self.mode, self.clock())
+        add_event(state, tipo, texto, mode or self.mode, self.clock())
 
     def _sync_loan_file(self, state: Dict[str, Any]) -> None:
         """loan_state.json = préstamo del modo activo (ver ``loan_publicado``).
@@ -786,9 +813,7 @@ class RescateService:
         return None
 
     # -- lectura ----------------------------------------------------------------------
-    def read_snapshot(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        fut = self.binance.futures_account()
-        spot = self.binance.spot_usdt_free()
+    def build_snapshot(self, state: Dict[str, Any], fut: Dict[str, Any], spot: Decimal) -> Dict[str, Any]:
         snap: Dict[str, Any] = dict(fut)
         snap["spot_real"] = spot
         snap["capital"] = fut["margin_balance"] + spot
@@ -848,6 +873,7 @@ class RescateService:
         if self.mode == MODE_OFF:
             self._tick_off(state)
             return
+        self._asegurar_prestamo_en_vuelo(state)
         if self._primer_tick or prev_mode != self.mode:
             if prev_mode and prev_mode != self.mode:
                 self._event(state, "modo", f"Modo del servicio: {prev_mode} -> {self.mode}.")
@@ -871,22 +897,36 @@ class RescateService:
             self._clear("bloqueo")
 
         self._procesar_reconocimiento(state, cfg)
+        activo = tope_activo(state, cfg)
+        if activo is not None:
+            # El Apagar de un tope ya disparado no depende de poder leer la cuenta.
+            self._reintentar_apagar(state, activo, now_ms)
 
         try:
-            snap = self.read_snapshot(state)
-        except (ReadError, RescateError) as exc:
-            msg = f"No se pudo leer la cuenta en Binance: {exc}"
+            fut = self.binance.futures_account()
+        except RescateError as exc:
+            msg = (f"No se pudo leer la cuenta en Binance (futuros): {exc}. Hasta que vuelva la lectura el tope de "
+                   "pérdida no se puede evaluar y no se hacen transferencias.")
             state["ultimo"] = {"ts": now_iso(self.clock()), "error": msg}
             self._alert("lectura", msg)
             return
+        try:
+            spot = self.binance.spot_usdt_free()
+        except RescateError as exc:
+            self._tick_sin_spot(state, cfg, fut, exc, now_ms)
+            return
         self._clear("lectura", "Lectura de la cuenta en Binance recuperada.")
+        snap = self.build_snapshot(state, fut, spot)
+        # Último spot leído OK (con el préstamo real de ese momento): sirve para evaluar el tope si spot se cae.
+        state["spot_ref"] = {"usdt": money(spot), "prestamo_real": money(get_loan(state, MODE_REAL)),
+                             "ts": now_iso(self.clock())}
         state["ultimo"] = self.snapshot_view(snap, self.mode, self.clock())
 
         if state.get("en_vuelo"):
             self._conciliar(state, snap, now_ms)
 
         self._fijar_base(state, cfg, snap)
-        self._tope(state, cfg, snap, now_ms)
+        self._tope(state, cfg, snap["capital"], now_ms)
 
         if state.get("en_vuelo") or bloqueo:
             return
@@ -906,6 +946,47 @@ class RescateService:
             self._event(state, "modo", "Modo off: loan_state.json tenía un préstamo simulado; se reescribió con el "
                                        "préstamo real.")
 
+    def _asegurar_prestamo_en_vuelo(self, state: Dict[str, Any]) -> None:
+        """Una inyección real en vuelo cuenta en el préstamo publicado (lado conservador).
+
+        Desde esta versión el préstamo se aplica antes del POST; esto cubre un estado escrito por una versión
+        anterior (``enviando`` sin aplicar) para que passivbot no dimensione sobre la reserva tras un reinicio.
+        """
+        entry = state.get("en_vuelo")
+        if (isinstance(entry, dict) and entry.get("modo") == MODE_REAL and entry.get("tipo") == TIPO_INYECCION
+                and not entry.get("prestamo_aplicado")):
+            self._aplicar_prestamo(state, entry)
+
+    def _tick_sin_spot(self, state: Dict[str, Any], cfg: Dict[str, Any], fut: Dict[str, Any], exc: Exception,
+                       now_ms: int) -> None:
+        """Futuros OK y spot caído: sin transferencias ni conciliación, pero el tope se sigue evaluando.
+
+        El spot se estima con el último leído OK menos lo que el préstamo real creció desde esa lectura (una
+        inyección posterior ya salió de spot). No se usa solo ``margin_balance``: con la reserva en spot eso
+        dispararía Apagar por una caída de la API de spot.
+        """
+        msg = f"No se pudo leer la cuenta en Binance (spot): {exc}. No se hacen transferencias; "
+        ref = state.get("spot_ref")
+        spot_est: Optional[Decimal] = None
+        if isinstance(ref, dict):
+            try:
+                crecio = get_loan(state, MODE_REAL) - dec(ref["prestamo_real"])
+                spot_est = max(Decimal(0), dec(ref["usdt"]) - crecio)
+            except (KeyError, ValueError):
+                spot_est = None
+        if spot_est is None:
+            msg += ("sin un saldo spot leído antes, el tope de pérdida queda DESARMADO hasta que vuelva la "
+                    "lectura de spot.")
+            state["ultimo"] = {"ts": now_iso(self.clock()), "error": msg}
+            self._alert("lectura", msg)
+            return
+        msg += (f"el tope de pérdida se evalúa con el último saldo spot leído ({money(spot_est)} USDT, del "
+                f"{ref.get('ts')}).")
+        state["ultimo"] = {"ts": now_iso(self.clock()), "error": msg}
+        self._alert("lectura", msg)
+        self._tope(state, cfg, fut["margin_balance"] + spot_est, now_ms,
+                   nota=f" Evaluado sin lectura de spot (último saldo spot leído: {money(spot_est)} USDT).")
+
     # -- reconocimiento del tope --------------------------------------------------------
     def _procesar_reconocimiento(self, state: Dict[str, Any], cfg: Dict[str, Any]) -> None:
         tope = state.get("tope")
@@ -917,62 +998,95 @@ class RescateService:
     def _fijar_base(self, state: Dict[str, Any], cfg: Dict[str, Any], snap: Dict[str, Any]) -> None:
         if not cfg.get("habilitado") or tope_activo(state, cfg):
             return
+        pct = cfg_dec(cfg, "tope_perdida_pct")
+        pct_txt = None if pct is None else format(pct.normalize(), "f")
         base = state.get("base")
         if isinstance(base, dict) and base.get("generacion") == cfg.get("generacion"):
+            # El último % vigente queda en la base: arma el tope si después se deshabilita con préstamo real.
+            base["pct"] = pct_txt
             return
-        pct = cfg_dec(cfg, "tope_perdida_pct")
+        if (isinstance(base, dict) and base.get("capital") is not None and not base.get("tope_id")
+                and real_pendiente(state)):
+            # Volver a habilitar con plata real prestada no fija una base nueva sobre el capital ya perdido.
+            base.update(generacion=cfg.get("generacion"), pct=pct_txt)
+            base_capital = dec(base["capital"])
+            limite = base_capital * (1 - pct / 100) if pct is not None else None
+            texto = (f"Rescate habilitado otra vez con un préstamo real pendiente "
+                     f"({money(get_loan(state, MODE_REAL))} USDT): se mantiene la base {money(base_capital)} USDT. "
+                     f"Tope de pérdida {pct}%: se apaga todo si el capital total baja a "
+                     f"{money(limite) if limite is not None else '?'} USDT.")
+            self._event(state, "base", texto)
+            self._notify(f"🛟 <b>Rescate</b>: {esc(texto)}")
+            return
         capital = snap["capital"]
         state["base"] = {"generacion": cfg.get("generacion"), "capital": money(capital),
-                         "fijada_en": now_iso(self.clock())}
+                         "fijada_en": now_iso(self.clock()), "pct": pct_txt, "tope_id": None}
         limite = capital * (1 - pct / 100) if pct is not None else None
         texto = (f"Rescate habilitado: base {money(capital)} USDT (futuros + spot). Tope de pérdida {pct}%: "
                  f"se apaga todo si el capital total baja a {money(limite) if limite is not None else '?'} USDT.")
         self._event(state, "base", texto)
         self._notify(f"🛟 <b>Rescate</b>: {esc(texto)}")
 
-    def _tope(self, state: Dict[str, Any], cfg: Dict[str, Any], snap: Dict[str, Any], now_ms: int) -> None:
-        activo = tope_activo(state, cfg)
-        if activo is not None:
-            self._reintentar_apagar(state, activo, now_ms)
+    def _tope(self, state: Dict[str, Any], cfg: Dict[str, Any], capital: Decimal, now_ms: int,
+              nota: str = "") -> None:
+        if tope_activo(state, cfg) is not None:
             return
-        if not cfg.get("habilitado"):
+        armado = tope_armado(state, cfg)
+        if armado is None:
             return
-        base = state.get("base")
-        pct = cfg_dec(cfg, "tope_perdida_pct")
-        if not isinstance(base, dict) or base.get("generacion") != cfg.get("generacion") or pct is None:
-            return
+        base, pct, por_prestamo = armado
         base_capital = dec(base["capital"])
         limite = base_capital * (1 - pct / 100)
-        capital = snap["capital"]
         if capital > limite:
             return
+        # Con plata real en juego (modo real o préstamo real pendiente) el tope es real, aunque el servicio
+        # esté en dry_run: la reserva prestada está expuesta en futuros.
+        modo = MODE_REAL if self.mode == MODE_REAL or real_pendiente(state) else MODE_DRY_RUN
         tope = {
             "id": secrets.token_hex(8),
-            "generacion": cfg.get("generacion"),
+            "generacion": base.get("generacion"),
             "disparado_en": now_iso(self.clock()),
-            "modo": self.mode,
+            "modo": modo,
             "capital": money(capital),
             "base": money(base_capital),
             "limite": money(limite),
             "pct": format(pct.normalize(), "f"),
             "apagar": {"resultado": "pendiente", "intentos": 0, "ultimo_ms": None, "detalle": ""},
         }
+        base["tope_id"] = tope["id"]
         state["tope"] = tope
         texto = (f"TOPE DE PÉRDIDA TOTAL disparado: capital {money(capital)} USDT <= límite {money(limite)} "
                  f"(base {money(base_capital)}, tope {tope['pct']}%). START queda bloqueado hasta reconocerlo.")
-        self._event(state, "tope", texto)
+        if por_prestamo:
+            texto += " El rescate está deshabilitado, pero el tope sigue armado por el préstamo real pendiente."
+        texto += nota
+        self._event(state, "tope", texto, modo)
         # Persistir antes de Apagar: el panel bloquea START desde este momento.
         save_state(self.data_dir, state)
-        self._notify(f"🛑 <b>Rescate</b>: {esc(texto)}")
+        self._notify(f"🛑 <b>Rescate</b>: {esc(texto)}", modo == MODE_DRY_RUN)
         self._ejecutar_apagar(state, tope, now_ms)
 
     def _reintentar_apagar(self, state: Dict[str, Any], tope: Dict[str, Any], now_ms: int) -> None:
-        ap = tope.get("apagar") or {}
-        if ap.get("resultado") != "error":
+        ap = tope.setdefault("apagar", {"resultado": "pendiente", "intentos": 0, "ultimo_ms": None, "detalle": ""})
+        simulado = tope.get("modo") == MODE_DRY_RUN
+        intentos = int(ap.get("intentos") or 0)
+        if ap.get("resultado") == "pendiente":
+            # Apagar corre de forma sincrónica dentro del ciclo: un "pendiente" visto en un ciclo posterior es
+            # un Apagar que se cortó (SIGTERM de un deploy, OOM, reinicio del host).
+            if intentos == 0:
+                self._ejecutar_apagar(state, tope, now_ms)  # se cortó antes de arrancar
+                return
+            ap.update(resultado="error", ultimo_ms=None,
+                      detalle="Apagar cortado por un reinicio del servicio: no se sabe hasta dónde llegó.")
+            texto = (f"El Apagar por tope (intento {intentos}) quedó cortado por un reinicio del servicio. "
+                     + ("Se reintenta ahora." if intentos < APAGAR_MAX_INTENTOS else ""))
+            self._event(state, "apagar", texto.strip(), tope.get("modo"))
+            self._notify(f"⚠️ <b>Rescate</b>: {esc(texto.strip())}", simulado)
+        elif ap.get("resultado") != "error":
             return
-        if int(ap.get("intentos") or 0) >= APAGAR_MAX_INTENTOS:
-            self._alert("apagar", f"Apagar por tope falló {ap.get('intentos')} veces: requiere intervención manual "
-                                  f"(último error: {ap.get('detalle')}).")
+        if intentos >= APAGAR_MAX_INTENTOS:
+            self._alert("apagar", f"Apagar por tope falló {intentos} veces: requiere intervención manual "
+                                  f"(último error: {ap.get('detalle')}).", simulado)
             return
         if now_ms - int(ap.get("ultimo_ms") or 0) < APAGAR_REINTENTO_MS:
             return
@@ -980,13 +1094,21 @@ class RescateService:
 
     def _ejecutar_apagar(self, state: Dict[str, Any], tope: Dict[str, Any], now_ms: int) -> None:
         ap = tope.setdefault("apagar", {"resultado": "pendiente", "intentos": 0, "ultimo_ms": None, "detalle": ""})
-        if tope.get("modo") == MODE_DRY_RUN or self.mode == MODE_DRY_RUN:
+        # Lo decide el modo del TOPE, nunca el del servicio: un proceso en dry_run no simula un tope real.
+        if tope.get("modo") == MODE_DRY_RUN:
             ap.update(resultado="simulado", detalle="Simulación: no se detuvo passivbot ni se cerró nada en Binance.")
             self._event(state, "apagar", "HARÍA Apagar (detener passivbot, cancelar órdenes y cerrar posiciones). "
-                                         "No se ejecutó: modo dry_run.")
+                                         "No se ejecutó: modo dry_run.", MODE_DRY_RUN)
             return
         ap["intentos"] = int(ap.get("intentos") or 0) + 1
         ap["ultimo_ms"] = now_ms
+        ap["resultado"] = "pendiente"
+        ap["detalle"] = "Apagar en curso."
+        try:
+            # Si el proceso muere en medio, el próximo ciclo lo ve cortado con el intento ya contado.
+            save_state(self.data_dir, state)
+        except OSError:
+            log.exception("No se pudo persistir el intento de Apagar: se ejecuta igual.")
         if self._apagar is None:
             outcome, payload = "error", {"ok": False, "error": "Apagar no disponible (falta FUTURESBOARD_DOCKER_URL)."}
         else:
@@ -997,10 +1119,11 @@ class RescateService:
                 outcome, payload = "error", {"ok": False, "error": f"error inesperado ({exc.__class__.__name__})"}
         ap["resultado"] = "ok" if outcome == "ok" else "error"
         ap["detalle"] = str(payload.get("error") or payload.get("warning") or "Apagar completo.")[:500]
-        self._event(state, "apagar", f"Apagar por tope (intento {ap['intentos']}): {ap['resultado']}. {ap['detalle']}")
+        self._event(state, "apagar", f"Apagar por tope (intento {ap['intentos']}): {ap['resultado']}. {ap['detalle']}",
+                    tope.get("modo"))
         text = telegram_notify.format_bot_action("stop", {"modo": "apagar"}, outcome, payload, APAGAR_USUARIO)
         if text:
-            self._notify(text)
+            self._notify(text, False)
 
     # -- transferencias ---------------------------------------------------------------
     def _cooldown(self, state: Dict[str, Any], tipo: str, now_ms: int) -> bool:
@@ -1072,11 +1195,16 @@ class RescateService:
             self._finalizar(state, entry, "simulada", None, f"Simulación ({motivo}).")
             return
         state["en_vuelo"] = entry
+        if tipo == TIPO_INYECCION:
+            # Publicar el préstamo ANTES del POST: passivbot puede ver la plata en la wallet (ACCOUNT_UPDATE por
+            # websocket) antes de que llegue la respuesta, y no tiene que dimensionar sobre la reserva.
+            self._aplicar_prestamo(state, entry)
         save_state(self.data_dir, state)  # persistir antes del POST: un reinicio lo concilia
         try:
             tran_id = self.binance.transfer(entry["tipo_api"], amount)
         except TransferRejected as exc:
             state["en_vuelo"] = None
+            self._revertir_prestamo(state, entry)
             self._set_cooldown(state, tipo, now_ms + COOLDOWN_RECHAZO_MS)
             self._registrar(state, entry, "rechazada", None, str(exc))
             texto = f"{self._titulo(tipo)} de {money(amount)} USDT rechazada por Binance: {exc}"
@@ -1084,9 +1212,7 @@ class RescateService:
             self._notify(f"❌ <b>Rescate</b>: {esc(texto)}")
             return
         except TransferAmbiguous as exc:
-            entry["estado"] = "incierto"
-            if tipo == TIPO_INYECCION:
-                self._aplicar_prestamo(state, entry)  # conservador: passivbot no dimensiona sobre lo prestado
+            entry["estado"] = "incierto"  # una inyección ya cuenta en el préstamo (lado conservador)
             texto = (f"{self._titulo(tipo)} de {money(amount)} USDT con resultado incierto ({exc}). No se reintenta: "
                      "se concilia con el historial de transferencias.")
             self._event(state, "incierto", texto)
@@ -1094,8 +1220,6 @@ class RescateService:
             return
         entry["tranId"] = tran_id
         entry["estado"] = "pendiente"
-        if tipo == TIPO_INYECCION:
-            self._aplicar_prestamo(state, entry)
         self._confirmar_por_historial(state, now_ms)
 
     @staticmethod
@@ -1311,15 +1435,15 @@ def panel_status(data_dir: pathlib.Path, now: Optional[float] = None) -> Dict[st
         except (TypeError, ValueError):
             vivo = False
     loan, loan_mode = loan_publicado(state, modo)
-    base = state.get("base")
-    base_vigente = base if isinstance(base, dict) and base.get("generacion") == cfg.get("generacion") else None
-    limite = None
+    base_vigente, limite, tope_pct, por_prestamo = None, None, None, False
     try:
-        pct = cfg_dec(cfg, "tope_perdida_pct")
-        if base_vigente and pct is not None:
+        armado = tope_armado(state, cfg)
+        if armado is not None:
+            base_vigente, pct, por_prestamo = armado
             limite = money(dec(base_vigente["capital"]) * (1 - pct / 100))
+            tope_pct = format(pct.normalize(), "f")
     except ValueError:
-        limite = None
+        base_vigente, limite, tope_pct, por_prestamo = None, None, None, False
     return {
         "config": {k: cfg.get(k) for k in ("habilitado", "generacion", "reserva_max_usdt", "paso_usdt",
                                             "umbral_ratio", "tope_perdida_pct", "actualizado_en",
@@ -1334,6 +1458,8 @@ def panel_status(data_dir: pathlib.Path, now: Optional[float] = None) -> Dict[st
         "prestamo_modo": loan_mode,
         "base": base_vigente,
         "limite_tope": limite,
+        "tope_pct": tope_pct,
+        "tope_por_prestamo": por_prestamo,
         "tope": tope_activo(state, cfg),
         "start_bloqueado": start_bloqueado(data_dir),
         "en_vuelo": state.get("en_vuelo"),

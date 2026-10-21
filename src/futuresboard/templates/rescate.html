@@ -142,7 +142,7 @@
              set('spot', `${usdt(u.spot_usdt)}${sim}`);
              set('capital', usdt(u.capital));
              if (s.base) {
-                 set('base', `base ${usdt(s.base.capital)} · límite ${usdt(s.limite_tope)} (tope ${cfg.tope_perdida_pct}%)`);
+                 set('base', `base ${usdt(s.base.capital)} · límite ${usdt(s.limite_tope)} (tope ${s.tope_pct}%)${s.tope_por_prestamo ? ' · rescate deshabilitado: el tope sigue armado por el préstamo real pendiente' : ''}`);
              } else {
                  set('base', cfg.habilitado ? 'base pendiente: tope todavía no armado (el servicio la fija en el próximo ciclo)' : 'rescate deshabilitado');
              }
