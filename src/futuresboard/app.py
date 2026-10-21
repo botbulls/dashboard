@@ -17,6 +17,7 @@ from futuresboard import blueprint
 from futuresboard import db
 from futuresboard import health
 from futuresboard import logs
+from futuresboard import telegram_notify
 from futuresboard.config import Config
 
 
@@ -97,6 +98,9 @@ def init_app(config: Config | None = None):
 
     if config.DISABLE_AUTO_SCRAPE is False:
         futuresboard.scraper.auto_scrape(app)
+
+    # Nivel: lo fija logs.configure_logging (FUTURESBOARD_LOG_LEVEL) en el root logger.
+    telegram_notify.log_startup_state(app.logger)
 
     return app
 

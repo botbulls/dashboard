@@ -24,6 +24,7 @@ from flask import current_app
 from typing_extensions import TypedDict
 
 from futuresboard import bot_control
+from futuresboard import telegram_notify
 from futuresboard import db
 from futuresboard.config import BINANCE_FUTURES_MAINNET_URL
 
@@ -1522,6 +1523,11 @@ def _run_bot_action(action: str, params: dict, fn):
         store.audit(user, action, params, outcome, detail, request.remote_addr)
     except OSError:
         current_app.logger.exception("No se pudo escribir el log de auditoria")
+    try:
+        # Asíncrono y sin efecto en la respuesta: un fallo de Telegram no cambia status ni payload.
+        telegram_notify.notify_bot_action(action, params, outcome, payload, user)
+    except Exception:  # pragma: no cover - notify_bot_action ya no lanza
+        current_app.logger.warning("No se pudo notificar la accion %s a Telegram", action)
     return _json_response(payload, status)
 
 
