@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import csv
+import functools
+import hmac
 import json
 import os
 import pathlib
+import secrets
 from datetime import date
 from datetime import datetime
 from datetime import timedelta
@@ -15,13 +18,29 @@ from flask import redirect
 from flask import render_template
 from flask import request
 from flask import Response
+from flask import session
 from flask.helpers import url_for
 from flask import current_app
 from typing_extensions import TypedDict
 
+from futuresboard import bot_control
+from futuresboard import jobs
+from futuresboard import telegram_notify
 from futuresboard import db
+from futuresboard.config import BINANCE_FUTURES_MAINNET_URL
 
 app = Blueprint("main", __name__)
+
+
+def _binance_public_base() -> str:
+    """Base URL para datos publicos de Binance Futures (mark price, klines).
+
+    Por defecto es el endpoint real; con BINANCE_TESTNET activo usa el mismo
+    API_BASE_URL de prueba que el scraper.
+    """
+    if current_app.config.get("BINANCE_TESTNET"):
+        return current_app.config["API_BASE_URL"]
+    return BINANCE_FUTURES_MAINNET_URL
 
 
 class CoinsTotals(TypedDict):
@@ -600,7 +619,7 @@ def positions_page():
     positions = {}
 
     try:
-        response = requests.get("https://fapi.binance.com/fapi/v1/premiumIndex", timeout=2)
+        response = requests.get(_binance_public_base() + "/fapi/v1/premiumIndex", timeout=2)
         markPrices: dict
         markPrices = {}
         if response:
@@ -824,7 +843,7 @@ def coin_page(coin):
         averagetargets = ["-", "-", "-", "-"]
         try:
             response = requests.get(
-                "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=" + coin, timeout=2
+                _binance_public_base() + "/fapi/v1/premiumIndex?symbol=" + coin, timeout=2
             )
             markPrice: float | str
             if response:
@@ -856,7 +875,7 @@ def coin_page(coin):
         for timeframe in sticks:
             try:
                 response = requests.get(
-                    "https://fapi.binance.com/fapi/v1/klines?symbol="
+                    _binance_public_base() + "/fapi/v1/klines?symbol="
                     + coin
                     + "&interval="
                     + timeframe
@@ -1085,7 +1104,7 @@ def coin_page_timeframe(coin, start, end):
         averagetargets = ["-", "-", "-", "-"]
         try:
             response = requests.get(
-                "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=" + coin, timeout=2
+                _binance_public_base() + "/fapi/v1/premiumIndex?symbol=" + coin, timeout=2
             )
             markPrice: float | str
             if response:
@@ -1117,7 +1136,7 @@ def coin_page_timeframe(coin, start, end):
         for timeframe in sticks:
             try:
                 response = requests.get(
-                    "https://fapi.binance.com/fapi/v1/klines?symbol="
+                    _binance_public_base() + "/fapi/v1/klines?symbol="
                     + coin
                     + "&interval="
                     + timeframe
@@ -1439,264 +1458,182 @@ def projection_page():
     )
 
 
-# Cache for admin service URL to avoid repeated lookups
-_admin_service_url_cache = None
-# Cache for bot service URL to avoid repeated lookups
-_bot_service_url_cache = None
+# --------------------------------------------------------------------------------------
+# Panel passivbot (reemplaza guardian / servicio SCC)
+# --------------------------------------------------------------------------------------
 
 
-def _get_bot_service_url():
-    """Get the bot service URL (port 5000) for container-to-container communication.
-    
-    In Docker Compose, services can communicate using the service name as hostname.
-    This function prioritizes Docker service name 'api' for internal communication,
-    falling back to environment variables or IP detection if needed.
+def _json_response(payload, status=200):
+    return Response(json.dumps(payload), status=status, mimetype="application/json")
+
+
+def get_csrf_token() -> str:
+    token = session.get("csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["csrf_token"] = token
+    return token
+
+
+@app.app_context_processor
+def inject_csrf_token():
+    return {"csrf_token": get_csrf_token}
+
+
+def csrf_protect(view):
+    """Exige header X-CSRF-Token igual al token de la sesion y body JSON."""
+
+    @functools.wraps(view)
+    def wrapped(*args, **kwargs):
+        expected = session.get("csrf_token") or ""
+        sent = request.headers.get("X-CSRF-Token") or ""
+        if not expected or not hmac.compare_digest(expected, sent):
+            return _json_response({"ok": False, "error": "CSRF token invalido o ausente."}, 403)
+        if not request.is_json:
+            return _json_response({"ok": False, "error": "Se requiere Content-Type application/json."}, 415)
+        return view(*args, **kwargs)
+
+    return wrapped
+
+
+def _bot_store() -> bot_control.Store:
+    return bot_control.Store(pathlib.Path(current_app.config["DATABASE"]).parent)
+
+
+JOBS_EXTENSION = "futuresboard_bot_jobs"
+
+
+@app.record_once
+def _init_bot_jobs(state) -> None:
+    """Registro de jobs del panel (uno por app/proceso). Recupera un job cortado por un reinicio."""
+    store = bot_control.Store(pathlib.Path(state.app.config["DATABASE"]).parent)
+    registry = jobs.JobRegistry(store)
+    state.app.extensions[JOBS_EXTENSION] = registry
+    jobs.recover_interrupted(registry, state.app.logger)
+
+
+def _bot_jobs() -> jobs.JobRegistry:
+    return current_app.extensions[JOBS_EXTENSION]
+
+
+def _reject(action: str, params: dict, status: int, payload: dict, outcome: str):
+    """Rechazo síncrono (antes de crear el job): se audita y, si corresponde, se notifica."""
+    store = _bot_store()
+    user = session.get("username") or "?"
+    try:
+        store.audit(user, action, params, outcome, jobs.audit_detail(payload), request.remote_addr)
+    except OSError:
+        current_app.logger.exception("No se pudo escribir el log de auditoria")
+    try:
+        telegram_notify.notify_bot_action(action, params, outcome, payload, user)
+    except Exception:  # pragma: no cover - notify_bot_action ya no lanza
+        current_app.logger.warning("No se pudo notificar la accion %s a Telegram", action)
+    return _json_response(payload, status)
+
+
+def _run_bot_action(action: str, params: dict, validate, work):
+    """Valida de forma síncrona y lanza la acción como job (202 + job_id).
+
+    ``validate()`` no hace I/O contra Docker ni Binance: enum, panel habilitado, modos y
+    credenciales. Sus errores responden 400/403/409/503 en el momento, sin crear job.
+    ``work(store, settings, extra, reporter)`` corre en el hilo del job.
     """
-    global _bot_service_url_cache
-    
-    # Return cached value if available
-    if _bot_service_url_cache is not None:
-        return _bot_service_url_cache
-    
-    # Priority 1: Try to get from environment variable (can be set in docker-compose)
-    bot_url = os.environ.get('FUTURESBOARD_BOT_URL')
-    if bot_url:
-        _bot_service_url_cache = bot_url.rstrip('/')
-        current_app.logger.info(f"Using FUTURESBOARD_BOT_URL: {_bot_service_url_cache}")
-        return _bot_service_url_cache
-    
-    # Priority 2: Use Docker service name for container-to-container communication
-    # In Docker Compose, services can reach each other using service names
-    # The service name is 'api' according to docker-compose.yml
-    docker_service_name = os.environ.get('FUTURESBOARD_BOT_SERVICE_NAME', 'api')
-    docker_port = os.environ.get('FUTURESBOARD_BOT_SERVICE_PORT', '5000')
-    _bot_service_url_cache = f'http://{docker_service_name}:{docker_port}'
-    current_app.logger.info(f"Using Docker service name for container-to-container communication: {_bot_service_url_cache}")
-    return _bot_service_url_cache
-
-
-def _get_admin_service_url():
-    """Get the admin service URL (port 9009), automatically detecting public IP if needed."""
-    global _admin_service_url_cache
-    
-    # Return cached value if available
-    if _admin_service_url_cache is not None:
-        return _admin_service_url_cache
-    
-    # Try to get from environment variable first
-    admin_url = os.environ.get('FUTURESBOARD_ADMIN_URL')
-    if admin_url:
-        _admin_service_url_cache = admin_url.rstrip('/')
-        return _admin_service_url_cache
-    
-    # Get server IP (public or private)
-    # Try to get from environment variable
-    public_ip = os.environ.get('FUTURESBOARD_PUBLIC_IP')
-    if public_ip:
-        _admin_service_url_cache = f'http://{public_ip.strip()}:9009'
-        return _admin_service_url_cache
-    
-    # Automatically detect public IP from external services
-    import socket
-    services = [
-        'https://api.ipify.org',
-        'https://ifconfig.me/ip',
-        'https://icanhazip.com',
-        'https://checkip.amazonaws.com',
-    ]
-    
-    current_app.logger.info("Detecting public IP address for admin service...")
-    for service in services:
-        try:
-            response = requests.get(service, timeout=3)
-            if response.status_code == 200:
-                ip = response.text.strip()
-                try:
-                    socket.inet_aton(ip)
-                    _admin_service_url_cache = f'http://{ip}:9009'
-                    current_app.logger.info(f"Detected public IP: {ip}, admin service URL: {_admin_service_url_cache}")
-                    return _admin_service_url_cache
-                except socket.error:
-                    continue
-        except Exception as e:
-            current_app.logger.debug(f"Failed to get IP from {service}: {e}")
-            continue
-    
-    # Fallback: try to get from socket (may be private IP in Docker)
-    current_app.logger.warning("Could not detect public IP from external services, using local network IP")
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(1)
-        try:
-            s.connect(('8.8.8.8', 80))
-            ip = s.getsockname()[0]
-        except Exception:
-            ip = '127.0.0.1'
-        finally:
-            s.close()
-        _admin_service_url_cache = f'http://{ip}:9009'
-        current_app.logger.warning(f"Using local IP: {ip}, admin service URL: {_admin_service_url_cache}")
-        return _admin_service_url_cache
-    except Exception:
-        _admin_service_url_cache = 'http://127.0.0.1:9009'
-        return _admin_service_url_cache
+        settings, extra = validate()
+    except ValueError as exc:
+        return _reject(action, params, 400, {"ok": False, "error": str(exc)}, "rechazado")
+    except bot_control.BotControlError as exc:
+        return _reject(action, params, exc.status_code, {**exc.payload, "ok": False, "error": str(exc)}, "error")
 
-
-@app.route("/api/admin/slctdaeo", methods=["GET"])
-def admin_proxy_slctdaeo():
-    """Proxy endpoint to get admin access configuration."""
+    store = _bot_store()
+    ctx = jobs.JobContext(store, settings, session.get("username") or "?", request.remote_addr,
+                          current_app.logger)
     try:
-        admin_url = _get_admin_service_url()
-        response = requests.get(f'{admin_url}/slctdaeo', timeout=5)
-        return Response(
-            response.content,
-            status=response.status_code,
-            mimetype=response.headers.get('Content-Type', 'application/json')
+        job = jobs.launch(_bot_jobs(), action, params, ctx, lambda rep: work(store, settings, extra, rep))
+    except jobs.ActiveJobError as exc:
+        return _json_response(
+            {"ok": False, "error": "Ya hay una acción del panel en curso: esperá a que termine.",
+             "job_id": exc.job_id},
+            409,
         )
-    except Exception as e:
-        current_app.logger.error(f"Error proxying admin request: {e}")
-        return Response(
-            json.dumps({"error": str(e)}),
-            status=500,
-            mimetype='application/json'
-        )
-
-
-@app.route("/api/admin/<path:endpoint>", methods=["POST"])
-def admin_proxy_post(endpoint):
-    """Proxy endpoint for POST requests to admin service."""
-    try:
-        admin_url = _get_admin_service_url()
-        # Get form data from request
-        form_data = dict(request.form)
-        
-        response = requests.post(
-            f'{admin_url}/{endpoint}',
-            data=form_data,
-            timeout=10
-        )
-        return Response(
-            response.content,
-            status=response.status_code,
-            mimetype=response.headers.get('Content-Type', 'application/json')
-        )
-    except Exception as e:
-        current_app.logger.error(f"Error proxying admin POST request: {e}")
-        return Response(
-            json.dumps({"error": str(e)}),
-            status=500,
-            mimetype='application/json'
-        )
-
-
-def _guardian_prevent_restart_path():
-    """Path to the file that stores the 'do not restart guardian' preference."""
-    db_path = current_app.config.get("DATABASE")
-    if db_path:
-        return pathlib.Path(db_path).parent / "guardian_prevent_restart"
-    return pathlib.Path.cwd() / "guardian_prevent_restart"
-
-
-def _get_guardian_prevent_restart():
-    """Return True if guardian should not be restarted (preference persisted)."""
-    path = _guardian_prevent_restart_path()
-    return path.exists()
-
-
-def _set_guardian_prevent_restart(value: bool):
-    """Persist preference to prevent (or allow) guardian restart."""
-    path = _guardian_prevent_restart_path()
-    if value:
-        path.write_text("1")
-    elif path.exists():
-        path.unlink()
+    return _json_response({"ok": True, "job_id": job.id, "job": job.to_dict()}, 202)
 
 
 @app.route("/api/bot/status", methods=["GET"])
-def bot_proxy_status():
-    """Proxy endpoint to get bot status."""
+def bot_status():
+    settings = bot_control.Settings()
     try:
-        bot_url = _get_bot_service_url()
-        response = requests.get(f'{bot_url}/bot/status', timeout=5)
-        return Response(
-            response.content,
-            status=response.status_code,
-            mimetype=response.headers.get('Content-Type', 'application/json')
-        )
-    except Exception as e:
-        current_app.logger.error(f"Error proxying bot status request: {e}")
-        return Response(
-            json.dumps({"error": str(e)}),
-            status=500,
-            mimetype='application/json'
-        )
+        return _json_response(bot_control.get_status(settings))
+    except bot_control.BotControlError as exc:
+        return _json_response({"enabled": settings.enabled, "error": str(exc)}, exc.status_code)
 
 
-@app.route("/api/bot/guardian/disabled", methods=["GET"])
-def guardian_disabled():
-    """Return whether guardian restart is disabled (preference persisted)."""
-    return Response(
-        json.dumps({"disabled": _get_guardian_prevent_restart()}),
-        status=200,
-        mimetype='application/json'
+@app.route("/api/bot/start", methods=["POST"])
+@csrf_protect
+def bot_start():
+    body = request.get_json(silent=True) or {}
+    riesgo = body.get("riesgo") if isinstance(body, dict) else None
+
+    def validate():
+        bot_control.validate_riesgo(riesgo)
+        settings = bot_control.Settings()
+        settings.require_enabled()
+        return settings, None
+
+    return _run_bot_action(
+        "start", {"riesgo": riesgo}, validate,
+        lambda store, settings, _extra, rep: bot_control.start_bot(settings, store, riesgo, reporter=rep),
     )
 
 
-@app.route("/api/bot/guardian/stop", methods=["POST"])
-def guardian_stop():
-    """Stop guardian container and persist preference to prevent restart."""
-    try:
-        bot_url = _get_bot_service_url()
-        response = requests.post(
-            f'{bot_url}/bot/guardian/stop',
-            json={"prevent_restart": True},
-            timeout=10,
-            headers={"Content-Type": "application/json"}
-        )
-        # Persist preference so guardian is not restarted (e.g. by external scripts)
-        _set_guardian_prevent_restart(True)
-        if response.status_code < 400:
-            return Response(
-                response.content,
-                status=response.status_code,
-                mimetype=response.headers.get('Content-Type', 'application/json')
-            )
-        # Bot service returned error (e.g. 404 if endpoint not implemented); still persist
-        current_app.logger.warning(f"Bot service guardian/stop returned {response.status_code}")
-        return Response(
-            json.dumps({"ok": True, "message": "Preference saved. Stop the guardian container manually if needed."}),
-            status=200,
-            mimetype='application/json'
-        )
-    except requests.exceptions.RequestException as e:
-        current_app.logger.warning(f"Bot service guardian/stop request failed: {e}")
-        _set_guardian_prevent_restart(True)
-        return Response(
-            json.dumps({
-                "ok": True,
-                "message": "Preference 'do not restart' saved. Stop the guardian container manually if the bot service is unavailable."
-            }),
-            status=200,
-            mimetype='application/json'
-        )
-    except Exception as e:
-        current_app.logger.error(f"Error in guardian stop: {e}")
-        return Response(
-            json.dumps({"error": str(e)}),
-            status=500,
-            mimetype='application/json'
-        )
+@app.route("/api/bot/stop", methods=["POST"])
+@csrf_protect
+def bot_stop():
+    body = request.get_json(silent=True) or {}
+    modo = body.get("modo") if isinstance(body, dict) else None
 
+    def validate():
+        settings = bot_control.Settings()
+        bot_control.validate_stop(settings, modo)
+        # El cliente de Binance se arma acá: lee la config de la app (no disponible en el hilo).
+        return settings, (_binance_futures_client() if modo == "apagar" else None)
 
-@app.route("/api/bot/guardian/allow-restart", methods=["POST"])
-def guardian_allow_restart():
-    """Clear the preference so guardian can be restarted again."""
-    _set_guardian_prevent_restart(False)
-    return Response(
-        json.dumps({"ok": True, "disabled": False}),
-        status=200,
-        mimetype='application/json'
+    return _run_bot_action(
+        "stop", {"modo": modo}, validate,
+        lambda store, settings, binance, rep: bot_control.stop_bot(
+            settings, store, modo, binance=binance, reporter=rep
+        ),
     )
+
+
+@app.route("/api/bot/jobs/activo", methods=["GET"])
+def bot_job_active():
+    """Job en curso (para reanudar el modal de progreso al recargar la página) o null."""
+    job = _bot_jobs().active()
+    return _json_response({"job": job.to_dict() if job is not None else None})
+
+
+@app.route("/api/bot/jobs/<job_id>", methods=["GET"])
+def bot_job(job_id):
+    data = _bot_jobs().get(job_id)
+    if data is None:
+        return _json_response({"ok": False, "error": "Acción inexistente o vencida."}, 404)
+    return _json_response(data)
+
+
+def _binance_futures_client() -> bot_control.BinanceFuturesClient:
+    """Cliente de Binance USDⓈ-M con las mismas credenciales/base URL que el scraper.
+
+    Con BINANCE_TESTNET activo, API_BASE_URL ya apunta a demo-fapi (ver config.py).
+    """
+    cfg = current_app.config
+    if str(cfg.get("EXCHANGE") or "").lower() != "binance":
+        err = bot_control.BotControlError("Apagar con cierre de posiciones solo está soportado para Binance Futures.")
+        err.status_code = 409
+        raise err
+    return bot_control.BinanceFuturesClient(cfg.get("API_BASE_URL") or "", cfg.get("API_KEY") or "",
+                                            cfg.get("API_SECRET") or "",
+                                            algo_optional=bool(cfg.get("BINANCE_TESTNET")))
 
 
 @app.route("/api/last-order", methods=["GET"])

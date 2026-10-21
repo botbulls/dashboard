@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
+import os
+import pathlib
+import re
 import sqlite3
+import tempfile
 import threading
 import time
 from collections import OrderedDict
@@ -12,6 +17,16 @@ from urllib.parse import urlencode
 
 import requests  # type: ignore
 from flask import current_app
+
+
+_SIGNATURE_RE = re.compile(r"(signature=)[^&\s'\"]+")
+
+SCRAPE_STATE_FILE = "scrape_state.json"
+
+
+def redact_url(url) -> str:
+    """Oculta la firma HMAC de la query string antes de loguear la URL."""
+    return _SIGNATURE_RE.sub(r"\1<redacted>", str(url))
 
 
 class HTTPRequestError(Exception):
@@ -24,7 +39,45 @@ class HTTPRequestError(Exception):
         """
         Convert the exception into a printable string
         """
-        return f"Request to {self.url!r} failed. Code: {self.code}; Message: {self.msg}"
+        return f"Request to {redact_url(self.url)!r} failed. Code: {self.code}; Message: {redact_url(self.msg)}"
+
+
+# --------------------------------------------------------------------------------------
+# Marca del ultimo scrape (para /api/bot/health y /metrics)
+# --------------------------------------------------------------------------------------
+# Se persiste en un archivo junto a la DB (no en memoria) porque el scrape puede correr en
+# otro proceso (cron con `futuresboard --scrape-only`). No se toca el esquema de la DB.
+
+
+def scrape_state_path(database) -> pathlib.Path:
+    return pathlib.Path(database).parent / SCRAPE_STATE_FILE
+
+
+def read_scrape_state(database) -> dict:
+    try:
+        data = json.loads(scrape_state_path(database).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _record_scrape(**fields) -> None:
+    database = current_app.config["DATABASE"]
+    path = scrape_state_path(database)
+    tmp_name = None
+    try:
+        state = read_scrape_state(database)
+        state.update(fields)
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+        os.replace(tmp_name, path)
+        tmp_name = None
+    except OSError as exc:
+        current_app.logger.warning("No se pudo registrar el estado del scrape: %s", exc)
+    finally:
+        if tmp_name and os.path.exists(tmp_name):
+            os.unlink(tmp_name)
 
 
 def auto_scrape(app):
@@ -314,13 +367,21 @@ def create_orders(conn, orders):
 
 
 def scrape(app=None):
+    _record_scrape(last_started_at=time.time())
     try:
         _scrape(app=app)
     except HTTPRequestError as exc:
+        _record_scrape(last_error_at=time.time(), last_error=f"HTTP error code {exc.code}")
         if app is None:
             print(exc)
         else:
             app.logger.error(f"{exc}")
+    except Exception as exc:
+        # Se registra y se re-lanza (mismo comportamiento que antes).
+        _record_scrape(last_error_at=time.time(), last_error=exc.__class__.__name__)
+        raise
+    else:
+        _record_scrape(last_success_at=time.time())
 
 
 # flake8: noqa: C901
@@ -402,8 +463,8 @@ def _scrape(app=None):
 
         while not up_to_date:
             if weightused > 800:
-                print(
-                    f"Weight used: {weightused}/800\nProcessed: {processed}\nSleep: 1 minute"
+                current_app.logger.info(
+                    f"Weight used: {weightused}/800; Processed: {processed}; Sleep: 1 minute"
                 )
                 sleeps += 1
                 time.sleep(60)
@@ -473,8 +534,8 @@ def _scrape(app=None):
                 if "list" in responseJSON["result"]:
                     for position in responseJSON["result"]["list"]:
                         if weightused > 50:
-                            print(
-                                f"Weight used: {weightused}/{120-weightused}\nProcessed: {updated_positions + new_positions + updated_orders}\nSleep: 1 minute"
+                            current_app.logger.info(
+                                f"Weight used: {weightused}/{120-weightused}; Processed: {updated_positions + new_positions + updated_orders}; Sleep: 1 minute"
                             )
                             sleeps += 1
                             time.sleep(60)
@@ -628,8 +689,8 @@ def _scrape(app=None):
                 params["startTime"] = startTime
 
             if weightused > 50:
-                print(
-                    f"Weight used: {weightused}/100\nProcessed: {processed}\nSleep: 1 minute"
+                current_app.logger.info(
+                    f"Weight used: {weightused}/100; Processed: {processed}; Sleep: 1 minute"
                 )
                 sleeps += 1
                 time.sleep(60)
