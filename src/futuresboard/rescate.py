@@ -16,6 +16,9 @@ Cómo funciona (ver ``docs/rescate.md``):
   spot. Una transferencia en vuelo a la vez.
 * **Devolución automática**: sin posiciones y con préstamo pendiente, transfiere de futuros a spot
   ``min(préstamo, maxWithdrawAmount)``; si no alcanza, en partes en los ciclos siguientes.
+* **Devolución parcial con margen sano**: con préstamo y posiciones abiertas, si el ratio es
+  ``>= umbral_devolucion_ratio`` (mayor que el de inyección: histéresis), devuelve lo que deja el ratio en ese
+  umbral (sin pasar del préstamo ni de ``maxWithdrawAmount``), con un mínimo por transferencia y un cooldown.
 * **Tope de pérdida total**: ``capital_total = equity de futuros + USDT libre en spot``. Al habilitar se
   fija una base; si ``capital_total <= base × (1 - tope%)`` el tope queda **en confirmación** (persistido,
   aviso por Telegram, sin inyectar). Se ejecuta la rutina de Apagar del panel (con el mismo lock) solo si
@@ -27,7 +30,7 @@ Cómo funciona (ver ``docs/rescate.md``):
 
 Archivos (en el directorio de datos del dashboard, el mismo que ``bot_actions.log``):
 
-* ``rescate_config.json``: lo escribe solo el panel (habilitado, reserva, paso, umbral, tope, reconocimiento).
+* ``rescate_config.json``: lo escribe solo el panel (habilitado, reserva, paso, umbrales, tope, reconocimiento).
 * ``rescate_state.json``: lo escribe solo este servicio (y la CLI de simulación), con el ledger.
 
 Es una herramienta, no un asesor: la reserva sirve para aguantar margen y no garantiza evitar pérdidas.
@@ -77,6 +80,8 @@ ENV_INTERVAL = "FUTURESBOARD_RESCATE_INTERVAL"
 ENV_LOAN_STATE = "FUTURESBOARD_RESCATE_LOAN_STATE"
 ENV_SPOT_URL = "FUTURESBOARD_RESCATE_SPOT_URL"
 ENV_TOPE_CONFIRM = "FUTURESBOARD_RESCATE_TOPE_CONFIRM_SECONDS"
+ENV_DEVOLUCION_MIN = "FUTURESBOARD_RESCATE_DEVOLUCION_MIN_USDT"
+ENV_DEVOLUCION_COOLDOWN = "FUTURESBOARD_RESCATE_DEVOLUCION_COOLDOWN_SECONDS"
 
 MODE_OFF = "off"
 MODE_DRY_RUN = "dry_run"
@@ -97,6 +102,13 @@ MAX_TOPE_CONFIRM_S = 600
 TOPE_ESPERA_MAX_FACTOR = 5
 TOPE_ESPERA_MAX_MIN_S = 300
 
+# Devolución parcial con posiciones abiertas: mínimo por transferencia (USDT) y cooldown entre devoluciones
+# parciales (evita goteo de transferencias chicas).
+DEFAULT_DEVOLUCION_MIN_USDT = 100
+MAX_DEVOLUCION_MIN_USDT = 1_000_000
+DEFAULT_DEVOLUCION_COOLDOWN_S = 600
+MAX_DEVOLUCION_COOLDOWN_S = 86_400
+
 SPOT_MAINNET_URL = "https://api.binance.com"
 # Binance Demo Trading (spot). /sapi no existe en Demo: el modo real queda bloqueado ahí.
 SPOT_DEMO_URL = "https://demo-api.binance.com"
@@ -116,11 +128,15 @@ LOAN_STATE_VERSION = 1
 CENT = Decimal("0.01")
 DEFAULT_PASO = Decimal("1000")
 DEFAULT_UMBRAL = Decimal("8")
+# Provisorio: el doble del de inyección. Tiene que ser mayor que el de inyección (histéresis): si no, lo que se
+# devuelve deja el ratio debajo del umbral de inyección y vuelve a entrar (ping-pong).
+DEFAULT_UMBRAL_DEVOLUCION = Decimal("16")
 # (mínimo, máximo) inclusivos. El umbral es la relación margen / mantenimiento: Binance liquida en 1.
 LIMITES: Dict[str, Tuple[Decimal, Decimal]] = {
     "reserva_max_usdt": (Decimal("10"), Decimal("1000000")),
     "paso_usdt": (Decimal("10"), Decimal("1000000")),
     "umbral_ratio": (Decimal("1.2"), Decimal("10")),
+    "umbral_devolucion_ratio": (Decimal("2"), Decimal("100")),
     "tope_perdida_pct": (Decimal("1"), Decimal("80")),
 }
 CAMPOS_NUMERICOS = tuple(LIMITES)
@@ -129,6 +145,7 @@ TRANSFER_ASSET = "USDT"
 TIPO_INYECCION = "inyeccion"
 TIPO_DEVOLUCION = "devolucion"
 TIPO_API = {TIPO_INYECCION: "MAIN_UMFUTURE", TIPO_DEVOLUCION: "UMFUTURE_MAIN"}
+COOLDOWN_PARCIAL = "devolucion_parcial"  # clave en cooldown_ms (entre devoluciones parciales)
 
 MIN_INYECCION = Decimal("1")      # no se inyectan montos menores (USDT)
 MIN_DEVOLUCION = CENT
@@ -298,6 +315,7 @@ def default_config() -> Dict[str, Any]:
         "reserva_max_usdt": None,
         "paso_usdt": money(DEFAULT_PASO),
         "umbral_ratio": str(DEFAULT_UMBRAL),
+        "umbral_devolucion_ratio": str(DEFAULT_UMBRAL_DEVOLUCION),
         "tope_perdida_pct": None,
         "tope_reconocido": None,
         "actualizado_en": None,
@@ -334,8 +352,10 @@ def load_config(data_dir: pathlib.Path) -> Tuple[Dict[str, Any], Optional[str]]:
                 _check_range(name, dec(cfg[name]))
         if cfg["habilitado"] and (cfg["reserva_max_usdt"] is None or cfg["tope_perdida_pct"] is None):
             raise ValueError("habilitado sin reserva o sin tope")
-        if cfg["paso_usdt"] is None or cfg["umbral_ratio"] is None:
+        if cfg["paso_usdt"] is None or cfg["umbral_ratio"] is None or cfg["umbral_devolucion_ratio"] is None:
             raise ValueError("falta paso o umbral")
+        if dec(cfg["umbral_devolucion_ratio"]) <= dec(cfg["umbral_ratio"]):
+            raise ValueError("el umbral de devolución tiene que ser mayor que el de inyección")
     except ValueError as exc:
         return default_config(), f"{CONFIG_FILE_NAME} inválido ({exc}): rescate deshabilitado."
     return cfg, None
@@ -350,8 +370,9 @@ def validate_config_body(body: Any) -> Dict[str, Any]:
     """Validación estricta del POST del panel. Devuelve los valores como Decimal (o None).
 
     Campos: ``habilitado`` (bool), ``reserva_max_usdt``, ``paso_usdt``, ``umbral_ratio``,
-    ``tope_perdida_pct`` (números JSON finitos, no bool). ``reserva`` y ``tope`` pueden ser null solo
-    con el rescate deshabilitado. Campos desconocidos: error.
+    ``umbral_devolucion_ratio``, ``tope_perdida_pct`` (números JSON finitos, no bool). ``reserva`` y ``tope``
+    pueden ser null solo con el rescate deshabilitado. ``umbral_devolucion_ratio > umbral_ratio``. Campos
+    desconocidos: error.
     """
     if not isinstance(body, dict):
         raise ValueError("Body inválido: se esperaba un objeto JSON.")
@@ -369,7 +390,7 @@ def validate_config_body(body: Any) -> Dict[str, Any]:
     for name in CAMPOS_NUMERICOS:
         value = body[name]
         if value is None:
-            if name in ("paso_usdt", "umbral_ratio"):
+            if name in ("paso_usdt", "umbral_ratio", "umbral_devolucion_ratio"):
                 raise ValueError(f"{name} es obligatorio.")
             out[name] = None
             continue
@@ -386,6 +407,9 @@ def validate_config_body(body: Any) -> Dict[str, Any]:
         raise ValueError("Para habilitar el rescate hay que fijar el tope de pérdida total (obligatorio).")
     if out["reserva_max_usdt"] is not None and out["paso_usdt"] > out["reserva_max_usdt"]:
         raise ValueError("El paso no puede ser mayor que la reserva máxima.")
+    if out["umbral_devolucion_ratio"] <= out["umbral_ratio"]:
+        raise ValueError("El umbral de devolución parcial tiene que ser mayor que el de inyección (histéresis: "
+                         "si no, lo devuelto vuelve a entrar).")
     return out
 
 
@@ -755,6 +779,10 @@ class RescateSettings:
         self.loan_state_path = pathlib.Path(env.get(ENV_LOAN_STATE, "").strip() or DEFAULT_LOAN_STATE)
         self.spot_url_override = env.get(ENV_SPOT_URL, "").strip().rstrip("/")
         self.tope_confirm_seconds = _env_int(env, ENV_TOPE_CONFIRM, DEFAULT_TOPE_CONFIRM_S, 0, MAX_TOPE_CONFIRM_S)
+        self.devolucion_min_usdt = Decimal(_env_int(env, ENV_DEVOLUCION_MIN, DEFAULT_DEVOLUCION_MIN_USDT, 1,
+                                                    MAX_DEVOLUCION_MIN_USDT))
+        self.devolucion_cooldown_seconds = _env_int(env, ENV_DEVOLUCION_COOLDOWN, DEFAULT_DEVOLUCION_COOLDOWN_S, 0,
+                                                    MAX_DEVOLUCION_COOLDOWN_S)
 
 
 def check_restrictions(data: Dict[str, Any]) -> List[str]:
@@ -974,7 +1002,10 @@ class RescateService:
         if snap["posiciones"] == 0:
             self._devolver(state, snap, now_ms)
         else:
+            # Excluyentes: inyecta con ratio < umbral, devuelve con ratio >= umbral de devolución (mayor).
             self._inyectar(state, cfg, snap, now_ms)
+            if not state.get("en_vuelo"):
+                self._devolver_parcial(state, cfg, snap, now_ms)
 
     def _tick_off(self, state: Dict[str, Any]) -> None:
         """off: no opera. Solo evita que un préstamo SIMULADO quede achicando a passivbot para siempre."""
@@ -1356,6 +1387,44 @@ class RescateService:
         motivo = "sin posiciones abiertas" + ("" if amount == loan else f" (parcial: maxWithdrawAmount {money(snap['max_withdraw_eff'])})")
         self._transferir(state, TIPO_DEVOLUCION, amount, snap, now_ms, motivo)
 
+    def _devolver_parcial(self, state: Dict[str, Any], cfg: Dict[str, Any], snap: Dict[str, Any],
+                          now_ms: int) -> None:
+        """Con préstamo y posiciones abiertas, devuelve parte si el margen está sano.
+
+        ``r = min(préstamo, maxWithdrawAmount, margen - umbral_devolucion × mantenimiento)``: después de devolver el
+        ratio queda en el umbral de devolución o arriba. Solo si ``r >= mínimo`` y pasó el cooldown entre
+        devoluciones parciales. Como cualquier devolución, el préstamo baja recién con la transferencia confirmada.
+        passivbot dimensiona sobre ``wallet - préstamo``: devolver ``r`` baja los dos y no cambia el dimensionamiento.
+        """
+        loan = get_loan(state, self.mode)
+        if loan <= 0 or snap["posiciones"] <= 0:
+            return
+        if tope_activo(state, cfg) or state.get("tope_confirmacion"):
+            return  # con el tope disparado o en confirmación no se mueve plata entre wallets
+        ratio = snap.get("ratio")
+        umbral_dev = cfg_dec(cfg, "umbral_devolucion_ratio")
+        if ratio is None or umbral_dev is None or ratio < umbral_dev:
+            return
+        if self._cooldown(state, TIPO_DEVOLUCION, now_ms) or self._cooldown(state, COOLDOWN_PARCIAL, now_ms):
+            return
+        maint = snap["maint_margin"]
+        por_ratio = floor_cent(snap["margin_eff"] - umbral_dev * maint)
+        max_withdraw = floor_cent(snap["max_withdraw_eff"])
+        amount = min(floor_cent(loan), max_withdraw, por_ratio)
+        if amount < self.settings.devolucion_min_usdt:
+            return
+        if amount == floor_cent(loan):
+            limite = "devuelve todo el préstamo"
+        elif amount == max_withdraw:
+            limite = f"limitada por maxWithdrawAmount {money(max_withdraw)}"
+        else:
+            limite = f"limitada por el umbral de devolución {umbral_dev}"
+        queda = (snap["margin_eff"] - amount) / maint
+        motivo = (f"devolución parcial con margen sano: ratio {ratio:.2f} >= {umbral_dev}, queda en {queda:.2f} "
+                  f"({limite})")
+        self._set_cooldown(state, COOLDOWN_PARCIAL, now_ms + self.settings.devolucion_cooldown_seconds * 1000)
+        self._transferir(state, TIPO_DEVOLUCION, amount, snap, now_ms, motivo)
+
     def _transferir(self, state: Dict[str, Any], tipo: str, amount: Decimal, snap: Dict[str, Any], now_ms: int,
                     motivo: str) -> None:
         entry: Dict[str, Any] = {
@@ -1629,8 +1698,8 @@ def panel_status(data_dir: pathlib.Path, now: Optional[float] = None) -> Dict[st
         base_vigente, limite, tope_pct, por_prestamo = None, None, None, False
     return {
         "config": {k: cfg.get(k) for k in ("habilitado", "generacion", "reserva_max_usdt", "paso_usdt",
-                                            "umbral_ratio", "tope_perdida_pct", "actualizado_en",
-                                            "actualizado_por")},
+                                            "umbral_ratio", "umbral_devolucion_ratio", "tope_perdida_pct",
+                                            "actualizado_en", "actualizado_por")},
         "limites": {k: [str(lo), str(hi)] for k, (lo, hi) in LIMITES.items()},
         "errores": [e for e in (cfg_err, state_err) if e],
         "servicio": {"modo": modo, "vivo": vivo, "heartbeat": (servicio or {}).get("heartbeat"),

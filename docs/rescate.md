@@ -9,7 +9,8 @@
 
 Una parte del USDT queda en la wallet **spot** como reserva. passivbot dimensiona sobre el capital
 propio, y la reserva solo se presta a futuros cuando la cuenta está cerca de la liquidación. Cuando
-ya no hay posiciones abiertas, el préstamo se devuelve solo.
+ya no hay posiciones abiertas, el préstamo se devuelve solo; con posiciones abiertas, se devuelve en partes
+cuando el margen está sano.
 
 ```
                  ┌──────────── dashboard (Flask) ────────────┐
@@ -142,6 +143,24 @@ Un ciclo cada `FUTURESBOARD_RESCATE_INTERVAL` segundos (default 15). En cada cic
 6. **Devolución** (futuros → spot, `UMFUTURE_MAIN`) cuando la cuenta de futuros no tiene posiciones y
    hay préstamo: `min(préstamo, maxWithdrawAmount)`. Si no alcanza, sigue en los ciclos siguientes. La
    devolución sigue aunque el rescate esté deshabilitado o con el tope disparado (es plata prestada).
+7. **Devolución parcial con margen sano** (futuros → spot, `UMFUTURE_MAIN`) con préstamo y posiciones
+   abiertas, si `totalMarginBalance / totalMaintMargin >= umbral_devolucion_ratio` (default 16, el doble del
+   de inyección; tiene que ser mayor que `umbral_ratio`). Monto
+   `r = min(préstamo, maxWithdrawAmount, totalMarginBalance - umbral_devolucion × totalMaintMargin)`, en
+   centavos hacia abajo: después de devolver, el ratio queda en el umbral de devolución o arriba. Solo si
+   `r >= FUTURESBOARD_RESCATE_DEVOLUCION_MIN_USDT` (100) y pasaron
+   `FUTURESBOARD_RESCATE_DEVOLUCION_COOLDOWN_SECONDS` (600 s) desde el último intento de devolución parcial.
+   El motivo: en caídas largas la cuenta casi nunca queda sin posiciones (en la simulación, en febrero
+   quedaron 8.000 USDT prestados).
+   - **Histéresis**: se inyecta debajo de 8 y se devuelve desde 16. Como lo devuelto deja el ratio en 16 o
+     más, no vuelve a entrar enseguida (sin ping-pong); entre los dos umbrales no se mueve nada.
+   - No cambia el dimensionamiento de passivbot: dimensiona sobre `wallet - préstamo` y devolver `r` baja
+     las dos cosas. El préstamo publicado baja **solo** con la transferencia confirmada, igual que en la
+     devolución total.
+   - Un préstamo residual menor al mínimo espera a quedar sin posiciones (la devolución total no tiene
+     mínimo).
+   - Sigue con el rescate deshabilitado (es plata prestada), pero **no** con el tope en confirmación o
+     disparado: ahí no se mueve plata entre wallets.
 
 ### Préstamo y transferencias (sin idempotencia en Binance)
 
@@ -181,8 +200,8 @@ con el rescate habilitado (o con un préstamo real pendiente).
 ## Panel
 
 Sección **Rescate (colchón)** del menú lateral (`/rescate`, con login). Muestra modo y latido del
-servicio, ratio margen/mantenimiento vs umbral, posiciones, préstamo pendiente, USDT libre en spot,
-capital total vs base y límite del tope, la transferencia en vuelo, el motivo de bloqueo y los últimos
+servicio, ratio margen/mantenimiento vs los umbrales de inyección y de devolución, posiciones, préstamo
+pendiente, USDT libre en spot, capital total vs base y límite del tope, la transferencia en vuelo, el motivo de bloqueo y los últimos
 eventos. Si hay un tope en confirmación, lo muestra con el capital del cruce, la última lectura y desde
 cuándo y hasta cuándo se ejecuta. Si hay un tope disparado, lo muestra con el resultado del Apagar y el
 botón para reconocerlo.
@@ -190,7 +209,7 @@ botón para reconocerlo.
 | Método | Ruta | Body | Efecto |
 |---|---|---|---|
 | GET | `/api/rescate/status` | – | Estado para la UI (lee los archivos, no consulta Binance). |
-| POST | `/api/rescate/config` | `{"habilitado", "reserva_max_usdt", "paso_usdt", "umbral_ratio", "tope_perdida_pct"}` | Guarda la config. Habilitar (false → true) abre una generación nueva = base nueva. |
+| POST | `/api/rescate/config` | `{"habilitado", "reserva_max_usdt", "paso_usdt", "umbral_ratio", "umbral_devolucion_ratio", "tope_perdida_pct"}` | Guarda la config. Habilitar (false → true) abre una generación nueva = base nueva. |
 | POST | `/api/rescate/reconocer-tope` | `{"id": "<id del tope>"}` | Desbloquea START y deshabilita el rescate. |
 
 Todos los POST exigen sesión, `X-CSRF-Token` y JSON (igual que el panel de passivbot) y quedan en
@@ -204,10 +223,15 @@ Validación estricta (400 si no se cumple): todos los campos presentes y ninguno
 | `reserva_max_usdt` | 10 – 1.000.000 | (obligatorio para habilitar) |
 | `paso_usdt` | 10 – 1.000.000 y ≤ reserva | 1000 |
 | `umbral_ratio` | 1,2 – 10 (Binance liquida en 1) | 8 |
+| `umbral_devolucion_ratio` | 2 – 100 y **mayor** que `umbral_ratio` | 16 |
 | `tope_perdida_pct` | 1 – 80 | (obligatorio para habilitar) |
 
 Los defaults solo se usan mientras no hay nada guardado: una config ya guardada conserva sus valores
 (por ejemplo, un umbral 3 guardado antes de que el default pasara a 8 sigue en 3 hasta cambiarlo en el panel).
+Una config guardada antes de `umbral_devolucion_ratio` toma 16 (siempre mayor que el umbral máximo de
+inyección). Una config guardada con `umbral_devolucion_ratio <= umbral_ratio` es inválida: rescate
+deshabilitado con el error en el panel. Una pestaña del panel abierta antes del deploy manda el body sin el
+campo nuevo y recibe 400: recargar la página.
 
 409: habilitar con un tope disparado sin reconocer, o reconocer un id que no es el activo.
 `POST /api/bot/start` responde 409 mientras haya un tope sin reconocer (se chequea al validar y otra vez
@@ -223,6 +247,8 @@ Todas fail-closed: un valor inválido nunca habilita más de lo pedido.
 | `FUTURESBOARD_RESCATE_MODE` | `off` | `off` \| `dry_run` \| `real`. Cualquier otro valor = `off` + error en el log. |
 | `FUTURESBOARD_RESCATE_INTERVAL` | `15` | Segundos entre ciclos (5–300; inválido = 15). |
 | `FUTURESBOARD_RESCATE_LOAN_STATE` | `/rescate/loan_state.json` | Dónde se escribe el contrato para passivbot. |
+| `FUTURESBOARD_RESCATE_DEVOLUCION_MIN_USDT` | `100` | Mínimo por devolución parcial (1–1.000.000). Vacío, no entero o menor que 1 = 100. |
+| `FUTURESBOARD_RESCATE_DEVOLUCION_COOLDOWN_SECONDS` | `600` | Espera entre devoluciones parciales (0–86.400). Vacío, no entero o negativo = 600. |
 | `FUTURESBOARD_RESCATE_TOPE_CONFIRM_SECONDS` | `60` | Confirmación del tope (0–600). `0` = disparo inmediato. Vacío, no entero o negativo = 60; más de 600 = 600. Espera máxima sin lecturas: `max(5 × valor, 300)` s. |
 | `FUTURESBOARD_RESCATE_SPOT_URL` | `https://api.binance.com` (`https://demo-api.binance.com` con testnet) | Base de spot y `/sapi`. |
 | `FUTURESBOARD_DOCKER_URL` / `FUTURESBOARD_PASSIVBOT_CONTAINER` | (vacía) / `client17-passivbot` | Necesarias para que el tope ejecute Apagar. Sin `FUTURESBOARD_DOCKER_URL`, `real` no transfiere. |
@@ -230,7 +256,8 @@ Todas fail-closed: un valor inválido nunca habilita más de lo pedido.
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `TELEGRAM_PREFIX` | (vacías) | Avisos (ver [notificaciones.md](notificaciones.md)). |
 | `FUTURESBOARD_CONFIG_DIR` | `./config` | Directorio de `config.json` (API key/secret, `EXCHANGE`, testnet). El estado y el lock van junto a la DB. |
 
-Telegram: un aviso por inyección, devolución, transferencia rechazada o incierta, tope en confirmación,
+Telegram: un aviso por inyección, devolución (total o parcial, con el ratio antes y después),
+transferencia rechazada o incierta, tope en confirmación,
 confirmación cancelada, disparo del tope y resultado del Apagar, y por cambios de estado (lectura caída / recuperada, bloqueo, reserva agotada),
 sin repetir el mismo aviso cada ciclo. En `dry_run` todos llevan `[SIMULACIÓN]`.
 

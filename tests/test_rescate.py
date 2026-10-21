@@ -172,9 +172,10 @@ class Harness:
                                       apagar=self.apagar if apagar else None,
                                       send=lambda t: self.sent.append(t) or True, clock=self.clock)
 
-    def configurar(self, habilitado=True, reserva=5000, paso=1000, umbral=8, tope=30):
+    def configurar(self, habilitado=True, reserva=5000, paso=1000, umbral=8, devolucion=16, tope=30):
         parsed = rescate.validate_config_body({"habilitado": habilitado, "reserva_max_usdt": reserva,
                                                "paso_usdt": paso, "umbral_ratio": umbral,
+                                               "umbral_devolucion_ratio": devolucion,
                                                "tope_perdida_pct": tope})
         return rescate.save_config(self.data_dir, parsed, "cliente17")
 
@@ -724,7 +725,7 @@ def test_cli_no_simula_con_prestamo_real_pendiente(cli_env, monkeypatch, loan_pa
 
 def _cfg_body(**kw):
     body = {"habilitado": True, "reserva_max_usdt": 5000, "paso_usdt": 1000, "umbral_ratio": 8,
-            "tope_perdida_pct": 30}
+            "umbral_devolucion_ratio": 16, "tope_perdida_pct": 30}
     body.update(kw)
     return body
 
@@ -767,31 +768,44 @@ def test_umbral_por_defecto_es_8(app, client):  # noqa: F811
     assert client.get("/api/rescate/status").get_json()["config"]["umbral_ratio"] == "3"
 
 
-@pytest.mark.parametrize("raw", [
-    json.dumps(_cfg_body(reserva_max_usdt=float("nan"))),
-    '{"habilitado": true, "reserva_max_usdt": NaN, "paso_usdt": 1000, "umbral_ratio": 8, "tope_perdida_pct": 30}',
-    '{"habilitado": true, "reserva_max_usdt": Infinity, "paso_usdt": 1000, "umbral_ratio": 8, "tope_perdida_pct": 30}',
-    json.dumps(_cfg_body(reserva_max_usdt=True)),
-    json.dumps(_cfg_body(reserva_max_usdt="5000")),
-    json.dumps(_cfg_body(habilitado="true")),
-    json.dumps(_cfg_body(reserva_max_usdt=5)),
-    json.dumps(_cfg_body(reserva_max_usdt=2_000_000)),
-    json.dumps(_cfg_body(paso_usdt=6000)),
-    json.dumps(_cfg_body(umbral_ratio=1)),
-    json.dumps(_cfg_body(umbral_ratio=11)),
-    json.dumps(_cfg_body(tope_perdida_pct=0.5)),
-    json.dumps(_cfg_body(tope_perdida_pct=95)),
-    json.dumps(_cfg_body(tope_perdida_pct=None)),
-    json.dumps(_cfg_body(reserva_max_usdt=None)),
-    json.dumps(_cfg_body(paso_usdt=None, habilitado=False)),
-    json.dumps({**_cfg_body(), "extra": 1}),
-    json.dumps({"habilitado": True}),
-    json.dumps([1, 2]),
+_RAW = '"paso_usdt": 1000, "umbral_ratio": 8, "umbral_devolucion_ratio": 16, "tope_perdida_pct": 30}'
+
+
+@pytest.mark.parametrize("raw,error", [
+    (json.dumps(_cfg_body(reserva_max_usdt=float("nan"))), "reserva_max_usdt tiene que ser un número finito"),
+    ('{"habilitado": true, "reserva_max_usdt": NaN, ' + _RAW, "reserva_max_usdt tiene que ser un número finito"),
+    ('{"habilitado": true, "reserva_max_usdt": Infinity, ' + _RAW, "reserva_max_usdt tiene que ser un número finito"),
+    (json.dumps(_cfg_body(reserva_max_usdt=True)), "reserva_max_usdt tiene que ser un número."),
+    (json.dumps(_cfg_body(reserva_max_usdt="5000")), "reserva_max_usdt tiene que ser un número."),
+    (json.dumps(_cfg_body(habilitado="true")), "habilitado tiene que ser true o false"),
+    (json.dumps(_cfg_body(reserva_max_usdt=5)), "reserva_max_usdt fuera de rango"),
+    (json.dumps(_cfg_body(reserva_max_usdt=2_000_000)), "reserva_max_usdt fuera de rango"),
+    (json.dumps(_cfg_body(paso_usdt=6000)), "El paso no puede ser mayor que la reserva"),
+    (json.dumps(_cfg_body(umbral_ratio=1)), "umbral_ratio fuera de rango"),
+    (json.dumps(_cfg_body(umbral_ratio=11)), "umbral_ratio fuera de rango"),
+    (json.dumps(_cfg_body(tope_perdida_pct=0.5)), "tope_perdida_pct fuera de rango"),
+    (json.dumps(_cfg_body(tope_perdida_pct=95)), "tope_perdida_pct fuera de rango"),
+    (json.dumps(_cfg_body(tope_perdida_pct=None)), "hay que fijar el tope de pérdida"),
+    (json.dumps(_cfg_body(reserva_max_usdt=None)), "hay que fijar la reserva máxima"),
+    (json.dumps(_cfg_body(paso_usdt=None, habilitado=False)), "paso_usdt es obligatorio"),
+    (json.dumps({**_cfg_body(), "extra": 1}), "Campos desconocidos: extra"),
+    (json.dumps({"habilitado": True}), "Faltan campos"),
+    (json.dumps([1, 2]), "Body inválido"),
+    # Umbral de devolución parcial: obligatorio, en rango y mayor que el de inyección (histéresis).
+    (json.dumps({k: v for k, v in _cfg_body().items() if k != "umbral_devolucion_ratio"}),
+     "Faltan campos: umbral_devolucion_ratio"),
+    (json.dumps(_cfg_body(umbral_devolucion_ratio=None)), "umbral_devolucion_ratio es obligatorio"),
+    (json.dumps(_cfg_body(umbral_devolucion_ratio="16")), "umbral_devolucion_ratio tiene que ser un número."),
+    (json.dumps(_cfg_body(umbral_devolucion_ratio=1.5)), "umbral_devolucion_ratio fuera de rango"),
+    (json.dumps(_cfg_body(umbral_devolucion_ratio=101)), "umbral_devolucion_ratio fuera de rango"),
+    (json.dumps(_cfg_body(umbral_devolucion_ratio=8)), "tiene que ser mayor que el de inyección"),
+    (json.dumps(_cfg_body(umbral_ratio=10, umbral_devolucion_ratio=9)), "tiene que ser mayor que el de inyección"),
 ])
-def test_panel_validacion_estricta(app, client, raw):  # noqa: F811
+def test_panel_validacion_estricta(app, client, raw, error):  # noqa: F811
     resp = _post_raw(client, "/api/rescate/config", raw)
     assert resp.status_code == 400, resp.get_data(as_text=True)
     assert resp.get_json()["ok"] is False
+    assert error in resp.get_json()["error"]  # cada caso falla por su motivo, no por otro
     assert not (_data_dir(app) / rescate.CONFIG_FILE_NAME).exists()
     assert audit_lines(app)[-1]["action"] == "rescate_config" and audit_lines(app)[-1]["result"] == "rechazado"
 
@@ -1060,7 +1074,9 @@ def _inyectar_real(h, tope=30):
     svc.tick()  # base 22000 + inyección de 1000 (ratio 2 < 8)
     st = h.state()
     assert st["base"]["capital"] == "22000.00" and st["prestamo"]["real"] == "1000.00"
-    h.fake.maint = Decimal("100")  # sin más inyecciones
+    # Ratio 3000 / 250 = 12: entre el umbral de inyección (8) y el de devolución parcial (16), así el préstamo
+    # queda pendiente (ni se inyecta más ni se devuelve).
+    h.fake.maint = Decimal("250")
     return svc
 
 
@@ -1387,3 +1403,206 @@ def test_panel_muestra_tope_en_confirmacion(app, client, fake, loan_path):  # no
     assert conf["ejecuta_desde_en"] and conf["ejecuta_maximo_en"]
     assert status["tope"] is None and status["start_bloqueado"] is None
     assert 'id="rescateConfirmacion"' in client.get("/rescate").get_data(as_text=True)
+
+
+# ---------------------------------------------------------------- devolución parcial con margen sano
+
+
+def _con_prestamo(h, prestamo="5000.00", margin="20000", maint="1000", max_withdraw="10000", **cfg):
+    """Préstamo real pendiente con posiciones abiertas (default: ratio 20 >= 16)."""
+    h.configurar(**cfg)
+    st = h.state()
+    st["prestamo"]["real"] = prestamo
+    rescate.save_state(h.data_dir, st)
+    rescate.write_loan_state(h.loan_path, Decimal(prestamo), "real")
+    h.fake.margin, h.fake.maint, h.fake.max_withdraw = Decimal(margin), Decimal(maint), Decimal(max_withdraw)
+
+
+def _devoluciones(h):
+    return [p["amount"] for p in h.fake.posts() if p["type"] == "UMFUTURE_MAIN"]
+
+
+def test_devolucion_parcial_respeta_el_ratio_objetivo(h):
+    _con_prestamo(h)
+    svc = h.service()
+    svc.tick()
+    # r = min(5000, 10000, 20000 - 16 x 1000) = 4000: el ratio queda justo en 16.
+    assert _devoluciones(h) == ["4000.00"]
+    assert h.fake.margin / h.fake.maint == 16
+    st = h.state()
+    assert st["prestamo"]["real"] == "1000.00" and h.loan_file()["loan_outstanding_usdt"] == 1000.0
+    assert st["ledger"][-1]["estado"] == "confirmada" and st["ledger"][-1]["tipo"] == "devolucion"
+    aviso = next(t for t in h.sent if "Devolución 4000.00" in t)
+    assert "devolución parcial con margen sano" in aviso and "Préstamo pendiente: 1000.00" in aviso
+    h.avanzar(15)
+    svc.tick()
+    assert _devoluciones(h) == ["4000.00"]  # ratio 16: no inyecta ni devuelve
+    assert [p for p in h.fake.posts() if p["type"] == "MAIN_UMFUTURE"] == []
+
+
+def test_devolucion_parcial_redondea_hacia_abajo_y_no_baja_del_umbral(h):
+    _con_prestamo(h, margin="9000", maint="333.337")
+    h.service().tick()
+    # 9000 - 16 x 333.337 = 3666.608 -> 3666.60 (centavos hacia abajo): el ratio queda >= 16.
+    assert _devoluciones(h) == ["3666.60"]
+    assert h.fake.margin / h.fake.maint >= 16
+
+
+def test_devolucion_parcial_limitada_por_max_withdraw(h):
+    _con_prestamo(h, max_withdraw="1500.509")
+    h.service().tick()
+    assert _devoluciones(h) == ["1500.50"]
+    assert h.state()["prestamo"]["real"] == "3499.50"
+    assert any("maxWithdrawAmount 1500.50" in t for t in h.sent)
+
+
+def test_devolucion_parcial_respeta_el_minimo(h):
+    _con_prestamo(h, margin="16099.99")  # r = 99.99 < 100
+    svc = h.service()
+    svc.tick()
+    assert _devoluciones(h) == [] and h.state()["prestamo"]["real"] == "5000.00"
+    h.fake.margin = Decimal("16100")  # r = 100
+    h.avanzar(15)
+    svc.tick()
+    assert _devoluciones(h) == ["100.00"]
+
+
+def test_devolucion_parcial_residuo_menor_al_minimo_espera_a_quedar_sin_posiciones(h):
+    _con_prestamo(h, prestamo="50.00")  # el ratio alcanza, pero r = 50 < 100
+    svc = h.service()
+    svc.tick()
+    assert _devoluciones(h) == []
+    h.fake.positions = {}
+    h.avanzar(15)
+    svc.tick()  # sin posiciones: devolución total, sin mínimo
+    assert _devoluciones(h) == ["50.00"] and h.state()["prestamo"]["real"] == "0.00"
+
+
+def test_devolucion_parcial_respeta_el_cooldown(h):
+    _con_prestamo(h, max_withdraw="1000")
+    svc = h.service()
+    svc.tick()
+    assert _devoluciones(h) == ["1000.00"]
+    h.fake.max_withdraw = Decimal("1000")
+    for _ in range(39):  # 585 s: sigue sano pero dentro del cooldown
+        h.avanzar(15)
+        svc.tick()
+    assert _devoluciones(h) == ["1000.00"]
+    h.avanzar(15)  # 600 s desde la anterior
+    svc.tick()
+    assert _devoluciones(h) == ["1000.00", "1000.00"]
+    assert sum("devolución parcial" in t for t in h.sent) == 2  # Telegram en cada una
+
+
+def test_devolucion_parcial_minimo_y_cooldown_por_entorno(h):
+    _con_prestamo(h, margin="16050", max_withdraw="20")
+    env = {rescate.ENV_DEVOLUCION_MIN: "10", rescate.ENV_DEVOLUCION_COOLDOWN: "0"}
+    svc = h.service(env=env)
+    svc.tick()
+    h.avanzar(15)
+    h.fake.max_withdraw = Decimal("20")
+    svc.tick()
+    assert _devoluciones(h) == ["20.00", "20.00"]
+    s = rescate.RescateSettings({})
+    assert s.devolucion_min_usdt == 100 and s.devolucion_cooldown_seconds == 600
+    s = rescate.RescateSettings({rescate.ENV_DEVOLUCION_MIN: "0", rescate.ENV_DEVOLUCION_COOLDOWN: "-1"})
+    assert s.devolucion_min_usdt == 100 and s.devolucion_cooldown_seconds == 600
+
+
+def test_devolucion_parcial_solo_baja_el_prestamo_confirmada(h):
+    _con_prestamo(h)
+    h.fake.history_status = "PENDING"
+    svc = h.service()
+    svc.tick()
+    st = h.state()
+    assert _devoluciones(h) == ["4000.00"] and st["en_vuelo"]["estado"] == "pendiente"
+    # La wallet ya bajó 4000 pero el préstamo publicado sigue completo: passivbot dimensiona de menos, nunca de más.
+    assert st["prestamo"]["real"] == "5000.00" and h.loan_file()["loan_outstanding_usdt"] == 5000.0
+    for row in h.fake.history:
+        row["status"] = "CONFIRMED"
+    h.avanzar(15)
+    svc.tick()
+    assert h.state()["prestamo"]["real"] == "1000.00" and h.loan_file()["loan_outstanding_usdt"] == 1000.0
+
+
+def test_histeresis_inyeccion_devolucion_sin_ping_pong(h):
+    h.configurar()
+    h.fake.margin, h.fake.maint, h.fake.max_withdraw = Decimal("7500"), Decimal("1000"), Decimal("10000")
+    svc = h.service()
+    svc.tick()  # ratio 7.5 < 8: inyecta 1000 -> 8.5
+    assert [p["type"] for p in h.fake.posts()] == ["MAIN_UMFUTURE"]
+    for margin in ("8500", "12000", "15999.99", "9000"):  # entre 8 y 16: ni inyecta ni devuelve
+        h.fake.margin = Decimal(margin)
+        h.avanzar(15)
+        svc.tick()
+    assert len(h.fake.posts()) == 1 and h.state()["prestamo"]["real"] == "1000.00"
+    h.fake.margin = Decimal("17000")  # sube el precio: ratio 17 >= 16
+    h.avanzar(15)
+    svc.tick()
+    assert _devoluciones(h) == ["1000.00"] and h.state()["prestamo"]["real"] == "0.00"
+    for _ in range(5):  # ratio 16 después de devolver: lejos del umbral de inyección
+        h.avanzar(15)
+        svc.tick()
+    assert [p["type"] for p in h.fake.posts()] == ["MAIN_UMFUTURE", "UMFUTURE_MAIN"]
+
+
+def test_devolucion_parcial_sigue_con_rescate_deshabilitado(h):
+    _con_prestamo(h, habilitado=False, reserva=None, tope=None)
+    h.service().tick()
+    assert _devoluciones(h) == ["4000.00"]  # es plata prestada
+
+
+def test_devolucion_parcial_no_con_tope_en_confirmacion_o_disparado(h):
+    h.configurar(tope=10)
+    h.fake.maint = Decimal("100")
+    svc = h.service()
+    svc.tick()  # base 22000, límite 19800
+    st = h.state()
+    st["prestamo"]["real"] = "1000.00"
+    rescate.save_state(h.data_dir, st)
+    h.fake.spot = Decimal("17000")  # capital 19000 <= 19800 con ratio 20 (margen sano)
+    h.avanzar(15)
+    svc.tick()
+    assert h.state()["tope_confirmacion"] is not None and _devoluciones(h) == []
+    confirmar_tope(h, svc)
+    assert h.apagados == [1] and h.state()["tope"] is not None
+    h.avanzar(15)
+    svc.tick()  # el fake no cierra posiciones: con el tope disparado tampoco se devuelve parcial
+    assert _devoluciones(h) == []
+
+
+def test_devolucion_parcial_en_dry_run_es_simulada(h):
+    h.configurar()
+    st = h.state()
+    st["prestamo"]["dry_run"] = "5000.00"
+    st["servicio"] = {"modo": "dry_run"}
+    rescate.save_state(h.data_dir, st)
+    h.fake.margin, h.fake.maint, h.fake.max_withdraw = Decimal("15000"), Decimal("1000"), Decimal("10000")
+    h.service(mode="dry_run").tick()  # margen simulado 15000 + 5000 = 20000: ratio 20
+    assert not [p for p in h.fake.paths() if p.startswith("/sapi")]
+    st = h.state()
+    assert st["prestamo"]["dry_run"] == "1000.00" and st["ledger"][-1]["estado"] == "simulada"
+    assert h.loan_file()["mode"] == "dry_run" and h.loan_file()["loan_outstanding_usdt"] == 1000.0
+
+
+def test_config_guardada_con_umbral_de_devolucion_invalido_deshabilita(data_dir):
+    cfg = {**rescate.default_config(), "habilitado": True, "reserva_max_usdt": "5000", "tope_perdida_pct": "30",
+           "umbral_ratio": "8", "umbral_devolucion_ratio": "8"}
+    (data_dir / rescate.CONFIG_FILE_NAME).write_text(json.dumps(cfg))
+    loaded, err = rescate.load_config(data_dir)
+    assert loaded["habilitado"] is False and "mayor que el de inyección" in err
+    # Una config anterior a este campo toma el default (16), que siempre es mayor que el umbral máximo (10).
+    del cfg["umbral_devolucion_ratio"]
+    cfg["umbral_ratio"] = "10"
+    (data_dir / rescate.CONFIG_FILE_NAME).write_text(json.dumps(cfg))
+    loaded, err = rescate.load_config(data_dir)
+    assert err is None and loaded["habilitado"] is True and loaded["umbral_devolucion_ratio"] == "16"
+
+
+def test_panel_umbral_de_devolucion(app, client):  # noqa: F811
+    status = client.get("/api/rescate/status").get_json()
+    assert status["config"]["umbral_devolucion_ratio"] == "16"
+    assert status["limites"]["umbral_devolucion_ratio"] == ["2", "100"]
+    ok = _post_raw(client, "/api/rescate/config", json.dumps(_cfg_body(umbral_devolucion_ratio=20.5)))
+    assert ok.status_code == 200 and ok.get_json()["status"]["config"]["umbral_devolucion_ratio"] == "20.5"
+    assert 'id="rescateUmbralDevolucion"' in client.get("/rescate").get_data(as_text=True)
