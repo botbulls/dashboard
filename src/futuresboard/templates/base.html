@@ -3,6 +3,7 @@
     <head>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="csrf-token" content="{{ csrf_token() }}">
         {% block autoreload %}{% endblock %}
         <script>
             (function () {
@@ -650,8 +651,13 @@
              border-radius: 4px;
              cursor: pointer;
          }
-         .menu_admin ul li.btn input[type=number] {
-             width: 40px;
+         .menu_admin ul li.btn button:disabled {
+             opacity: 0.5;
+             cursor: not-allowed;
+         }
+         .menu_admin ul li.btn select {
+             background: var(--input-bg);
+             color: var(--input-text);
          }
 
          .menu_admin .nota {
@@ -749,156 +755,253 @@
          }
 
         </style>
-        <nav class="menu_admin" id="menu_admin">
-            <div class="icono"><span>
+        <nav class="menu_admin" id="menu_admin" aria-label="Control del bot">
+            <div class="icono" role="button" tabindex="0" aria-label="Abrir panel de control del bot" title="Control del bot"><span>
                 <svg height="30px" version="1.1" viewBox="0 0 10.583 10.583" xmlns="http://www.w3.org/2000/svg"><g transform="translate(30.033 -138.98)" fill="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width=".28328"><path d="m-25.311 140.27-0.18065 1.2039a2.898 2.898 0 0 0-0.6936 0.29015l-0.9817-0.72522-0.80515 0.80515 0.72552 0.9817a2.898 2.898 0 0 0-0.29044 0.6936l-1.2039 0.18065v1.1389l1.2039 0.18065a2.898 2.898 0 0 0 0.29044 0.6936l-0.72552 0.9817 0.80515 0.80515 0.9817-0.72522a2.898 2.898 0 0 0 0.6936 0.29015l0.18065 1.2039h1.1386l0.18065-1.2039a2.898 2.898 0 0 0 0.6939-0.29044l0.9817 0.72551 0.80515-0.80515-0.72552-0.9817a2.898 2.898 0 0 0 0.29044-0.6936l1.2039-0.18065v-1.1389l-1.2007-0.18006v-3e-4a2.898 2.898 0 0 0-0.28986-0.69887l0.72171-0.97672-0.80515-0.80515-0.97672 0.7217a2.898 2.898 0 0 0-0.69917-0.28985l-0.18035-1.2007zm0.56946 2.1411a1.8583 1.8583 0 0 1 1.8583 1.8583 1.8583 1.8583 0 0 1-1.8583 1.8583 1.8583 1.8583 0 0 1-1.8583-1.8583 1.8583 1.8583 0 0 1 1.8583-1.8583z" stop-color="#000000" style="-inkscape-stroke:none;font-variation-settings:normal;paint-order:fill markers stroke"/><circle cx="-24.742" cy="144.27" r=".74061" style="-inkscape-stroke:none;paint-order:fill markers stroke"/></g></svg>
             </span></div>
-            <div name="respuesta"></div>
+            <div name="respuesta" aria-live="polite"></div>
             <ul>
                 <li class="grp">
-                    <span class="titulo">STOP</span>
+                    <span class="titulo">PASSIVBOT</span>
                 </li>
                 <li class="btn">
-                    <button data-accion="stop_cu">Último ciclo</button></li>
-                <li class="btn">
-                    <button data-accion="stop_cs">Cierra y sale</button>
-                    <span class="nota">Cierra todas las ordenes y sale. Pierde el UPNL negativo</span>
+                    <span data-bot-panel="estado">Cargando estado...</span>
                 </li>
-                <li class="btn"></li>
+                <li class="btn d-none" data-bot-panel="deshabilitado">
+                    <span class="nota" data-bot-panel="deshabilitado-msg"></span>
+                </li>
 
                 <li class="grp">
                     <span class="titulo">START</span>
                 </li>
+                <li class="btn">
+                    <label for="botRiesgoSelect"><small>RIESGO</small></label>
+                    <select id="botRiesgoSelect" name="riesgo" class="form-select form-select-sm mt-1 mb-2">
+                        <option value="bajo">Bajo (TWE long 4 / short 1)</option>
+                        <option value="medio" selected>Medio (TWE long 6 / short 2)</option>
+                        <option value="alto">Alto (TWE long 8 / short 3)</option>
+                    </select>
+                    <button type="button" data-bot-accion="start">Iniciar / aplicar riesgo</button>
+                    <span class="nota d-block mt-1">Escribe el riesgo en la config de forager y reinicia passivbot.</span>
+                </li>
 
-                <li class="btn">
-                    <small>CICLO</small> <span class="nota">(*)</span>
-                    <input type="number" value="0" min="0" name="ciclos">
-                    <button data-accion="start_rb" data-input="ciclos">Riesgo bajo</button>
+                <li class="grp">
+                    <span class="titulo">STOP</span>
                 </li>
                 <li class="btn">
-                    <small>CICLO</small> <span class="nota">(*)</span>
-                    <input type="number" value="0" min="0" name="ciclos">
-                    <button data-accion="start_rm" data-input="ciclos">Riesgo medio</button>
+                    <button type="button" data-bot-accion="graceful">Graceful stop</button>
+                    <span class="nota d-block mt-1" data-bot-panel="graceful-nota">No abre nuevas posiciones; sigue gestionando las abiertas.</span>
                 </li>
                 <li class="btn">
-                    <small>CICLO</small> <span class="nota">(*)</span>
-                    <input type="number" value="0" min="0" name="ciclos">
-                    <button data-accion="start_ra" data-input="ciclos">Riesgo alto</button>
-                </li>
-                <li class="btn">
-                    <span class="nota">(*): 0 es infinito</span>
+                    <button type="button" data-bot-accion="apagar">Apagar</button>
+                    <span class="nota d-block mt-1">Detiene el contenedor. Las posiciones y órdenes abiertas quedan en el exchange sin gestión.</span>
                 </li>
             </ul>
         </nav>
 
+        <!-- Confirmación de acciones del bot -->
+        <div class="modal fade" id="botActionConfirmModal" tabindex="-1" aria-labelledby="botActionConfirmLabel" aria-hidden="true" style="z-index: 10050;">
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content">
+                    <div class="modal-header border-warning">
+                        <h5 class="modal-title text-warning" id="botActionConfirmLabel"><i class="fas fa-exclamation-triangle me-2"></i><span data-bot-confirm="titulo"></span></h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="mb-2" data-bot-confirm="texto"></p>
+                        <p class="mb-2"><strong>Usted opera bajo su propio riesgo.</strong></p>
+                        <div class="form-check d-none" data-bot-confirm="check-wrap">
+                            <input class="form-check-input" type="checkbox" id="botActionConfirmCheck">
+                            <label class="form-check-label small" for="botActionConfirmCheck">Entiendo que las posiciones y órdenes abiertas quedan en el exchange sin gestión del bot.</label>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancelar</button>
+                        <button type="button" class="btn btn-warning btn-sm" id="botActionConfirmAccept">Confirmar</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <script>
-         const MenuAdmin = MA = {
-             el: undefined,
-             btns: undefined,
-             respuesta: undefined,
-             accesos: undefined,
-             activar: () => {
-                 MA.el = document.getElementById('menu_admin');
-                 const icon = MA.el ? MA.el.querySelector('.icono') : undefined;
-                 if (icon) {
-                     icon.style.cursor = 'pointer';
-                     icon.addEventListener('click', (e) => {
-                         e.preventDefault();
-                         MA.el.classList.toggle('open');
-                     });
-                 }
-                 MA.btns = MA.el.querySelectorAll('[data-accion]');
-                 MA.respuesta = MA.el.querySelector('[name=respuesta]');
-                 MA.obtener_accesos(MA.activar_botones);
-                 MA.respuesta.addEventListener('click', MA.limpiar_aviso);
-             },
-             activar_botones: () => {
-                 let btn = undefined;
-                 for(btn of MA.btns){
-                     MA.setear_boton(btn)
-                 }
-             },
-             setear_boton: (el) => {
-                 el.addEventListener('click', () => {
-                     let dat = {}
-                     dat['accion'] = el.getAttribute('data-accion');
-                     dat['url'] = MA.accesos.urls[dat['accion']];
-                     if(el.hasAttribute('data-input')){
-                         let k = el.getAttribute('data-input');
-                         let v = el.parentNode.querySelector(`input[name=${k}]`).value
-                         dat[k] = v;
-                     }
-                     MA.preparar_envio(dat);
-                 });
-             },
-             preparar_envio: (dat) => {
-                 let v = prompt('Por favor, ingrese su CLAVE DE USUARIO', '');
-                 if (v == MA.accesos.kac){
-                     MA.enviar_solicitud(dat, MA.respuesta_ok, MA.respuesta_err);
-                 }else{
-                     console.log('ERROR clave incorrecta');
-                 }
-             },
-             obtener_accesos: (fn_ok= ()=>{}, fn_er= ()=>{})=>{
-                 let data = {};
-                 // Use proxy endpoint (relative URL, same protocol as page)
-                 let url = '/api/admin/slctdaeo';
-                 console.log(url); 
-                 let xhr = new XMLHttpRequest();
-                 xhr.open('GET', url, true);
-                 xhr.send();
-                 xhr.onload = () => {
-                     if(xhr.status === 200) {
-                         fn_ok(xhr.response);
-                         MA.accesos = JSON.parse(xhr.response);
-                     }else{
-                         fn_err(xhr.response);
-                     }
-                 }
-             },
-             enviar_solicitud: (data, cb_ok=(or)=>{}, cb_err=(or)=>{}) => {
-                 let xhr = new XMLHttpRequest(),
-                     fd = new FormData();
+         (function () {
+             const panel = document.getElementById('menu_admin');
+             if (!panel) return;
+             const respuesta = panel.querySelector('[name=respuesta]');
+             const estadoEl = panel.querySelector('[data-bot-panel="estado"]');
+             const disabledLi = panel.querySelector('[data-bot-panel="deshabilitado"]');
+             const disabledMsg = panel.querySelector('[data-bot-panel="deshabilitado-msg"]');
+             const gracefulNota = panel.querySelector('[data-bot-panel="graceful-nota"]');
+             const riesgoSelect = document.getElementById('botRiesgoSelect');
+             const buttons = panel.querySelectorAll('[data-bot-accion]');
+             const confirmEl = document.getElementById('botActionConfirmModal');
+             const confirmCheck = document.getElementById('botActionConfirmCheck');
+             const confirmAccept = document.getElementById('botActionConfirmAccept');
+             let pending = null;
+             let lastStatus = null;
 
-                 Object.keys(data).forEach( k => { if(k !== 'url') fd.append(k, data[k]) });
-                 // Use proxy endpoint (relative URL, same protocol as page)
-                 // Remove leading slash from data.url if present
-                 const endpoint = data.url.startsWith('/') ? data.url.substring(1) : data.url;
-                 let url = '/api/admin/' + endpoint;
-                 xhr.open('POST', url, true);
-                 xhr.send(fd);
-                 xhr.onload = () => {
-                     if(xhr.status === 200) {
-                         cb_ok(xhr.response);
-                     }else{
-                         cb_err(xhr.response);
-                     }
-                 }
-             },
-             respuesta_ok: (d) => {
-                 d = JSON.parse(d);
-                 if(d.success){
-                     MA.aviso('bien', d.msg);
-                 }else{
-                     MA.aviso('error', d.msg);
-                 }
-                 console.log('OK', d)
-             },
-             respuesta_err: (d) => {
-                 console.log('ERROR', d)
-             },
-             aviso: (t, m) => {
-                 MA.respuesta.classList.add(t);
-                 MA.respuesta.innerHTML = `<p>${m}</p>`;
-                 setTimeout(MA.limpiar_aviso, 5000);
-             },
-             limpiar_aviso: () => {
-                 MA.respuesta.innerHTML = '';
-                 MA.respuesta.classList = [];
+             function csrfToken() {
+                 const m = document.querySelector('meta[name="csrf-token"]');
+                 return m ? m.getAttribute('content') : '';
              }
-         }
 
-         MenuAdmin.activar();
+             function aviso(tipo, msg) {
+                 respuesta.className = tipo;
+                 const p = document.createElement('p');
+                 p.textContent = msg;
+                 respuesta.replaceChildren(p);
+                 setTimeout(limpiarAviso, 8000);
+             }
+             function limpiarAviso() {
+                 respuesta.replaceChildren();
+                 respuesta.className = '';
+             }
+             respuesta.addEventListener('click', limpiarAviso);
+
+             function setButtonsDisabled(disabled) {
+                 buttons.forEach((b) => { b.disabled = disabled; });
+                 riesgoSelect.disabled = disabled;
+             }
+
+             function render(status) {
+                 lastStatus = status;
+                 if (!status || !status.enabled) {
+                     estadoEl.textContent = 'Panel deshabilitado';
+                     disabledMsg.textContent = (status && status.message) || 'Control del bot no configurado.';
+                     disabledLi.classList.remove('d-none');
+                     setButtonsDisabled(true);
+                     return;
+                 }
+                 disabledLi.classList.toggle('d-none', !status.message);
+                 disabledMsg.textContent = status.message || '';
+                 const c = status.container || {};
+                 const riesgo = status.riesgo || 'desconocido';
+                 const modos = status.modes_supported
+                     ? `modos ${status.long_mode || '-'} / ${status.short_mode || '-'}`
+                     : 'modos n/a (forager no los lee)';
+                 const pendiente = status.config_pending === true ? ' (pendiente de reinicio)' : '';
+                 estadoEl.textContent = `${c.name || 'passivbot'}: ${c.status || 'desconocido'} · riesgo ${riesgo}${pendiente} · ${modos}`;
+                 setButtonsDisabled(false);
+                 if (status.presets && status.presets[riesgo]) {
+                     riesgoSelect.value = riesgo;
+                 }
+                 if (!status.config_available) {
+                     panel.querySelector('[data-bot-accion="start"]').disabled = true;
+                 }
+                 const graceful = panel.querySelector('[data-bot-accion="graceful"]');
+                 if (!status.modes_supported || !status.config_available) {
+                     graceful.disabled = true;
+                     gracefulNota.textContent = 'No disponible: requiere forager con soporte de long_mode/short_mode en el HJSON.';
+                 } else {
+                     gracefulNota.textContent = 'No abre nuevas posiciones; sigue gestionando las abiertas.';
+                 }
+             }
+
+             function cargarEstado() {
+                 return fetch('/api/bot/status', { cache: 'no-cache', credentials: 'same-origin' })
+                     .then((r) => {
+                         if (r.redirected) throw new Error('Sesión expirada: volvé a iniciar sesión.');
+                         return r.json().then((d) => ({ ok: r.ok, d }));
+                     })
+                     .then(({ ok, d }) => {
+                         if (!ok && d.enabled !== false) throw new Error(d.error || 'Error al consultar el estado.');
+                         render(d);
+                         window.dispatchEvent(new CustomEvent('fb-bot-status', { detail: d }));
+                     })
+                     .catch((e) => {
+                         estadoEl.textContent = e.message || 'Error al consultar el estado.';
+                         setButtonsDisabled(true);
+                     });
+             }
+
+             const ACCIONES = {
+                 start: () => ({
+                     url: '/api/bot/start',
+                     body: { riesgo: riesgoSelect.value },
+                     titulo: 'Confirmar inicio de passivbot',
+                     texto: `Se aplicará el riesgo "${riesgoSelect.value}" en la config de forager (modo normal) y se reiniciará passivbot. Los bots vuelven a operar en ~1 minuto.`,
+                     check: false,
+                 }),
+                 graceful: () => ({
+                     url: '/api/bot/stop',
+                     body: { modo: 'graceful' },
+                     titulo: 'Confirmar graceful stop',
+                     texto: 'passivbot se reiniciará en graceful stop: no abrirá nuevas posiciones y seguirá gestionando las abiertas hasta cerrarlas.',
+                     check: false,
+                 }),
+                 apagar: () => ({
+                     url: '/api/bot/stop',
+                     body: { modo: 'apagar' },
+                     titulo: 'Confirmar apagado de passivbot',
+                     texto: 'Se detendrá el contenedor de passivbot. ATENCIÓN: las posiciones y órdenes abiertas quedan en el exchange SIN gestión (sin take profit ni recompras del bot).',
+                     check: true,
+                 }),
+             };
+
+             function pedirConfirmacion(accion) {
+                 pending = ACCIONES[accion]();
+                 confirmEl.querySelector('[data-bot-confirm="titulo"]').textContent = pending.titulo;
+                 confirmEl.querySelector('[data-bot-confirm="texto"]').textContent = pending.texto;
+                 confirmEl.querySelector('[data-bot-confirm="check-wrap"]').classList.toggle('d-none', !pending.check);
+                 confirmCheck.checked = false;
+                 confirmAccept.disabled = pending.check;
+                 bootstrap.Modal.getOrCreateInstance(confirmEl).show();
+             }
+             confirmCheck.addEventListener('change', () => {
+                 if (pending && pending.check) confirmAccept.disabled = !confirmCheck.checked;
+             });
+
+             function ejecutar(p) {
+                 setButtonsDisabled(true);
+                 aviso('', 'Procesando...');
+                 fetch(p.url, {
+                     method: 'POST',
+                     credentials: 'same-origin',
+                     headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() },
+                     body: JSON.stringify(p.body),
+                 })
+                     .then((r) => {
+                         if (r.redirected) throw new Error('Sesión expirada: volvé a iniciar sesión.');
+                         return r.json().then((d) => ({ ok: r.ok, d }));
+                     })
+                     .then(({ ok, d }) => {
+                         if (!ok || !d.ok) throw new Error(d.error || 'La acción falló.');
+                         let msg = 'Acción aplicada.';
+                         if (d.warning) msg += ' ' + d.warning;
+                         aviso('bien', msg);
+                     })
+                     .catch((e) => aviso('error', e.message || 'La acción falló.'))
+                     .finally(() => { cargarEstado(); });
+             }
+
+             confirmAccept.addEventListener('click', () => {
+                 if (!pending) return;
+                 if (pending.check && !confirmCheck.checked) return;
+                 const p = pending;
+                 pending = null;
+                 bootstrap.Modal.getOrCreateInstance(confirmEl).hide();
+                 ejecutar(p);
+             });
+
+             buttons.forEach((b) => {
+                 b.addEventListener('click', () => {
+                     if (b.disabled) return;
+                     pedirConfirmacion(b.getAttribute('data-bot-accion'));
+                 });
+             });
+
+             const icon = panel.querySelector('.icono');
+             icon.style.cursor = 'pointer';
+             const toggle = (e) => {
+                 e.preventDefault();
+                 panel.classList.toggle('open');
+                 if (panel.classList.contains('open')) cargarEstado();
+             };
+             icon.addEventListener('click', toggle);
+             icon.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') toggle(e); });
+
+             setButtonsDisabled(true);
+         })();
         </script>
 
 	</body>
