@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import enum
 import json
+import os
 import pathlib
 from typing import List
 from typing import Optional
@@ -24,6 +25,17 @@ class NavbarBG(enum.Enum):
     BG_WARNING = "bg-warning"
     BG_INFO = "bg-info"
     BG_LIGHT = "bg-light"
+
+
+# Binance Futures "demo trading" (reemplazo de testnet.binancefuture.com, que ccxt
+# marca como no soportado para futuros). Solo se usa si FUTURESBOARD_BINANCE_TESTNET
+# esta activo; con la config por defecto no se toca.
+BINANCE_FUTURES_TESTNET_URL = "https://demo-fapi.binance.com"
+BINANCE_FUTURES_MAINNET_URL = "https://fapi.binance.com"
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 class Exchanges(enum.Enum):
@@ -56,6 +68,7 @@ class Config(BaseModel):
     DATABASE: Optional[pathlib.Path]
     EXCHANGE: Optional[Exchanges] = Exchanges.BINANCE
     TEST_MODE: Optional[bool] = False
+    BINANCE_TESTNET: bool = False
     API_BASE_URL: Optional[str]
     AUTO_SCRAPE_INTERVAL: int = 300
     DISABLE_AUTO_SCRAPE: bool = False
@@ -73,9 +86,24 @@ class Config(BaseModel):
             value = values["CONFIG_DIR"] / "futures.db"
         return value.resolve()
 
+    @validator("BINANCE_TESTNET", always=True)
+    @classmethod
+    def _validate_binance_testnet(cls, value, values):
+        # Opt-in: config.json (BINANCE_TESTNET: true) o env FUTURESBOARD_BINANCE_TESTNET=1.
+        # Solo aplica a Binance.
+        enabled = bool(value) or _env_flag("FUTURESBOARD_BINANCE_TESTNET")
+        return enabled and values.get("EXCHANGE") == Exchanges.BINANCE
+
     @validator("API_BASE_URL", always=True)
     @classmethod
     def _validate_api_base_url(cls, value, values):
+        if values.get("BINANCE_TESTNET"):
+            # Forzado aunque config.json tenga API_BASE_URL, para no mezclar
+            # el modo de prueba con el endpoint real.
+            return (
+                os.environ.get("FUTURESBOARD_BINANCE_TESTNET_URL", "").strip().rstrip("/")
+                or BINANCE_FUTURES_TESTNET_URL
+            )
         if not value:
             if values["EXCHANGE"] == Exchanges.BINANCE:
                 if values["TEST_MODE"]:
