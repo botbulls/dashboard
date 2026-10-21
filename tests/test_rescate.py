@@ -1606,3 +1606,53 @@ def test_panel_umbral_de_devolucion(app, client):  # noqa: F811
     ok = _post_raw(client, "/api/rescate/config", json.dumps(_cfg_body(umbral_devolucion_ratio=20.5)))
     assert ok.status_code == 200 and ok.get_json()["status"]["config"]["umbral_devolucion_ratio"] == "20.5"
     assert 'id="rescateUmbralDevolucion"' in client.get("/rescate").get_data(as_text=True)
+
+
+@pytest.mark.parametrize("como", ["pendiente", "incierta"])
+def test_devolucion_parcial_en_vuelo_no_dispara_el_tope_con_spot_caido(h, como):
+    h.configurar(tope=10)
+    h.fake.margin, h.fake.maint, h.fake.max_withdraw = Decimal("20000"), Decimal("1000"), Decimal("10000")
+    svc = h.service()
+    svc.tick()  # base 40000 (20000 + 20000 de spot), límite 36000
+    st = h.state()
+    st["prestamo"]["real"] = "5000.00"
+    rescate.save_state(h.data_dir, st)
+    if como == "pendiente":
+        h.fake.history_status = "PENDING"
+    else:
+        h.fake.transfer_mode, h.fake.ejecutar_ambigua = "timeout", True
+    h.avanzar(15)
+    svc.tick()  # devolución parcial de 4000: futuros 16000, spot 24000, préstamo todavía 5000
+    assert _devoluciones(h) == ["4000.00"] and h.state()["en_vuelo"] is not None
+    h.fake.read_fail.add("/api/v3/account")  # mismo host que /sapi: caída típica justo después
+    for _ in range(6):
+        h.avanzar(15)
+        svc.tick()
+    # Sin sumar la devolución en vuelo: 16000 + 20000 = 36000 <= 36000 => confirmación y Apagar falsos.
+    assert h.state()["tope_confirmacion"] is None and h.state()["tope"] is None and h.apagados == []
+    assert any("último saldo spot leído (24000.00 USDT" in t for t in h.sent)
+
+
+@pytest.mark.parametrize("como", ["sigue_pendiente", "confirmada_en_la_lectura"])
+def test_spot_ref_no_cuenta_dos_veces_una_devolucion(h, como):
+    h.configurar(tope=10)
+    h.fake.margin, h.fake.maint, h.fake.max_withdraw = Decimal("20000"), Decimal("1000"), Decimal("10000")
+    svc = h.service()
+    svc.tick()
+    st = h.state()
+    st["prestamo"]["real"] = "5000.00"
+    rescate.save_state(h.data_dir, st)
+    h.fake.history_status = "PENDING"
+    h.avanzar(15)
+    svc.tick()  # devolución parcial de 4000 en vuelo
+    if como == "confirmada_en_la_lectura":
+        for row in h.fake.history:
+            row["status"] = "CONFIRMED"
+    h.avanzar(15)
+    svc.tick()  # lectura OK: el spot leído (24000) ya incluye la devolución
+    assert h.state()["prestamo"]["real"] == ("1000.00" if como == "confirmada_en_la_lectura" else "5000.00")
+    h.fake.read_fail.add("/api/v3/account")
+    h.avanzar(15)
+    svc.tick()
+    assert any("último saldo spot leído (24000.00 USDT" in t for t in h.sent)  # ni 28000 (doble) ni 20000
+    assert h.state()["tope_confirmacion"] is None and h.apagados == []

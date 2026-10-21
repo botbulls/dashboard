@@ -986,13 +986,16 @@ class RescateService:
             return
         self._clear("lectura", "Lectura de la cuenta en Binance recuperada.")
         snap = self.build_snapshot(state, fut, spot)
-        # Último spot leído OK (con el préstamo real de ese momento): sirve para evaluar el tope si spot se cae.
-        state["spot_ref"] = {"usdt": money(spot), "prestamo_real": money(get_loan(state, MODE_REAL)),
-                             "ts": now_iso(self.clock())}
         state["ultimo"] = self.snapshot_view(snap, self.mode, self.clock())
 
         if state.get("en_vuelo"):
             self._conciliar(state, snap, now_ms)
+        # Último spot leído OK, con el préstamo real y la transferencia en vuelo DESPUÉS de conciliar (así el saldo
+        # leído y el préstamo cuentan las mismas transferencias): sirve para evaluar el tope si spot se cae.
+        en_vuelo = state.get("en_vuelo")
+        state["spot_ref"] = {"usdt": money(spot), "prestamo_real": money(get_loan(state, MODE_REAL)),
+                             "en_vuelo_id": en_vuelo.get("id") if isinstance(en_vuelo, dict) else None,
+                             "ts": now_iso(self.clock())}
 
         self._fijar_base(state, cfg, snap)
         self._tope(state, cfg, snap["capital"], now_ms)
@@ -1033,9 +1036,15 @@ class RescateService:
                        now_ms: int) -> None:
         """Futuros OK y spot caído: sin transferencias ni conciliación, pero el tope se sigue evaluando.
 
-        El spot se estima con el último leído OK menos lo que el préstamo real creció desde esa lectura (una
-        inyección posterior ya salió de spot). No se usa solo ``margin_balance``: con la reserva en spot eso
-        dispararía Apagar por una caída de la API de spot.
+        El spot se estima con el último leído OK, suponiendo ejecutadas las transferencias reales posteriores a esa
+        lectura (la equity de futuros, leída en vivo, ya las refleja si se ejecutaron):
+
+        * menos lo que el préstamo real creció desde entonces (una inyección cuenta en el préstamo antes del POST);
+        * más una devolución real en vuelo enviada después de la lectura (el préstamo baja recién confirmada, pero
+          la plata ya salió de futuros: sin sumarla se vería una pérdida inexistente y el tope podría cerrar todo).
+
+        No se usa solo ``margin_balance``: con la reserva en spot eso dispararía Apagar por una caída de la API de
+        spot.
         """
         msg = f"No se pudo leer la cuenta en Binance (spot): {exc}. No se hacen transferencias; "
         ref = state.get("spot_ref")
@@ -1044,6 +1053,10 @@ class RescateService:
             try:
                 crecio = get_loan(state, MODE_REAL) - dec(ref["prestamo_real"])
                 spot_est = max(Decimal(0), dec(ref["usdt"]) - crecio)
+                entry = state.get("en_vuelo")
+                if (isinstance(entry, dict) and entry.get("modo") == MODE_REAL and entry.get("tipo") == TIPO_DEVOLUCION
+                        and entry.get("id") != ref.get("en_vuelo_id")):
+                    spot_est += dec(entry["monto"])
             except (KeyError, ValueError):
                 spot_est = None
         if spot_est is None:

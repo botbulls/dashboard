@@ -78,8 +78,11 @@ Un ciclo cada `FUTURESBOARD_RESCATE_INTERVAL` segundos (default 15). En cada cic
    como 0.
    - Si falla **futuros**: no se hace nada más ese ciclo y el aviso dice que el tope no se puede evaluar.
    - Si falla **solo spot**: no hay transferencias ni conciliación, pero el tope se sigue evaluando con
-     `equity de futuros + último spot leído OK` (menos lo que creció el préstamo real desde esa lectura) y
-     el aviso lo dice. No se usa solo la equity de futuros: con la reserva en spot, una caída de la API de
+     `equity de futuros + último spot leído OK` y el aviso lo dice. El spot estimado supone ejecutadas las
+     transferencias reales posteriores a esa lectura: resta lo que creció el préstamo real (una inyección
+     cuenta en el préstamo antes del POST) y suma una devolución real en vuelo enviada después de la lectura
+     (el préstamo baja recién confirmada, pero la plata ya salió de futuros; sin sumarla, una devolución
+     parcial pendiente durante una caída de spot parecería una pérdida y podría disparar el tope). No se usa solo la equity de futuros: con la reserva en spot, una caída de la API de
      spot cerraría todo a mercado. Sin ningún spot leído antes, el aviso dice que el tope quedó desarmado.
 2. **Conciliación** de una transferencia en vuelo (ver abajo). Mientras haya una, no se hace otra.
 3. **Base**: al habilitar (o volver a habilitar) en el panel se abre una generación nueva. El primer
