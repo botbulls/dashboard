@@ -615,6 +615,41 @@ def test_prestamo_simulado_no_pasa_a_real(h):
     assert h.fake.posts() == []  # nunca "devuelve" un préstamo simulado con plata real
 
 
+def test_prestamo_real_no_se_deja_de_publicar_en_dry_run(h):
+    h.configurar()
+    st = h.state()
+    st["prestamo"] = {"real": "1000.00", "dry_run": "0.00"}
+    st["servicio"] = {"modo": "real"}
+    rescate.save_state(h.data_dir, st)
+    rescate.write_loan_state(h.loan_path, Decimal("1000"), "real")
+    h.fake.margin, h.fake.maint = Decimal("1000"), Decimal("1000")  # cerca de la liquidación
+    svc = h.service(mode="dry_run")
+    svc.tick()
+    h.fake.positions = {}
+    svc.tick()
+    st = h.state()
+    assert h.loan_file()["mode"] == "real" and h.loan_file()["loan_outstanding_usdt"] == 1000.0
+    assert "préstamo REAL pendiente" in st["bloqueo"]
+    assert st["prestamo"] == {"real": "1000.00", "dry_run": "0.00"} and st["ledger"] == []
+    assert not [p for p in h.fake.paths() if p.startswith("/sapi")]
+    status = rescate.panel_status(h.data_dir)
+    assert status["prestamo"] == "1000.00" and status["prestamo_modo"] == "real"
+
+
+def test_transferencia_real_en_vuelo_queda_en_dry_run(h):
+    h.configurar()
+    h.fake.transfer_mode = "timeout"
+    h.service().tick()
+    assert h.state()["en_vuelo"]["modo"] == "real"
+    calls = len(h.fake.calls)
+    svc = h.service(mode="dry_run")
+    svc.tick()
+    st = h.state()
+    assert st["en_vuelo"]["estado"] == "incierto" and st["prestamo"]["real"] == "1000.00"
+    assert not [p for _, p, _ in h.fake.calls[calls:] if p.startswith("/sapi")]
+    assert h.loan_file() == {**h.loan_file(), "mode": "real", "loan_outstanding_usdt": 1000.0}
+
+
 def test_estado_ilegible_no_opera_y_bloquea_start(h):
     h.configurar()
     (h.data_dir / rescate.STATE_FILE_NAME).write_text("{roto")
@@ -654,6 +689,18 @@ def test_cli_simular_solo_en_dry_run(cli_env, monkeypatch, loan_path, capsys):
     state, _ = rescate.load_state(cli_env)
     assert [e["estado"] for e in state["ledger"]] == ["simulada"] * 3
     assert state["prestamo"]["real"] == "0.00"
+
+
+def test_cli_no_simula_con_prestamo_real_pendiente(cli_env, monkeypatch, loan_path):
+    state = rescate.default_state()
+    state["prestamo"]["real"] = "500.00"
+    rescate.save_state(cli_env, state)
+    rescate.write_loan_state(loan_path, Decimal("500"), "real")
+    monkeypatch.setenv(rescate.ENV_MODE, "dry_run")
+    assert rescate.main(["simular-inyeccion", "100"]) == 2
+    assert rescate.main(["simular-devolucion"]) == 2
+    assert json.loads(loan_path.read_text())["mode"] == "real"
+    assert json.loads(loan_path.read_text())["loan_outstanding_usdt"] == 500.0
 
 
 # ---------------------------------------------------------------- panel

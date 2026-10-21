@@ -483,6 +483,23 @@ def set_loan(state: Dict[str, Any], mode: str, value: Decimal) -> None:
     state["prestamo"][mode] = money(max(Decimal(0), value))
 
 
+def real_pendiente(state: Dict[str, Any]) -> bool:
+    """Hay plata real prestada (o una transferencia real en vuelo)."""
+    en_vuelo = state.get("en_vuelo")
+    return get_loan(state, MODE_REAL) > 0 or (isinstance(en_vuelo, dict) and en_vuelo.get("modo") == MODE_REAL)
+
+
+def loan_publicado(state: Dict[str, Any], mode: Optional[str]) -> Tuple[Decimal, str]:
+    """(préstamo, modo) que va a loan_state.json.
+
+    Es el préstamo del modo activo, salvo en dry_run con un préstamo real pendiente: ahí se sigue
+    publicando el real (passivbot nunca debe dimensionar sobre plata prestada de verdad).
+    """
+    if mode == MODE_DRY_RUN and not real_pendiente(state):
+        return get_loan(state, MODE_DRY_RUN), MODE_DRY_RUN
+    return get_loan(state, MODE_REAL), MODE_REAL
+
+
 def tope_activo(state: Dict[str, Any], cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     tope = state.get("tope")
     if isinstance(tope, dict) and tope.get("id") and tope.get("id") != cfg.get("tope_reconocido"):
@@ -736,8 +753,12 @@ class RescateService:
         add_event(state, tipo, texto, self.mode, self.clock())
 
     def _sync_loan_file(self, state: Dict[str, Any]) -> None:
-        """loan_state.json = préstamo del modo activo. Un préstamo simulado nunca pasa a real."""
-        write_loan_state(self.settings.loan_state_path, get_loan(state, self.mode), self.mode, self.clock())
+        """loan_state.json = préstamo del modo activo (ver ``loan_publicado``).
+
+        Un préstamo simulado nunca pasa a real, y uno real nunca se deja de publicar por estar en dry_run.
+        """
+        loan, mode = loan_publicado(state, self.mode)
+        write_loan_state(self.settings.loan_state_path, loan, mode, self.clock())
 
     # -- preflight --------------------------------------------------------------------
     def preflight(self) -> Optional[str]:
@@ -834,6 +855,10 @@ class RescateService:
             self._primer_tick = False
 
         bloqueo = self.preflight()
+        if not bloqueo and self.mode == MODE_DRY_RUN and real_pendiente(state):
+            bloqueo = (f"Hay un préstamo REAL pendiente ({money(get_loan(state, MODE_REAL))} USDT): en dry_run no se "
+                       "simulan transferencias y loan_state.json sigue publicando el préstamo real. Volver a "
+                       f"{ENV_MODE}=real para devolverlo.")
         if bloqueo != state.get("bloqueo"):
             if bloqueo:
                 self._event(state, "bloqueo", bloqueo)
@@ -1083,8 +1108,7 @@ class RescateService:
         mode = entry["modo"]
         set_loan(state, mode, get_loan(state, mode) + dec(entry["monto"]))
         entry["prestamo_aplicado"] = True
-        if mode == self.mode:
-            self._sync_loan_file(state)
+        self._sync_loan_file(state)
 
     def _revertir_prestamo(self, state: Dict[str, Any], entry: Dict[str, Any]) -> None:
         if not entry.get("prestamo_aplicado"):
@@ -1092,8 +1116,7 @@ class RescateService:
         mode = entry["modo"]
         set_loan(state, mode, get_loan(state, mode) - dec(entry["monto"]))
         entry["prestamo_aplicado"] = False
-        if mode == self.mode:
-            self._sync_loan_file(state)
+        self._sync_loan_file(state)
 
     def _registrar(self, state: Dict[str, Any], entry: Dict[str, Any], estado: str, tran_id: Optional[int],
                    detalle: str) -> None:
@@ -1118,8 +1141,7 @@ class RescateService:
         elif ok:
             # La devolución recién baja el préstamo con la transferencia confirmada.
             set_loan(state, mode, get_loan(state, mode) - monto)
-            if mode == self.mode:
-                self._sync_loan_file(state)
+            self._sync_loan_file(state)
         state["en_vuelo"] = None
         self._registrar(state, entry, estado, tran_id, detalle)
         loan = money(get_loan(state, mode))
@@ -1168,6 +1190,9 @@ class RescateService:
         if entry.get("modo") != MODE_REAL:
             # Una simulación nunca queda en vuelo; si quedó algo raro, se descarta sin tocar el préstamo real.
             state["en_vuelo"] = None
+            return
+        if self.mode != MODE_REAL:
+            # En dry_run no se llama a /sapi: queda en vuelo (y bloquea) hasta volver a real.
             return
         if entry.get("estado") == "enviando":
             # Se cortó entre el POST y su respuesta (reinicio): resultado desconocido.
@@ -1285,7 +1310,7 @@ def panel_status(data_dir: pathlib.Path, now: Optional[float] = None) -> Dict[st
             vivo = age <= 3 * int(servicio.get("intervalo") or DEFAULT_INTERVAL) + 30
         except (TypeError, ValueError):
             vivo = False
-    loan_mode = modo if modo in (MODE_REAL, MODE_DRY_RUN) else MODE_REAL
+    loan, loan_mode = loan_publicado(state, modo)
     base = state.get("base")
     base_vigente = base if isinstance(base, dict) and base.get("generacion") == cfg.get("generacion") else None
     limite = None
@@ -1305,7 +1330,7 @@ def panel_status(data_dir: pathlib.Path, now: Optional[float] = None) -> Dict[st
                      "testnet": (servicio or {}).get("testnet")},
         "bloqueo": state.get("bloqueo"),
         "ultimo": state.get("ultimo"),
-        "prestamo": state["prestamo"].get(loan_mode, "0.00"),
+        "prestamo": money(loan),
         "prestamo_modo": loan_mode,
         "base": base_vigente,
         "limite_tope": limite,
@@ -1371,6 +1396,10 @@ def _simular(settings: RescateSettings, config: Any, tipo: str, monto: Optional[
         if err:
             print(err)
             return 1
+        if real_pendiente(state):
+            print(f"Hay un préstamo REAL pendiente ({money(get_loan(state, MODE_REAL))} USDT): no se simula nada "
+                  "hasta devolverlo en modo real.")
+            return 2
         loan = get_loan(state, MODE_DRY_RUN)
         if tipo == TIPO_INYECCION:
             if amount is None:

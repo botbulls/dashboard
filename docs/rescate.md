@@ -56,9 +56,15 @@ relee en cada actualización de balance.
     inode viejo para siempre. Es el mismo problema que con el HJSON de forager
     (ver [panel-passivbot.md](panel-passivbot.md)).
 
-El archivo **siempre** refleja el préstamo del modo activo, y el préstamo se lleva por separado por
-modo (`real` / `dry_run`). Un préstamo simulado **nunca** pasa a real: al arrancar en `real` el archivo
-se reescribe desde el ledger real, y la devolución real solo mira el ledger real.
+El archivo refleja el préstamo del modo activo, y el préstamo se lleva por separado por modo
+(`real` / `dry_run`). En las dos direcciones:
+
+- Un préstamo simulado **nunca** pasa a real: al arrancar en `real` el archivo se reescribe desde el
+  ledger real, y la devolución real solo mira el ledger real.
+- Un préstamo real **nunca** se deja de publicar: en `dry_run` con plata real prestada (o una
+  transferencia real en vuelo) el archivo sigue con el préstamo real y `"mode": "real"`, no se simulan
+  transferencias (bloqueo visible en el panel) y la CLI de simulación se niega. Hay que volver a `real`
+  para devolverlo.
 
 ## Reglas
 
