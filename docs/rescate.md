@@ -86,10 +86,39 @@ Un ciclo cada `FUTURESBOARD_RESCATE_INTERVAL` segundos (default 15). En cada cic
    hay base el tope no está armado y **no se presta nada**; el panel lo muestra como "base pendiente".
    La base guarda también el % de tope vigente. Volver a habilitar **con un préstamo real pendiente** no
    fija una base nueva sobre el capital ya perdido: se mantiene la anterior.
-4. **Tope de pérdida total**: si `capital_total <= base × (1 - tope%)`. Se evalúa con el rescate
-   habilitado y también, mientras haya un **préstamo real pendiente**, con el rescate deshabilitado o con
+4. **Tope de pérdida total**: el piso es `base × (1 - tope%)`. Se evalúa con el rescate habilitado y
+   también, mientras haya un **préstamo real pendiente**, con el rescate deshabilitado o con
    `rescate_config.json` inválido (usa la última base y su %: la reserva prestada sigue en futuros). Una
    base cuyo tope ya se disparó no se vuelve a armar así, para que reconocerlo no lo re-dispare.
+
+   **Confirmación.** Al primer cruce (`capital_total <= piso`) **no** se apaga: el tope queda *en
+   confirmación*. Se persiste en `rescate_state.json` (hora y capital del cruce), se avisa por Telegram y,
+   mientras dure, **no se inyecta**. Cada lectura posterior se compara con el piso vigente en ese momento:
+   - si el capital vuelve arriba del piso, la confirmación se cancela (aviso) y no se apaga;
+   - si una lectura separada al menos `FUTURESBOARD_RESCATE_TOPE_CONFIRM_SECONDS` (default 60 s) del primer
+     cruce sigue en o debajo del piso, se dispara el tope (abajo). Con los defaults dispara entre 60 y 75 s
+     después del primer cruce. Con `0` se vuelve al disparo inmediato.
+
+   El motivo: en la simulación de 3.330 corridas, con el disparo inmediato se vendía el fondo de mechas de
+   1 minuto que rebotaban enseguida (por ejemplo 2026-01-31 18:43).
+   - La confirmación sobrevive reinicios: el proceso nuevo la retoma de `rescate_state.json`. Una
+     confirmación guardada ilegible se descarta con aviso y la próxima lectura debajo del piso abre otra.
+   - **Lecturas caídas durante la confirmación** (misma lógica del punto 1): con spot caído se observa con
+     el último saldo spot leído, y esa observación puede confirmar o cancelar. Con futuros caídos (o spot
+     caído sin un saldo spot leído antes) no hay observación: la confirmación no se confirma ni se cancela.
+   - **Espera máxima**: para que no quede confirmando para siempre, si pasan `max(5 × confirmación, 300 s)`
+     desde el primer cruce (5 min con el default) sin una observación que la resuelva, se dispara con la
+     última observación, que estaba en o debajo del piso. El aviso de lectura caída dice hasta cuándo. Sin
+     la API de futuros, la parte de Binance del Apagar (cancelar y cerrar) puede fallar: sigue el camino de
+     reintentos de abajo, y detener passivbot no depende de Binance.
+   - Si el host atrasa el reloj durante una confirmación, la cuenta se reinicia desde ese momento.
+   - Si el capital oscila alrededor del piso (cruza, vuelve arriba antes de confirmarse, cruza de nuevo),
+     cada rebote cancela y el cruce siguiente abre una confirmación nueva: dispara recién cuando el capital
+     se queda debajo una confirmación completa.
+   - Si el tope se desarma durante la confirmación (rescate deshabilitado sin préstamo real pendiente), la
+     confirmación se cancela con aviso.
+
+   **Disparo** (confirmado, o inmediato con `FUTURESBOARD_RESCATE_TOPE_CONFIRM_SECONDS=0`):
    - se registra el disparo y se persiste **antes** de actuar (desde ese momento el panel bloquea START);
    - se ejecuta **exactamente** la rutina de Apagar del panel (`bot_control.stop_bot(..., "apagar")`:
      detener passivbot, cancelar órdenes normales y condicionales, cerrar posiciones a mercado y
@@ -107,7 +136,7 @@ Un ciclo cada `FUTURESBOARD_RESCATE_INTERVAL` segundos (default 15). En cada cic
    - START queda bloqueado (409) hasta **reconocerlo** en el panel. Reconocer deshabilita el rescate:
      volver a habilitarlo fija una base nueva.
 5. **Inyección** (spot → futuros, `MAIN_UMFUTURE`) solo si el rescate está habilitado, hay base, no hay
-   tope activo, hay posiciones y `totalMarginBalance / totalMaintMargin < umbral` (estricto: en el umbral
+   tope activo ni en confirmación, hay posiciones y `totalMarginBalance / totalMaintMargin < umbral` (estricto: en el umbral
    exacto no inyecta). Monto = `min(paso, reserva_max - préstamo, USDT libre en spot)`, redondeado hacia
    abajo a centavos; menos de 1 USDT no se inyecta (aviso único de "reserva agotada" o "sin USDT en spot").
 6. **Devolución** (futuros → spot, `UMFUTURE_MAIN`) cuando la cuenta de futuros no tiene posiciones y
@@ -154,7 +183,9 @@ con el rescate habilitado (o con un préstamo real pendiente).
 Sección **Rescate (colchón)** del menú lateral (`/rescate`, con login). Muestra modo y latido del
 servicio, ratio margen/mantenimiento vs umbral, posiciones, préstamo pendiente, USDT libre en spot,
 capital total vs base y límite del tope, la transferencia en vuelo, el motivo de bloqueo y los últimos
-eventos. Si hay un tope disparado, lo muestra con el resultado del Apagar y el botón para reconocerlo.
+eventos. Si hay un tope en confirmación, lo muestra con el capital del cruce, la última lectura y desde
+cuándo y hasta cuándo se ejecuta. Si hay un tope disparado, lo muestra con el resultado del Apagar y el
+botón para reconocerlo.
 
 | Método | Ruta | Body | Efecto |
 |---|---|---|---|
@@ -192,14 +223,15 @@ Todas fail-closed: un valor inválido nunca habilita más de lo pedido.
 | `FUTURESBOARD_RESCATE_MODE` | `off` | `off` \| `dry_run` \| `real`. Cualquier otro valor = `off` + error en el log. |
 | `FUTURESBOARD_RESCATE_INTERVAL` | `15` | Segundos entre ciclos (5–300; inválido = 15). |
 | `FUTURESBOARD_RESCATE_LOAN_STATE` | `/rescate/loan_state.json` | Dónde se escribe el contrato para passivbot. |
+| `FUTURESBOARD_RESCATE_TOPE_CONFIRM_SECONDS` | `60` | Confirmación del tope (0–600). `0` = disparo inmediato. Vacío, no entero o negativo = 60; más de 600 = 600. Espera máxima sin lecturas: `max(5 × valor, 300)` s. |
 | `FUTURESBOARD_RESCATE_SPOT_URL` | `https://api.binance.com` (`https://demo-api.binance.com` con testnet) | Base de spot y `/sapi`. |
 | `FUTURESBOARD_DOCKER_URL` / `FUTURESBOARD_PASSIVBOT_CONTAINER` | (vacía) / `client17-passivbot` | Necesarias para que el tope ejecute Apagar. Sin `FUTURESBOARD_DOCKER_URL`, `real` no transfiere. |
 | `FUTURESBOARD_BINANCE_TESTNET` | (vacía) | Igual que en el dashboard (o `BINANCE_TESTNET` en `config.json`): futuros en `demo-fapi`, spot en `demo-api`, `real` bloqueado. |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `TELEGRAM_PREFIX` | (vacías) | Avisos (ver [notificaciones.md](notificaciones.md)). |
 | `FUTURESBOARD_CONFIG_DIR` | `./config` | Directorio de `config.json` (API key/secret, `EXCHANGE`, testnet). El estado y el lock van junto a la DB. |
 
-Telegram: un aviso por inyección, devolución, transferencia rechazada o incierta, disparo del tope y
-resultado del Apagar, y por cambios de estado (lectura caída / recuperada, bloqueo, reserva agotada),
+Telegram: un aviso por inyección, devolución, transferencia rechazada o incierta, tope en confirmación,
+confirmación cancelada, disparo del tope y resultado del Apagar, y por cambios de estado (lectura caída / recuperada, bloqueo, reserva agotada),
 sin repetir el mismo aviso cada ciclo. En `dry_run` todos llevan `[SIMULACIÓN]`.
 
 ## docker-compose
@@ -222,6 +254,7 @@ services:
     environment:
       FUTURESBOARD_RESCATE_MODE: dry_run            # off | dry_run | real (real: bloqueado en Demo)
       FUTURESBOARD_RESCATE_INTERVAL: "15"
+      FUTURESBOARD_RESCATE_TOPE_CONFIRM_SECONDS: "60"   # 0 = tope sin confirmación (Apagar inmediato)
       FUTURESBOARD_RESCATE_LOAN_STATE: /rescate/loan_state.json
       FUTURESBOARD_DOCKER_URL: http://docker-proxy:2375
       FUTURESBOARD_PASSIVBOT_CONTAINER: client17-passivbot
@@ -270,6 +303,8 @@ achica el dimensionamiento leyendo `loan_state.json`.
 - `capital_total` no cambia con las transferencias propias (spot ⇄ futuros), pero **sí** con depósitos,
   retiros, transferencias a otras wallets o trading en spot: eso puede disparar el tope (o alejarlo).
 - La base se fija en el primer ciclo después de habilitar (hasta `FUTURESBOARD_RESCATE_INTERVAL` s).
+- La confirmación del tope es un trade-off: filtra mechas que rebotan, pero si la caída sigue, el cierre a
+  mercado llega 60–75 s más tarde (con los defaults) y puede salir a un precio peor que el del primer cruce.
 - Una transferencia que no se puede conciliar sola (sin rastro y con el saldo spot movido por otra cosa)
   frena las transferencias nuevas hasta resolverla a mano en `rescate_state.json`.
 - En Binance Demo no hay `/sapi`: en dev solo se puede probar `dry_run`.

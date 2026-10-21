@@ -164,8 +164,9 @@ class Harness:
         self.apagados.append(1)
         return self.apagar_result
 
-    def service(self, mode="real", testnet=False, apagar=True, exchange="binance"):
-        settings = rescate.RescateSettings({rescate.ENV_MODE: mode, rescate.ENV_LOAN_STATE: str(self.loan_path)})
+    def service(self, mode="real", testnet=False, apagar=True, exchange="binance", env=None):
+        settings = rescate.RescateSettings({rescate.ENV_MODE: mode, rescate.ENV_LOAN_STATE: str(self.loan_path),
+                                            **(env or {})})
         client = rescate.RescateBinance(FUT, SPOT, "key-de-test", "secret-de-test", session=self.fake)
         return rescate.RescateService(self.data_dir, settings, client, testnet=testnet, exchange=exchange,
                                       apagar=self.apagar if apagar else None,
@@ -195,6 +196,12 @@ def h(data_dir, loan_path, fake):
     harness = Harness(data_dir, loan_path, fake)
     fake.now_ms = int(harness.clock.t * 1000)
     return harness
+
+
+def confirmar_tope(h, svc=None):
+    """Segunda lectura del cruce del piso, separada por la confirmación por defecto: ejecuta el tope."""
+    h.avanzar(rescate.DEFAULT_TOPE_CONFIRM_S + 1)
+    (svc or h.service()).tick()
 
 
 # ---------------------------------------------------------------- contrato loan_state.json
@@ -458,6 +465,8 @@ def test_tope_dispara_apagar_y_bloquea_start(h):
     # Tras la inyección: spot 19000. Margen -200 => capital 18800 <= 19800 (base x 0.9).
     h.fake.margin = Decimal("-200")
     svc.tick()
+    assert h.apagados == [] and h.state()["tope_confirmacion"] is not None  # primer cruce: en confirmación
+    confirmar_tope(h, svc)
     st = h.state()
     assert h.apagados == [1]
     assert st["tope"]["apagar"]["resultado"] == "ok" and st["tope"]["limite"] == "19800.00"
@@ -477,6 +486,7 @@ def test_tope_apagar_fallido_reintenta_con_limite(h):
     svc.tick()
     h.fake.margin = Decimal("-500")
     svc.tick()
+    confirmar_tope(h, svc)
     assert len(h.apagados) == 1
     svc.tick()
     assert len(h.apagados) == 1  # espera entre intentos
@@ -493,6 +503,7 @@ def test_tope_en_dry_run_es_simulado(h):
     svc.tick()
     h.fake.margin = Decimal("-500")
     svc.tick()
+    confirmar_tope(h, svc)
     st = h.state()
     assert h.apagados == []  # nada real: ni Docker ni órdenes
     assert st["tope"]["apagar"]["resultado"] == "simulado" and st["tope"]["modo"] == "dry_run"
@@ -809,6 +820,7 @@ def test_panel_start_bloqueado_por_tope_y_reconocimiento(app, client, env, docke
     svc.tick()
     fake.margin = Decimal("-500")
     svc.tick()
+    confirmar_tope(h, svc)
     tope = h.state()["tope"]
     assert h.apagados == [1]
 
@@ -855,9 +867,11 @@ def test_telegram_en_cada_evento(h):
     h.avanzar(1)
     svc.tick()                       # error de transferencia
     h.fake.margin = Decimal("-500")
-    svc.tick()                       # tope + Apagar
+    svc.tick()                       # tope en confirmación
+    confirmar_tope(h, svc)           # tope + Apagar
     textos = "\n".join(h.sent)
-    for esperado in ("Rescate habilitado", "Inyección 1000.00", "rechazada por Binance", "TOPE DE PÉRDIDA", "APAGAR"):
+    for esperado in ("Rescate habilitado", "Inyección 1000.00", "rechazada por Binance", "EN CONFIRMACIÓN",
+                     "TOPE DE PÉRDIDA", "APAGAR"):
         assert esperado in textos
     assert "key-de-test" not in textos and "secret-de-test" not in textos and "signature" not in textos
 
@@ -929,6 +943,7 @@ def test_apagar_persiste_el_intento_antes_de_ejecutar(h):
     svc._apagar = apagar
     h.fake.margin = Decimal("-500")
     svc.tick()
+    confirmar_tope(h, svc)
     # Si el proceso muere acá adentro, el próximo ve el intento contado (no reintenta para siempre).
     assert vistos and vistos[0]["resultado"] == "pendiente" and vistos[0]["intentos"] == 1
 
@@ -941,6 +956,7 @@ def test_tope_real_no_queda_simulado_por_pasar_por_dry_run(h):
     svc.tick()
     h.fake.margin = Decimal("-500")
     svc.tick()
+    confirmar_tope(h, svc)
     assert len(h.apagados) == 1 and h.state()["tope"]["modo"] == "real"
     h.avanzar(rescate.APAGAR_REINTENTO_MS / 1000 + 10)
     h.service(mode="dry_run").tick()  # el operador reinicia en dry_run para diagnosticar
@@ -963,7 +979,11 @@ def test_dry_run_con_prestamo_real_el_tope_es_real(h, apagar):
     rescate.save_state(h.data_dir, st)
     h.fake.margin, h.fake.spot = Decimal("10"), Decimal("10")
     h.avanzar(15)
-    h.service(mode="dry_run", apagar=apagar).tick()
+    svc = h.service(mode="dry_run", apagar=apagar)
+    svc.tick()
+    confirmacion = next(t for t in h.sent if "EN CONFIRMACIÓN" in t)
+    assert not confirmacion.startswith("🧪")  # plata real: la confirmación tampoco es simulada
+    confirmar_tope(h, svc)
     tope = h.state()["tope"]
     assert tope["modo"] == "real"
     assert "simulado" not in rescate.start_bloqueado(h.data_dir)
@@ -1054,6 +1074,7 @@ def test_tope_sigue_armado_con_prestamo_real_pendiente(h, como):
     h.fake.margin = Decimal("-4000")  # capital 19000 - 4000 = 15000 <= 15400 (22000 x 0.7)
     h.avanzar(15)
     svc.tick()
+    confirmar_tope(h, svc)
     tope = h.state()["tope"]
     assert tope is not None and tope["limite"] == "15400.00" and tope["modo"] == "real"
     assert h.apagados == [1]
@@ -1085,6 +1106,7 @@ def test_rehabilitar_con_prestamo_real_mantiene_la_base(h):
     h.fake.margin = Decimal("-4000")
     h.avanzar(15)
     svc.tick()
+    confirmar_tope(h, svc)
     assert h.state()["tope"]["limite"] == "15400.00" and h.apagados == [1]
 
 
@@ -1093,6 +1115,7 @@ def test_tope_reconocido_con_prestamo_pendiente_no_se_redispara(h):
     h.fake.margin = Decimal("-4000")
     h.avanzar(15)
     svc.tick()
+    confirmar_tope(h, svc)
     tope = h.state()["tope"]
     assert h.apagados == [1]
     rescate.reconocer_tope(h.data_dir, tope["id"], "cliente17")
@@ -1113,6 +1136,7 @@ def test_spot_caido_evalua_el_tope_con_el_ultimo_spot(h):
     h.fake.margin = Decimal("13000")  # 13000 + 2000 = 15000 <= 15400
     h.avanzar(15)
     svc.tick()
+    confirmar_tope(h, svc)  # sigue sin spot: también se confirma con el último saldo spot leído
     tope = h.state()["tope"]
     assert tope is not None and h.apagados == [1]
     assert any("último saldo spot" in t for t in h.sent)
@@ -1142,6 +1166,7 @@ def test_spot_caido_descuenta_la_inyeccion_posterior_a_la_lectura(h):
     h.fake.margin = Decimal("14400")  # capital real 14400 + 1000 = 15400 <= 15400
     h.avanzar(15)
     svc.tick()
+    confirmar_tope(h, svc)
     assert h.state()["tope"] is not None and h.apagados == [1]
 
 
@@ -1154,3 +1179,211 @@ def test_futuros_caidos_avisa_que_el_tope_no_se_evalua(h):
     svc.tick()
     aviso = next(t for t in h.sent if "No se pudo leer la cuenta" in t)
     assert "tope de pérdida" in aviso
+
+
+# ---------------------------------------------------------------- confirmación del tope
+
+
+def _base_sin_prestamo(h, tope=10):
+    h.configurar(tope=tope)
+    h.fake.maint = Decimal("100")  # lejos de la liquidación: no inyecta
+    svc = h.service()
+    svc.tick()
+    assert h.state()["base"]["capital"] == "22000.00"  # límite 19800 con tope 10%
+    return svc
+
+
+def _cruzar(h, svc, margin="-500"):
+    h.fake.margin = Decimal(margin)  # capital = margin + 20000 de spot
+    h.avanzar(15)
+    svc.tick()
+
+
+def test_tope_confirmacion_cancelada_por_rebote(h):
+    svc = _base_sin_prestamo(h)
+    _cruzar(h, svc)  # mecha: capital 19500 <= 19800 (y ratio < 8)
+    st = h.state()
+    conf = st["tope_confirmacion"]
+    assert st["tope"] is None and h.apagados == []
+    assert conf["capital"] == "19500.00" and conf["limite"] == "19800.00" and conf["confirmar_ms"] == 60_000
+    assert h.fake.posts() == []  # durante la confirmación no se inyecta
+    assert rescate.start_bloqueado(h.data_dir) is None
+    assert any("EN CONFIRMACIÓN" in t for t in h.sent)
+    h.fake.margin = Decimal("2000")  # rebota
+    h.avanzar(15)
+    svc.tick()
+    st = h.state()
+    assert st["tope_confirmacion"] is None and st["tope"] is None
+    assert any("cancelada" in t and "No se ejecutó Apagar" in t for t in h.sent)
+    for _ in range(3):
+        h.avanzar(61)
+        svc.tick()
+    assert h.apagados == [] and h.state()["tope"] is None
+    eventos = [e["texto"] for e in h.state()["eventos"]]
+    assert any("EN CONFIRMACIÓN" in e for e in eventos) and any("cancelada" in e for e in eventos)
+
+
+def test_tope_confirmado_ejecuta_apagar(h):
+    svc = _base_sin_prestamo(h)
+    _cruzar(h, svc)
+    h.fake.margin = Decimal("-600")
+    h.avanzar(30)
+    svc.tick()  # 30 s después: sigue debajo, pero todavía no pasó la confirmación
+    assert h.apagados == [] and h.state()["tope_confirmacion"]["observaciones"] == 2
+    h.avanzar(30)
+    svc.tick()  # 60 s después del primer cruce, sigue debajo: se ejecuta
+    st = h.state()
+    assert h.apagados == [1] and st["tope_confirmacion"] is None
+    assert st["tope"]["capital"] == "19400.00" and st["tope"]["apagar"]["resultado"] == "ok"
+    assert rescate.start_bloqueado(h.data_dir)
+    disparo = next(t for t in h.sent if "TOPE DE PÉRDIDA" in t)
+    assert "Confirmado: 60 s" in disparo
+    assert h.fake.posts() == []
+
+
+@pytest.mark.parametrize("rebota", [False, True])
+def test_tope_confirmacion_sobrevive_reinicio(h, rebota):
+    svc = _base_sin_prestamo(h)
+    en_disco = []
+    svc.send = lambda t: en_disco.append((t, h.state()["tope_confirmacion"])) or True
+    _cruzar(h, svc)
+    aviso, conf = next((t, c) for t, c in en_disco if "EN CONFIRMACIÓN" in t)
+    assert conf is not None  # persistida antes de avisar
+    if rebota:
+        h.fake.margin = Decimal("2000")
+    h.avanzar(90)
+    h.service().tick()  # proceso nuevo (deploy, OOM): retoma la confirmación de rescate_state.json
+    st = h.state()
+    assert st["tope_confirmacion"] is None
+    if rebota:
+        assert h.apagados == [] and st["tope"] is None
+        assert any("cancelada" in t for t in h.sent)
+    else:
+        assert h.apagados == [1] and st["tope"]["capital"] == "19500.00"
+
+
+@pytest.mark.parametrize("caida", ["futuros", "spot_sin_referencia"])
+def test_tope_confirmacion_espera_maxima_sin_lecturas(h, caida):
+    svc = _base_sin_prestamo(h)
+    _cruzar(h, svc)
+    conf = h.state()["tope_confirmacion"]
+    assert conf["max_ms"] == rescate.tope_espera_max_s(rescate.DEFAULT_TOPE_CONFIRM_S) * 1000 == 300_000
+    if caida == "futuros":
+        h.fake.read_fail.add("/fapi/v2/account")
+    else:
+        h.fake.read_fail.add("/api/v3/account")
+        st = h.state()
+        st["spot_ref"] = None
+        rescate.save_state(h.data_dir, st)
+    for _ in range(19):  # 285 s sin poder observar: no se confirma ni se cancela
+        h.avanzar(15)
+        svc.tick()
+    assert h.apagados == [] and h.state()["tope_confirmacion"] is not None
+    aviso = next(t for t in h.sent if "No se pudo leer la cuenta" in t)
+    assert "a más tardar" in aviso
+    h.avanzar(15)
+    svc.tick()  # 300 s desde el primer cruce: se ejecuta con la última observación
+    st = h.state()
+    assert h.apagados == [1] and st["tope_confirmacion"] is None and st["tope"]["capital"] == "19500.00"
+    assert "espera máxima" in next(t for t in h.sent if "TOPE DE PÉRDIDA" in t)
+
+
+def test_tope_confirmacion_con_spot_caido_cancela_con_el_ultimo_spot(h):
+    svc = _base_sin_prestamo(h)
+    _cruzar(h, svc)
+    h.fake.read_fail.add("/api/v3/account")
+    h.fake.margin = Decimal("2000")  # 2000 + último spot leído (20000) > 19800
+    h.avanzar(15)
+    svc.tick()
+    assert h.state()["tope_confirmacion"] is None and h.apagados == []
+    assert any("cancelada" in t and "último saldo spot" in t for t in h.sent)
+
+
+def test_tope_sin_confirmacion_con_cero_apaga_al_primer_cruce(h):
+    h.configurar(tope=10)
+    h.fake.maint = Decimal("100")
+    svc = h.service(env={rescate.ENV_TOPE_CONFIRM: "0"})
+    svc.tick()
+    _cruzar(h, svc)
+    assert h.apagados == [1] and h.state()["tope_confirmacion"] is None
+    assert not any("EN CONFIRMACIÓN" in t for t in h.sent)
+
+
+def test_tope_confirm_seconds_por_entorno():
+    def seg(valor):
+        return rescate.RescateSettings({rescate.ENV_TOPE_CONFIRM: valor}).tope_confirm_seconds
+
+    assert rescate.RescateSettings({}).tope_confirm_seconds == rescate.DEFAULT_TOPE_CONFIRM_S == 60
+    # Inválido o negativo: el default (nunca desactiva la confirmación por un typo); muy alto: el máximo.
+    assert seg("") == seg("x") == seg("-60") == seg("1.5") == 60
+    assert seg("0") == 0 and seg("90") == 90 and seg("99999") == rescate.MAX_TOPE_CONFIRM_S
+    assert rescate.tope_espera_max_s(0) == rescate.tope_espera_max_s(60) == 300
+    assert rescate.tope_espera_max_s(600) == 3000
+
+
+@pytest.mark.parametrize("conf", [
+    "roto",
+    {"desde_ms": "x"},
+    {"desde_ms": 1, "confirmar_ms": 60_000, "max_ms": 1, "ultimo_ms": 1, "ultimo_capital": "1"},
+    {"desde_ms": 1, "confirmar_ms": 60_000, "max_ms": 300_000, "ultimo_ms": 1, "ultimo_capital": "NaN"},
+])
+def test_tope_confirmacion_invalida_en_disco_no_frena_el_tope(h, conf):
+    svc = _base_sin_prestamo(h)
+    st = h.state()
+    st["tope_confirmacion"] = conf
+    rescate.save_state(h.data_dir, st)
+    h.fake.margin = Decimal("-500")
+    h.avanzar(15)
+    assert svc.tick() == {"ok": True}
+    assert h.state()["tope_confirmacion"]["capital"] == "19500.00"  # se descartó y se abrió una nueva
+    assert any("inválida" in t for t in h.sent)
+    confirmar_tope(h, svc)
+    assert h.apagados == [1]
+
+
+def test_tope_confirmacion_cancelada_si_se_desarma(h):
+    svc = _base_sin_prestamo(h)
+    _cruzar(h, svc)
+    h.configurar(habilitado=False, reserva=None, tope=None)  # sin préstamo real: el tope se desarma
+    h.avanzar(61)
+    svc.tick()
+    assert h.state()["tope_confirmacion"] is None and h.apagados == []
+    assert any("cancelada" in t and "desarmado" in t for t in h.sent)
+
+
+def test_tope_confirmacion_con_reloj_hacia_atras_no_queda_colgada(h):
+    svc = _base_sin_prestamo(h)
+    _cruzar(h, svc)
+    h.avanzar(-3600)  # el reloj del host se corrige una hora para atrás
+    svc.tick()
+    assert h.apagados == [] and h.state()["tope_confirmacion"] is not None
+    confirmar_tope(h, svc)
+    assert h.apagados == [1]
+
+
+def test_tope_confirmacion_en_dry_run_es_simulada(h):
+    h.configurar(tope=10)
+    h.fake.maint = Decimal("100")
+    svc = h.service(mode="dry_run")
+    svc.tick()
+    _cruzar(h, svc)
+    confirmar_tope(h, svc)
+    assert h.apagados == [] and h.state()["tope"]["apagar"]["resultado"] == "simulado"
+    assert all(t.startswith("🧪") for t in h.sent)
+
+
+def test_panel_muestra_tope_en_confirmacion(app, client, fake, loan_path):  # noqa: F811
+    data_dir = _data_dir(app)
+    assert _post_raw(client, "/api/rescate/config", json.dumps(_cfg_body(tope_perdida_pct=10))).status_code == 200
+    h = Harness(data_dir, loan_path, fake)
+    fake.now_ms = int(h.clock.t * 1000)
+    fake.maint = Decimal("100")
+    svc = h.service()
+    svc.tick()
+    _cruzar(h, svc)
+    status = client.get("/api/rescate/status").get_json()
+    conf = status["tope_confirmacion"]
+    assert conf["limite"] == "19800.00" and conf["capital"] == "19500.00"
+    assert conf["ejecuta_desde_en"] and conf["ejecuta_maximo_en"]
+    assert status["tope"] is None and status["start_bloqueado"] is None
+    assert 'id="rescateConfirmacion"' in client.get("/rescate").get_data(as_text=True)

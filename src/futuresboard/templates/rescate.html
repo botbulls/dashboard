@@ -14,10 +14,16 @@
         <strong>Importante.</strong> {{ aviso }}
         El bot dimensiona sobre el capital propio (wallet menos lo prestado); la reserva de spot solo se inyecta
         cerca de la liquidación y se devuelve sola cuando no hay posiciones. El tope de pérdida total ejecuta
-        <strong>Apagar</strong>: detiene passivbot y cierra todo a mercado.
+        <strong>Apagar</strong> (detiene passivbot y cierra todo a mercado) cuando se confirma: al primer cruce
+        queda en confirmación y se ejecuta si una lectura posterior (por defecto 60 s después) sigue debajo del límite.
     </div>
 
     <div id="rescateErrores" class="alert alert-danger d-none" role="alert"></div>
+
+    <div class="alert alert-warning d-none" id="rescateConfirmacion" role="status" aria-live="polite">
+        <h5 class="alert-heading"><i class="fas fa-hourglass-half me-2"></i>Tope de pérdida en confirmación</h5>
+        <p class="mb-0" data-r="confirmacion-texto"></p>
+    </div>
 
     <div class="alert alert-danger d-none" id="rescateTope" role="alert" aria-live="assertive">
         <h5 class="alert-heading"><i class="fas fa-exclamation-triangle me-2"></i>Tope de pérdida disparado</h5>
@@ -111,6 +117,7 @@
          };
          const respuesta = document.getElementById('rescateRespuesta');
          const topeBox = document.getElementById('rescateTope');
+         const confBox = document.getElementById('rescateConfirmacion');
          const topeCheck = document.getElementById('rescateTopeCheck');
          const topeAck = document.getElementById('rescateTopeAck');
          const erroresBox = document.getElementById('rescateErrores');
@@ -155,6 +162,12 @@
              const errores = s.errores || [];
              erroresBox.textContent = errores.join(' ');
              erroresBox.classList.toggle('d-none', !errores.length);
+
+             const c = s.tope_confirmacion;
+             confBox.classList.toggle('d-none', !c);
+             if (c) {
+                 set('confirmacion-texto', `Primer cruce ${c.desde_en}: capital ${c.capital} USDT <= límite ${c.limite} USDT (base ${c.base}, tope ${c.pct}%)${c.modo === 'dry_run' ? ' · SIMULADO' : ''}. Última lectura ${c.ultimo_en}: ${c.ultimo_capital} USDT. Se ejecuta Apagar si una lectura desde ${c.ejecuta_desde_en} sigue en o debajo del límite; si vuelve arriba, se cancela. Sin lecturas, se ejecuta a más tardar el ${c.ejecuta_maximo_en}. Mientras tanto no se inyecta.`);
+             }
 
              const t = s.tope;
              topeBox.classList.toggle('d-none', !t);
