@@ -171,7 +171,7 @@ class Harness:
                                       apagar=self.apagar if apagar else None,
                                       send=lambda t: self.sent.append(t) or True, clock=self.clock)
 
-    def configurar(self, habilitado=True, reserva=5000, paso=1000, umbral=3, tope=30):
+    def configurar(self, habilitado=True, reserva=5000, paso=1000, umbral=8, tope=30):
         parsed = rescate.validate_config_body({"habilitado": habilitado, "reserva_max_usdt": reserva,
                                                "paso_usdt": paso, "umbral_ratio": umbral,
                                                "tope_perdida_pct": tope})
@@ -237,13 +237,14 @@ def test_loan_state_escritura_atomica(loan_path, monkeypatch):
 
 
 def test_umbral_exacto_no_inyecta_y_debajo_si(h):
-    h.configurar(umbral=3)
-    h.fake.margin, h.fake.maint = Decimal("3000"), Decimal("1000")  # ratio exactamente 3
+    h.configurar()  # umbral por defecto: 8
+    assert h.state()["base"] is None
+    h.fake.margin, h.fake.maint = Decimal("8000"), Decimal("1000")  # ratio exactamente 8
     svc = h.service()
     svc.tick()
     assert h.fake.posts() == []
-    assert h.state()["base"]["capital"] == "23000.00"
-    h.fake.margin = Decimal("2999.99")
+    assert h.state()["base"]["capital"] == "28000.00"
+    h.fake.margin = Decimal("7999.99")
     svc.tick()
     assert [p["amount"] for p in h.fake.posts()] == ["1000.00"]
     assert h.fake.posts()[0]["type"] == "MAIN_UMFUTURE"
@@ -264,7 +265,7 @@ def test_sin_posiciones_no_inyecta(h):
 
 def test_paso_y_tope_de_reserva(h):
     h.configurar(reserva=2500, paso=1000)
-    h.fake.maint = Decimal("3000")  # el ratio sigue < 3 aunque entre plata
+    h.fake.maint = Decimal("3000")  # el ratio sigue < 8 aunque entre plata
     svc = h.service()
     for _ in range(5):
         svc.tick()
@@ -320,6 +321,7 @@ def test_ambigua_queda_en_vuelo_y_no_reintenta(h, modo):
 
 def test_conciliacion_timeout_ejecutada_por_historial(h):
     h.configurar()
+    h.fake.margin = Decimal("7500")  # ratio 7.5: tras inyectar 1000 queda en 8.5 (no inyecta más)
     h.fake.transfer_mode, h.fake.ejecutar_ambigua = "timeout", True
     svc = h.service()
     svc.tick()
@@ -352,6 +354,7 @@ def test_conciliacion_timeout_no_ejecutada_revierte(h):
 
 def test_conciliacion_por_variacion_de_saldo(h):
     h.configurar()
+    h.fake.margin = Decimal("7500")  # ratio 7.5: tras inyectar 1000 queda en 8.5 (no inyecta más)
     h.fake.transfer_mode, h.fake.ejecutar_ambigua, h.fake.history_visible = "timeout", True, False
     svc = h.service()
     svc.tick()
@@ -367,6 +370,7 @@ def test_conciliacion_por_variacion_de_saldo(h):
 
 def test_reinicio_con_transferencia_enviando_se_concilia(h):
     h.configurar()
+    h.fake.margin = Decimal("7500")  # ratio 7.5: tras inyectar 1000 queda en 8.5 (no inyecta más)
     h.fake.transfer_mode, h.fake.ejecutar_ambigua = "timeout", True
     svc = h.service()
     svc.tick()
@@ -541,6 +545,7 @@ def test_apagar_real_reusa_rutina_y_lock(data_dir, env, router, monkeypatch):  #
 
 def test_dry_run_no_llama_a_sapi(h):
     h.configurar()
+    h.fake.margin = Decimal("7500")  # ratio 7.5 < 8
     svc = h.service(mode="dry_run")
     svc.tick()
     assert not [p for p in h.fake.paths() if p.startswith("/sapi")]
@@ -548,7 +553,7 @@ def test_dry_run_no_llama_a_sapi(h):
     assert st["prestamo"]["dry_run"] == "1000.00" and st["prestamo"]["real"] == "0.00"
     assert h.loan_file() == {**h.loan_file(), "mode": "dry_run", "loan_outstanding_usdt": 1000.0}
     assert st["ledger"][-1]["estado"] == "simulada"
-    # El ratio simulado ya cuenta lo inyectado (2000 + 1000) / 1000 = 3: no vuelve a inyectar.
+    # El ratio simulado ya cuenta lo inyectado (7500 + 1000) / 1000 = 8.5: no vuelve a inyectar.
     svc.tick()
     assert h.state()["prestamo"]["dry_run"] == "1000.00"
     assert st["ultimo"]["simulado"] is True
@@ -707,7 +712,7 @@ def test_cli_no_simula_con_prestamo_real_pendiente(cli_env, monkeypatch, loan_pa
 
 
 def _cfg_body(**kw):
-    body = {"habilitado": True, "reserva_max_usdt": 5000, "paso_usdt": 1000, "umbral_ratio": 3,
+    body = {"habilitado": True, "reserva_max_usdt": 5000, "paso_usdt": 1000, "umbral_ratio": 8,
             "tope_perdida_pct": 30}
     body.update(kw)
     return body
@@ -741,10 +746,20 @@ def test_panel_pagina_y_status(app, client):  # noqa: F811
     assert status["start_bloqueado"] is None and "no garantiza" in status["aviso"]
 
 
+def test_umbral_por_defecto_es_8(app, client):  # noqa: F811
+    assert rescate.DEFAULT_UMBRAL == Decimal("8")
+    assert rescate.default_config()["umbral_ratio"] == "8"
+    assert client.get("/api/rescate/status").get_json()["config"]["umbral_ratio"] == "8"
+    # Una config guardada antes del cambio conserva su umbral (el default no migra lo guardado).
+    data_dir = _data_dir(app)
+    (data_dir / rescate.CONFIG_FILE_NAME).write_text(json.dumps({**rescate.default_config(), "umbral_ratio": "3"}))
+    assert client.get("/api/rescate/status").get_json()["config"]["umbral_ratio"] == "3"
+
+
 @pytest.mark.parametrize("raw", [
     json.dumps(_cfg_body(reserva_max_usdt=float("nan"))),
-    '{"habilitado": true, "reserva_max_usdt": NaN, "paso_usdt": 1000, "umbral_ratio": 3, "tope_perdida_pct": 30}',
-    '{"habilitado": true, "reserva_max_usdt": Infinity, "paso_usdt": 1000, "umbral_ratio": 3, "tope_perdida_pct": 30}',
+    '{"habilitado": true, "reserva_max_usdt": NaN, "paso_usdt": 1000, "umbral_ratio": 8, "tope_perdida_pct": 30}',
+    '{"habilitado": true, "reserva_max_usdt": Infinity, "paso_usdt": 1000, "umbral_ratio": 8, "tope_perdida_pct": 30}',
     json.dumps(_cfg_body(reserva_max_usdt=True)),
     json.dumps(_cfg_body(reserva_max_usdt="5000")),
     json.dumps(_cfg_body(habilitado="true")),
@@ -1022,7 +1037,7 @@ def test_reinicio_con_inyeccion_enviando_aplica_el_prestamo(h, historial_caido):
 def _inyectar_real(h, tope=30):
     h.configurar(tope=tope)
     svc = h.service()
-    svc.tick()  # base 22000 + inyección de 1000 (ratio 2 < 3)
+    svc.tick()  # base 22000 + inyección de 1000 (ratio 2 < 8)
     st = h.state()
     assert st["base"]["capital"] == "22000.00" and st["prestamo"]["real"] == "1000.00"
     h.fake.maint = Decimal("100")  # sin más inyecciones
@@ -1121,7 +1136,7 @@ def test_spot_caido_descuenta_la_inyeccion_posterior_a_la_lectura(h):
     h.configurar(tope=30)
     h.fake.margin, h.fake.spot, h.fake.maint = Decimal("20000"), Decimal("2000"), Decimal("7000")
     svc = h.service()
-    svc.tick()  # lee spot 2000, después inyecta 1000 (ratio 2.86 < 3): spot real 1000
+    svc.tick()  # lee spot 2000, después inyecta 1000 (ratio 2.86 < 8): spot real 1000
     assert [p["amount"] for p in h.fake.posts()] == ["1000.00"]
     h.fake.read_fail.add("/api/v3/account")
     h.fake.margin = Decimal("14400")  # capital real 14400 + 1000 = 15400 <= 15400

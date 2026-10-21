@@ -102,7 +102,7 @@ LOAN_STATE_VERSION = 1
 
 CENT = Decimal("0.01")
 DEFAULT_PASO = Decimal("1000")
-DEFAULT_UMBRAL = Decimal("3")
+DEFAULT_UMBRAL = Decimal("8")
 # (mínimo, máximo) inclusivos. El umbral es la relación margen / mantenimiento: Binance liquida en 1.
 LIMITES: Dict[str, Tuple[Decimal, Decimal]] = {
     "reserva_max_usdt": (Decimal("10"), Decimal("1000000")),

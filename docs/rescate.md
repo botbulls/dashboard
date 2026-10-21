@@ -172,8 +172,11 @@ Validación estricta (400 si no se cumple): todos los campos presentes y ninguno
 |---|---|---|
 | `reserva_max_usdt` | 10 – 1.000.000 | (obligatorio para habilitar) |
 | `paso_usdt` | 10 – 1.000.000 y ≤ reserva | 1000 |
-| `umbral_ratio` | 1,2 – 10 (Binance liquida en 1) | 3 |
+| `umbral_ratio` | 1,2 – 10 (Binance liquida en 1) | 8 |
 | `tope_perdida_pct` | 1 – 80 | (obligatorio para habilitar) |
+
+Los defaults solo se usan mientras no hay nada guardado: una config ya guardada conserva sus valores
+(por ejemplo, un umbral 3 guardado antes de que el default pasara a 8 sigue en 3 hasta cambiarlo en el panel).
 
 409: habilitar con un tope disparado sin reconocer, o reconocer un id que no es el activo.
 `POST /api/bot/start` responde 409 mientras haya un tope sin reconocer (se chequea al validar y otra vez
