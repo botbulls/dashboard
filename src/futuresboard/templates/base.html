@@ -261,6 +261,12 @@
                                     <span class="sidebar-text">Income history</span>
                                 </a>
                             </li>
+                            <li>
+                                <a href="{{ url_for("main.rescate_page") }}" class="btn align-items-center rounded" title="Rescate (colchón)">
+                                    <i class="fas fa-life-ring me-2"></i>
+                                    <span class="sidebar-text">Rescate (colchón)</span>
+                                </a>
+                            </li>
                             <li class="mb-1">
                                 <button class="btn btn-toggle align-items-center rounded" data-bs-toggle="collapse" data-bs-target="#activecoins-collapse" aria-expanded="true" title="Active coins">
                                     <i class="fas fa-coins me-2"></i>
@@ -994,6 +1000,12 @@
                  }
                  if (!status.config_available) {
                      panel.querySelector('[data-bot-accion="start"]').disabled = true;
+                 }
+                 if (status.rescate_start_bloqueado) {
+                     // Tope de pérdida del rescate sin reconocer: el backend responde 409 a START.
+                     panel.querySelector('[data-bot-accion="start"]').disabled = true;
+                     disabledLi.classList.remove('d-none');
+                     disabledMsg.textContent = status.rescate_start_bloqueado;
                  }
                  const graceful = panel.querySelector('[data-bot-accion="graceful"]');
                  if (!status.modes_supported || !status.config_available) {

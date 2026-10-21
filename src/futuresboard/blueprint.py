@@ -25,6 +25,7 @@ from typing_extensions import TypedDict
 
 from futuresboard import bot_control
 from futuresboard import jobs
+from futuresboard import rescate
 from futuresboard import telegram_notify
 from futuresboard import db
 from futuresboard.config import BINANCE_FUTURES_MAINNET_URL
@@ -1563,9 +1564,20 @@ def _run_bot_action(action: str, params: dict, validate, work):
 def bot_status():
     settings = bot_control.Settings()
     try:
-        return _json_response(bot_control.get_status(settings))
+        out = bot_control.get_status(settings)
     except bot_control.BotControlError as exc:
         return _json_response({"enabled": settings.enabled, "error": str(exc)}, exc.status_code)
+    out["rescate_start_bloqueado"] = rescate.start_bloqueado(_bot_store().data_dir)
+    return _json_response(out)
+
+
+def _check_rescate_start(data_dir: pathlib.Path) -> None:
+    """START bloqueado mientras haya un tope de pérdida del rescate sin reconocer (409)."""
+    bloqueo = rescate.start_bloqueado(data_dir)
+    if bloqueo:
+        err = bot_control.BotControlError(bloqueo)
+        err.status_code = 409
+        raise err
 
 
 @app.route("/api/bot/start", methods=["POST"])
@@ -1576,14 +1588,17 @@ def bot_start():
 
     def validate():
         bot_control.validate_riesgo(riesgo)
+        _check_rescate_start(_bot_store().data_dir)
         settings = bot_control.Settings()
         settings.require_enabled()
         return settings, None
 
-    return _run_bot_action(
-        "start", {"riesgo": riesgo}, validate,
-        lambda store, settings, _extra, rep: bot_control.start_bot(settings, store, riesgo, reporter=rep),
-    )
+    def work(store, settings, _extra, rep):
+        # Se vuelve a chequear dentro del job, ya con el lock de acciones tomado.
+        _check_rescate_start(store.data_dir)
+        return bot_control.start_bot(settings, store, riesgo, reporter=rep)
+
+    return _run_bot_action("start", {"riesgo": riesgo}, validate, work)
 
 
 @app.route("/api/bot/stop", methods=["POST"])
@@ -1634,6 +1649,70 @@ def _binance_futures_client() -> bot_control.BinanceFuturesClient:
     return bot_control.BinanceFuturesClient(cfg.get("API_BASE_URL") or "", cfg.get("API_KEY") or "",
                                             cfg.get("API_SECRET") or "",
                                             algo_optional=bool(cfg.get("BINANCE_TESTNET")))
+
+
+# --------------------------------------------------------------------------------------
+# Rescate (colchón): config del panel y estado del servicio (ver docs/rescate.md)
+# --------------------------------------------------------------------------------------
+
+
+def _rescate_audit(action: str, params: dict, outcome: str, detail: str) -> None:
+    try:
+        _bot_store().audit(session.get("username") or "?", action, params, outcome, detail, request.remote_addr)
+    except OSError:
+        current_app.logger.exception("No se pudo escribir el log de auditoria")
+
+
+@app.route("/rescate", methods=["GET"])
+def rescate_page():
+    return render_template(
+        "rescate.html",
+        coin_list=get_coins(),
+        custom=current_app.config["CUSTOM"],
+        limites={k: [str(lo), str(hi)] for k, (lo, hi) in rescate.LIMITES.items()},
+        aviso=rescate.AVISO,
+    )
+
+
+@app.route("/api/rescate/status", methods=["GET"])
+def rescate_status():
+    return _json_response(rescate.panel_status(_bot_store().data_dir))
+
+
+@app.route("/api/rescate/config", methods=["POST"])
+@csrf_protect
+def rescate_config():
+    body = request.get_json(silent=True)
+    params = body if isinstance(body, dict) else {}
+    try:
+        parsed = rescate.validate_config_body(body)
+        cfg = rescate.save_config(_bot_store().data_dir, parsed, session.get("username") or "?")
+    except ValueError as exc:
+        _rescate_audit("rescate_config", params, "rechazado", str(exc))
+        return _json_response({"ok": False, "error": str(exc)}, 400)
+    except rescate.ConflictError as exc:
+        _rescate_audit("rescate_config", params, "rechazado", str(exc))
+        return _json_response({"ok": False, "error": str(exc)}, 409)
+    _rescate_audit("rescate_config", params, "ok", f"generacion {cfg.get('generacion')}")
+    return _json_response({"ok": True, "status": rescate.panel_status(_bot_store().data_dir)})
+
+
+@app.route("/api/rescate/reconocer-tope", methods=["POST"])
+@csrf_protect
+def rescate_reconocer_tope():
+    body = request.get_json(silent=True)
+    tope_id = body.get("id") if isinstance(body, dict) else None
+    params = {"id": tope_id if isinstance(tope_id, str) else None}
+    try:
+        rescate.reconocer_tope(_bot_store().data_dir, tope_id, session.get("username") or "?")
+    except ValueError as exc:
+        _rescate_audit("rescate_reconocer_tope", params, "rechazado", str(exc))
+        return _json_response({"ok": False, "error": str(exc)}, 400)
+    except rescate.ConflictError as exc:
+        _rescate_audit("rescate_reconocer_tope", params, "rechazado", str(exc))
+        return _json_response({"ok": False, "error": str(exc)}, 409)
+    _rescate_audit("rescate_reconocer_tope", params, "ok", "START desbloqueado; rescate deshabilitado")
+    return _json_response({"ok": True, "status": rescate.panel_status(_bot_store().data_dir)})
 
 
 @app.route("/api/last-order", methods=["GET"])

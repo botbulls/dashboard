@@ -1,0 +1,263 @@
+{% extends "base.html" %}
+{% block title %}Rescate (colchón){% endblock %}
+{% block content %}
+    <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+        <h3 class="d-flex align-items-center">
+            <button class="navbar-toggler d-md-none hamburger-btn me-2" type="button" id="mobileMenuToggle" aria-label="Toggle navigation" title="Menú">
+                <i class="fas fa-bars"></i>
+            </button>
+            <i class="fas fa-life-ring me-2"></i> Rescate (colchón)
+        </h3>
+    </div>
+
+    <div class="alert alert-warning" role="note">
+        <strong>Importante.</strong> {{ aviso }}
+        El bot dimensiona sobre el capital propio (wallet menos lo prestado); la reserva de spot solo se inyecta
+        cerca de la liquidación y se devuelve sola cuando no hay posiciones. El tope de pérdida total ejecuta
+        <strong>Apagar</strong>: detiene passivbot y cierra todo a mercado.
+    </div>
+
+    <div id="rescateErrores" class="alert alert-danger d-none" role="alert"></div>
+
+    <div class="alert alert-danger d-none" id="rescateTope" role="alert" aria-live="assertive">
+        <h5 class="alert-heading"><i class="fas fa-exclamation-triangle me-2"></i>Tope de pérdida disparado</h5>
+        <p class="mb-2" data-r="tope-texto"></p>
+        <p class="mb-2" data-r="tope-apagar"></p>
+        <div class="form-check mb-2">
+            <input class="form-check-input" type="checkbox" id="rescateTopeCheck">
+            <label class="form-check-label small" for="rescateTopeCheck">Revisé el estado en Binance. Al reconocerlo se desbloquea START y el rescate queda deshabilitado (habilitarlo de nuevo fija una base nueva).</label>
+        </div>
+        <button type="button" class="btn btn-sm btn-outline-light bg-danger" id="rescateTopeAck" disabled>Reconocer tope</button>
+    </div>
+
+    <div class="row g-3">
+        <div class="col-lg-6">
+            <div class="card h-100">
+                <div class="card-header"><strong>Estado</strong> <span class="small ms-2" data-r="servicio"></span></div>
+                <div class="card-body">
+                    <table class="table table-sm mb-0">
+                        <tbody>
+                            <tr><th scope="row">Ratio margen / mantenimiento</th><td data-r="ratio">-</td></tr>
+                            <tr><th scope="row">Posiciones abiertas</th><td data-r="posiciones">-</td></tr>
+                            <tr><th scope="row">Préstamo pendiente</th><td data-r="prestamo">-</td></tr>
+                            <tr><th scope="row">USDT libre en spot</th><td data-r="spot">-</td></tr>
+                            <tr><th scope="row">Capital total (futuros + spot)</th><td data-r="capital">-</td></tr>
+                            <tr><th scope="row">Base / límite del tope</th><td data-r="base">-</td></tr>
+                            <tr><th scope="row">Transferencia en vuelo</th><td data-r="en-vuelo">-</td></tr>
+                            <tr><th scope="row">Última lectura</th><td data-r="ultimo">-</td></tr>
+                        </tbody>
+                    </table>
+                    <p class="small text-danger mt-2 mb-0 d-none" data-r="bloqueo"></p>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-6">
+            <div class="card h-100">
+                <div class="card-header"><strong>Configuración</strong></div>
+                <div class="card-body">
+                    <form id="rescateForm" novalidate>
+                        <div class="form-check form-switch mb-3">
+                            <input class="form-check-input" type="checkbox" role="switch" id="rescateHabilitado">
+                            <label class="form-check-label" for="rescateHabilitado">Rescate habilitado</label>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small" for="rescateReserva">Reserva máxima (USDT)</label>
+                            <input class="form-control form-control-sm" type="number" id="rescateReserva" step="any" min="{{ limites['reserva_max_usdt'][0] }}" max="{{ limites['reserva_max_usdt'][1] }}">
+                            <div class="form-text">Lo máximo que se puede prestar de spot a futuros en total ({{ limites['reserva_max_usdt'][0] }}–{{ limites['reserva_max_usdt'][1] }}).</div>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small" for="rescatePaso">Paso por inyección (USDT)</label>
+                            <input class="form-control form-control-sm" type="number" id="rescatePaso" step="any" min="{{ limites['paso_usdt'][0] }}" max="{{ limites['paso_usdt'][1] }}">
+                            <div class="form-text">Monto de cada inyección; no puede superar la reserva.</div>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small" for="rescateUmbral">Umbral margen / mantenimiento</label>
+                            <input class="form-control form-control-sm" type="number" id="rescateUmbral" step="any" min="{{ limites['umbral_ratio'][0] }}" max="{{ limites['umbral_ratio'][1] }}">
+                            <div class="form-text">Se inyecta solo si el ratio baja de este valor ({{ limites['umbral_ratio'][0] }}–{{ limites['umbral_ratio'][1] }}; Binance liquida en 1).</div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label small" for="rescateTopePct">Tope de pérdida total (%)</label>
+                            <input class="form-control form-control-sm" type="number" id="rescateTopePct" step="any" min="{{ limites['tope_perdida_pct'][0] }}" max="{{ limites['tope_perdida_pct'][1] }}">
+                            <div class="form-text">Obligatorio para habilitar ({{ limites['tope_perdida_pct'][0] }}–{{ limites['tope_perdida_pct'][1] }}). Sobre el capital total al momento de habilitar.</div>
+                        </div>
+                        <button type="submit" class="btn btn-primary btn-sm" id="rescateGuardar">Guardar</button>
+                        <span class="small ms-2" id="rescateRespuesta" role="status" aria-live="polite"></span>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mt-3 mb-4">
+        <div class="card-header"><strong>Últimos eventos</strong></div>
+        <div class="card-body table-responsive">
+            <table class="table table-sm mb-0">
+                <thead><tr><th>Fecha (UTC)</th><th>Tipo</th><th>Modo</th><th>Detalle</th></tr></thead>
+                <tbody data-r="eventos"><tr><td colspan="4">Sin eventos.</td></tr></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+     (function () {
+         const q = (k) => document.querySelector(`[data-r="${k}"]`);
+         const form = document.getElementById('rescateForm');
+         const inputs = {
+             habilitado: document.getElementById('rescateHabilitado'),
+             reserva_max_usdt: document.getElementById('rescateReserva'),
+             paso_usdt: document.getElementById('rescatePaso'),
+             umbral_ratio: document.getElementById('rescateUmbral'),
+             tope_perdida_pct: document.getElementById('rescateTopePct'),
+         };
+         const respuesta = document.getElementById('rescateRespuesta');
+         const topeBox = document.getElementById('rescateTope');
+         const topeCheck = document.getElementById('rescateTopeCheck');
+         const topeAck = document.getElementById('rescateTopeAck');
+         const erroresBox = document.getElementById('rescateErrores');
+         let editando = false;
+         let topeId = null;
+
+         function csrfToken() {
+             const m = document.querySelector('meta[name="csrf-token"]');
+             return m ? m.getAttribute('content') : '';
+         }
+         function usdt(v) { return (v === null || v === undefined) ? '-' : `${v} USDT`; }
+         function set(k, t) { q(k).textContent = t; }
+
+         function render(s) {
+             const svc = s.servicio || {};
+             const modo = svc.modo || 'sin datos';
+             set('servicio', svc.vivo ? `servicio en modo ${modo}${svc.testnet ? ' (testnet/Demo)' : ''}` : `servicio sin latido reciente (modo ${modo})`);
+             const u = s.ultimo || {};
+             const cfg = s.config || {};
+             if (u.error) {
+                 set('ultimo', `${u.ts || '-'} · ${u.error}`);
+             } else {
+                 set('ultimo', u.ts || '-');
+             }
+             const sim = u.simulado ? ' (simulado)' : '';
+             set('ratio', u.ratio ? `${u.ratio} (umbral ${cfg.umbral_ratio})${sim}` : (u.posiciones === 0 ? 'sin posiciones' : '-'));
+             set('posiciones', (u.posiciones === undefined || u.posiciones === null) ? '-' : String(u.posiciones));
+             set('prestamo', `${usdt(s.prestamo)}${s.prestamo_modo === 'dry_run' ? ' (simulado)' : ''}`);
+             set('spot', `${usdt(u.spot_usdt)}${sim}`);
+             set('capital', usdt(u.capital));
+             if (s.base) {
+                 set('base', `base ${usdt(s.base.capital)} · límite ${usdt(s.limite_tope)} (tope ${cfg.tope_perdida_pct}%)`);
+             } else {
+                 set('base', cfg.habilitado ? 'base pendiente: tope todavía no armado (el servicio la fija en el próximo ciclo)' : 'rescate deshabilitado');
+             }
+             const v = s.en_vuelo;
+             set('en-vuelo', v ? `${v.tipo} ${v.monto} USDT · ${v.estado}${v.tranId ? ` · tranId ${v.tranId}` : ''}` : 'ninguna');
+             const bloqueo = q('bloqueo');
+             bloqueo.textContent = s.bloqueo || '';
+             bloqueo.classList.toggle('d-none', !s.bloqueo);
+
+             const errores = s.errores || [];
+             erroresBox.textContent = errores.join(' ');
+             erroresBox.classList.toggle('d-none', !errores.length);
+
+             const t = s.tope;
+             topeBox.classList.toggle('d-none', !t);
+             if (t) {
+                 if (topeId !== t.id) { topeCheck.checked = false; topeAck.disabled = true; }
+                 topeId = t.id;
+                 set('tope-texto', `${t.disparado_en}: capital ${t.capital} USDT <= límite ${t.limite} USDT (base ${t.base}, tope ${t.pct}%)${t.modo === 'dry_run' ? ' · SIMULADO' : ''}. START está bloqueado.`);
+                 const ap = t.apagar || {};
+                 set('tope-apagar', `Apagar: ${ap.resultado || '-'}${ap.intentos ? ` (intentos ${ap.intentos})` : ''}. ${ap.detalle || ''}`);
+             } else {
+                 topeId = null;
+             }
+
+             if (!editando) {
+                 inputs.habilitado.checked = !!cfg.habilitado;
+                 inputs.reserva_max_usdt.value = cfg.reserva_max_usdt ?? '';
+                 inputs.paso_usdt.value = cfg.paso_usdt ?? '';
+                 inputs.umbral_ratio.value = cfg.umbral_ratio ?? '';
+                 inputs.tope_perdida_pct.value = cfg.tope_perdida_pct ?? '';
+             }
+
+             const tbody = q('eventos');
+             const filas = (s.eventos || []).map((e) => {
+                 const tr = document.createElement('tr');
+                 [e.ts, e.tipo, e.modo || '-', e.texto].forEach((c) => {
+                     const td = document.createElement('td');
+                     td.textContent = c == null ? '' : String(c);
+                     tr.appendChild(td);
+                 });
+                 return tr;
+             });
+             if (filas.length) {
+                 tbody.replaceChildren(...filas);
+             } else {
+                 const tr = document.createElement('tr');
+                 const td = document.createElement('td');
+                 td.colSpan = 4;
+                 td.textContent = 'Sin eventos.';
+                 tr.appendChild(td);
+                 tbody.replaceChildren(tr);
+             }
+         }
+
+         function cargar() {
+             return fetch('/api/rescate/status', { cache: 'no-cache', credentials: 'same-origin' })
+                 .then((r) => {
+                     if (r.redirected) throw new Error('Sesión expirada: volvé a iniciar sesión.');
+                     return r.json();
+                 })
+                 .then(render)
+                 .catch((e) => { set('ultimo', e.message || 'Error al consultar el estado.'); });
+         }
+
+         function post(url, body) {
+             return fetch(url, {
+                 method: 'POST',
+                 credentials: 'same-origin',
+                 headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() },
+                 body: JSON.stringify(body),
+             }).then((r) => r.json().then((d) => ({ ok: r.ok, d })));
+         }
+
+         function numero(input) {
+             const raw = input.value.trim();
+             if (raw === '') return null;
+             const n = Number(raw);
+             return Number.isFinite(n) ? n : NaN;
+         }
+
+         Object.values(inputs).forEach((el) => el.addEventListener('input', () => { editando = true; }));
+         inputs.habilitado.addEventListener('change', () => { editando = true; });
+
+         form.addEventListener('submit', (ev) => {
+             ev.preventDefault();
+             const body = {
+                 habilitado: inputs.habilitado.checked,
+                 reserva_max_usdt: numero(inputs.reserva_max_usdt),
+                 paso_usdt: numero(inputs.paso_usdt),
+                 umbral_ratio: numero(inputs.umbral_ratio),
+                 tope_perdida_pct: numero(inputs.tope_perdida_pct),
+             };
+             if (Object.values(body).some((v) => typeof v === 'number' && Number.isNaN(v))) {
+                 respuesta.textContent = 'Hay valores que no son números.';
+                 return;
+             }
+             respuesta.textContent = 'Guardando...';
+             post('/api/rescate/config', body).then(({ ok, d }) => {
+                 respuesta.textContent = ok ? 'Guardado.' : (d.error || 'No se pudo guardar.');
+                 if (ok) { editando = false; render(d.status); }
+             }).catch(() => { respuesta.textContent = 'No se pudo guardar.'; });
+         });
+
+         topeCheck.addEventListener('change', () => { topeAck.disabled = !topeCheck.checked; });
+         topeAck.addEventListener('click', () => {
+             if (!topeId) return;
+             topeAck.disabled = true;
+             post('/api/rescate/reconocer-tope', { id: topeId }).then(({ ok, d }) => {
+                 if (ok) { editando = false; render(d.status); } else { alert(d.error || 'No se pudo reconocer el tope.'); }
+             }).catch(() => alert('No se pudo reconocer el tope.'));
+         });
+
+         cargar();
+         setInterval(cargar, 10000);
+     })();
+    </script>
+{% endblock %}
