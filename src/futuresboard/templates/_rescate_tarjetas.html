@@ -1,0 +1,167 @@
+{# Tarjetas del rescate en el dashboard principal. Lee rescate_resumen (resumen_rescate.tarjetas): sin llamadas a Binance. #}
+{% set r = rescate_resumen %}
+<style>
+    .rescate_tarjetas .card-title { font-size: 1.5rem; font-weight: 700; }
+    .rescate_tarjetas .card-text { font-size: 0.85rem; color: var(--text-secondary, #64748b); }
+    .rescate_tarjetas .card-footer { font-weight: 600; text-transform: uppercase; font-size: 0.7rem; letter-spacing: 0.5px; }
+    .rescate_tarjetas .semaforo { display: inline-block; width: 0.75rem; height: 0.75rem; border-radius: 50%; margin-right: 0.35rem; vertical-align: middle; }
+    .rescate_tarjetas .semaforo-verde { background: var(--success-color, #10b981); }
+    .rescate_tarjetas .semaforo-amarillo { background: var(--warning-color, #f59e0b); }
+    .rescate_tarjetas .semaforo-rojo { background: var(--danger-color, #ef4444); }
+    .rescate_tarjetas .semaforo-gris { background: var(--text-secondary, #94a3b8); }
+    .rescate_tarjetas .rescate_aviso { font-size: 0.85rem; }
+    @media (max-width: 575.98px) {
+        .rescate_tarjetas .card-title { font-size: 1.1rem; }
+        .rescate_tarjetas .card-body { padding: 0.6rem; }
+        .rescate_tarjetas .card-footer { font-size: 0.65rem; padding: 0.4rem; }
+    }
+</style>
+<div class="rescate_tarjetas mt-3" id="rescateTarjetas">
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+        <h5 class="mb-0" style="font-weight: 700;">
+            <a href="{{ url_for('main.rescate_page') }}" style="text-decoration: none; color: var(--text-primary);"><i class="fas fa-life-ring"></i> Rescate</a>
+        </h5>
+        {% if r.error %}
+            <span class="badge bg-secondary">sin datos</span>
+        {% else %}
+            {% if r.modo == 'real' %}<span class="badge bg-success">real</span>
+            {% elif r.modo == 'dry_run' %}<span class="badge bg-info text-dark">dry_run (simulación)</span>
+            {% elif r.modo == 'off' %}<span class="badge bg-secondary">off</span>
+            {% else %}<span class="badge bg-secondary">sin datos</span>{% endif %}
+            {% if r.testnet %}<span class="badge bg-warning text-dark">testnet/Demo</span>{% endif %}
+            {% if r.modo and not r.servicio_vivo %}<span class="badge bg-danger">el servicio no late</span>{% endif %}
+        {% endif %}
+    </div>
+
+    {% if r.error %}
+        <div class="alert alert-secondary rescate_aviso mb-0" role="status">{{ r.error }} {{ r.como_activar }}</div>
+    {% else %}
+    <div class="row g-2">
+        <div class="col-6 col-md-4 col-xl-2">
+            <a href="{{ url_for('main.rescate_page') }}" style="text-decoration: none;">
+            <div class="card text-center h-100" data-tarjeta="billetera">
+                <div class="card-body">
+                    {% if r.spot.usdt is not none %}
+                        <h5 class="card-title mb-1" style="color: {% if r.spot.vieja %}var(--text-secondary, #64748b){% else %}var(--success-color, #10b981){% endif %};">${{ r.spot.usdt }}</h5>
+                        <p class="card-text mb-0">
+                            USDT libre en spot{% if r.spot.fuente == 'ultimo_saldo_leido' %} (último saldo leído){% endif %}
+                            {% if r.spot.hace %}<br>{{ r.spot.hace }}{% endif %}
+                            {% if r.spot.vieja %}<br><strong>dato viejo ({{ r.motivo_vieja }})</strong>{% endif %}
+                            {% if r.spot.efectivo is not none %}<br>simulado: ${{ r.spot.efectivo }}{% endif %}
+                        </p>
+                    {% else %}
+                        <h5 class="card-title mb-1" style="color: var(--text-secondary, #64748b);">sin datos</h5>
+                        <p class="card-text mb-0">sin saldo spot leído</p>
+                    {% endif %}
+                </div>
+                <div class="card-footer text-muted">Billetera de rescate</div>
+            </div>
+            </a>
+        </div>
+        <div class="col-6 col-md-4 col-xl-2">
+            <div class="card text-center h-100" data-tarjeta="prestamo">
+                <div class="card-body">
+                    <h5 class="card-title mb-1" style="color: var(--warning-color, #f59e0b);">{% if r.prestamo.usdt is not none %}${{ r.prestamo.usdt }}{% else %}-{% endif %}</h5>
+                    <p class="card-text mb-0">{% if r.prestamo.simulado %}simulado (dry_run){% else %}spot → futuros, pendiente de devolver{% endif %}
+                        {% if r.prestamo.hace %}<br>registro del servicio {{ r.prestamo.hace }}{% endif %}</p>
+                </div>
+                <div class="card-footer text-muted">Préstamo de rescate</div>
+            </div>
+        </div>
+        <div class="col-6 col-md-4 col-xl-2">
+            <div class="card text-center h-100" data-tarjeta="capital">
+                <div class="card-body">
+                    {% if r.capital.usdt is not none %}
+                        <h5 class="card-title mb-1" style="color: {% if r.capital.vieja %}var(--text-secondary, #64748b){% else %}var(--primary-color, #6366f1){% endif %};">${{ r.capital.usdt }}</h5>
+                        <p class="card-text mb-0">
+                            {% if r.capital.variacion_usdt is not none %}{{ r.capital.variacion_usdt }} ({{ r.capital.variacion_pct }}%) vs base ${{ r.capital.base }}
+                            {% else %}sin base (tope sin armar){% endif %}
+                            {% if r.capital.hace %}<br>{{ r.capital.hace }}{% endif %}
+                            {% if r.capital.vieja %}<br><strong>dato viejo ({{ r.motivo_vieja }})</strong>{% endif %}
+                        </p>
+                    {% else %}
+                        <h5 class="card-title mb-1" style="color: var(--text-secondary, #64748b);">sin lectura</h5>
+                        <p class="card-text mb-0">futuros + spot</p>
+                    {% endif %}
+                </div>
+                <div class="card-footer text-muted">Capital total</div>
+            </div>
+        </div>
+        <div class="col-6 col-md-4 col-xl-2">
+            <div class="card text-center h-100" data-tarjeta="ratio" data-semaforo="{{ r.ratio.semaforo }}">
+                <div class="card-body">
+                    <h5 class="card-title mb-1"><span class="semaforo semaforo-{{ r.ratio.semaforo }}" aria-hidden="true"></span>{% if r.ratio.valor is not none %}{{ r.ratio.valor }}{% elif r.ratio.posiciones == 0 %}sin posiciones{% else %}-{% endif %}</h5>
+                    <p class="card-text mb-0">
+                        {% if r.ratio.umbral %}rojo debajo de {{ r.ratio.umbral }} (inyecta), amarillo hasta {{ r.ratio.amarillo_hasta }}{% else %}sin umbral{% endif %}
+                        {% if r.ratio.simulado %}<br>con el préstamo simulado{% endif %}
+                        {% if r.ratio.hace %}<br>{{ r.ratio.hace }}{% endif %}
+                        {% if r.ratio.vieja %}<br><strong>dato viejo ({{ r.motivo_vieja }}): semáforo en gris</strong>{% endif %}
+                    </p>
+                </div>
+                <div class="card-footer text-muted">Margen / mantenimiento</div>
+            </div>
+        </div>
+        <div class="col-6 col-md-4 col-xl-2">
+            <a href="{{ url_for('main.rescate_page') }}" style="text-decoration: none;">
+            <div class="card text-center h-100" data-tarjeta="estado">
+                <div class="card-body">
+                    <h5 class="card-title mb-1" style="color: {% if r.tope.estado == 'disparado' %}var(--danger-color, #ef4444){% elif r.tope.estado == 'en_confirmacion' %}var(--warning-color, #f59e0b){% else %}var(--text-primary){% endif %};">
+                        {% if r.modo == 'real' %}Real{% elif r.modo == 'dry_run' %}Simulación{% elif r.modo == 'off' %}Apagado{% else %}Sin datos{% endif %}
+                    </h5>
+                    <p class="card-text mb-0">
+                        {% if r.habilitado %}habilitado{% else %}deshabilitado{% endif %} ·
+                        {% if r.tope.estado == 'disparado' %}<strong>tope DISPARADO</strong>
+                        {% elif r.tope.estado == 'en_confirmacion' %}<strong>tope en confirmación</strong>
+                        {% elif r.tope.estado == 'armado' %}tope armado (piso ${{ r.tope.limite }})
+                        {% else %}tope sin armar{% endif %}
+                        {% if r.latido_hace %}<br>latido {{ r.latido_hace }}{% endif %}
+                    </p>
+                </div>
+                <div class="card-footer text-muted">Estado del rescate</div>
+            </div>
+            </a>
+        </div>
+        {% if r.c3 %}
+        {% set c = r.c3 %}
+        <div class="col-6 col-md-4 col-xl-2">
+            <a href="{{ url_for('main.rescate_page') }}#c3" style="text-decoration: none;">
+            <div class="card text-center h-100" data-tarjeta="c3" data-c3-estado="{{ c.estado }}">
+                <div class="card-body">
+                    <h5 class="card-title mb-1" style="color: {% if c.parado %}var(--danger-color, #ef4444){% elif c.estado in ('en_confirmacion', 'sin_observacion') %}var(--warning-color, #f59e0b){% elif c.estado == 'operando' %}var(--success-color, #10b981){% else %}var(--text-secondary, #64748b){% endif %};">
+                        {% if c.parado %}Parado{% elif c.estado == 'operando' %}Operando{% elif c.estado == 'en_confirmacion' %}En confirmación{% elif c.estado == 'sin_observacion' %}Sin observación{% elif c.estado == 'base_pendiente' %}Base pendiente{% elif c.estado == 'off' %}Off{% elif c.estado == 'bloqueado' %}Bloqueado{% else %}{{ c.estado }}{% endif %}{% if c.simulado %} (sim.){% endif %}
+                    </h5>
+                    <p class="card-text mb-0">
+                        {% if c.piso %}piso ${{ c.piso }}{% endif %}
+                        {% if c.distancia_usdt is not none %}<br>a ${{ c.distancia_usdt }} ({{ c.distancia_pct }}%) del piso{% endif %}
+                        {% if c.parado and c.proximo_reinicio %}<br>reinicio: {{ c.proximo_reinicio|truncate(90) }}{% endif %}
+                        {% if c.ultimo_evento %}<br>último {{ c.ultimo_evento.tipo|replace('_', ' ') }} {{ c.ultimo_evento.hace }}{% endif %}
+                        {% if c.capital_hace %}<br>lectura {{ c.capital_hace }}{% endif %}
+                        {% if c.sin_observacion %}<br><strong>{{ c.sin_observacion }}</strong>{% endif %}
+                        {% if c.lectura_error %}<br>error: {{ c.lectura_error|truncate(90) }}{% endif %}
+                        {% if c.latido_suspendido %}<br><strong>latido C3 suspendido</strong>: {{ c.latido_suspendido|truncate(110) }}{% if c.latido_hace %} (último {{ c.latido_hace }}){% endif %}
+                        {% elif c.latido_error %}<br><strong>latido C3 con error</strong>: {{ c.latido_error }}
+                        {% elif c.latido_hace %}<br>latido C3 {{ c.latido_hace }}{% if c.latido_modo and c.latido_modo != 'real' %} ({{ c.latido_modo }}){% endif %}{% endif %}
+                    </p>
+                </div>
+                <div class="card-footer text-muted">Stop con reinicio (C3)</div>
+            </div>
+            </a>
+        </div>
+        {% endif %}
+    </div>
+    {% if r.modo and not r.servicio_vivo %}
+        <div class="alert alert-danger rescate_aviso mt-2 mb-0" role="alert">El servicio rescate no late (último latido {{ r.latido_hace or 'desconocido' }}): los datos pueden estar viejos y nadie está vigilando el tope.</div>
+    {% endif %}
+    {% if r.sin_datos %}
+        <div class="alert alert-secondary rescate_aviso mt-2 mb-0" role="status">Sin datos del rescate. {{ r.como_activar }}</div>
+    {% elif r.lectura_error %}
+        <div class="alert alert-warning rescate_aviso mt-2 mb-0" role="status">Última lectura con error: {{ r.lectura_error|truncate(220) }}</div>
+    {% endif %}
+    {% if r.simulado %}
+        <div class="small text-muted mt-1">dry_run: los montos de préstamo son simulados (no se transfirió nada).</div>
+    {% endif %}
+    {% for e in r.errores %}
+        <div class="alert alert-warning rescate_aviso mt-2 mb-0" role="alert">{{ e }}</div>
+    {% endfor %}
+    {% endif %}
+</div>

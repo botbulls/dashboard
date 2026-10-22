@@ -235,6 +235,10 @@ con el rescate habilitado (o con un préstamo real pendiente).
 
 ## Panel
 
+El dashboard principal (`/`) muestra una fila **Rescate** con la billetera de rescate, el préstamo, el capital
+total vs la base, el ratio con semáforo y el estado (ver [c3.md](c3.md#dashboard-principal)). El stop con
+reinicio sobre futuros (C3) corre en este mismo servicio: ver [c3.md](c3.md).
+
 Sección **Rescate (colchón)** del menú lateral (`/rescate`, con login). Muestra modo y latido del
 servicio, ratio margen/mantenimiento vs los umbrales de inyección y de devolución, posiciones, préstamo
 pendiente, USDT libre en spot, capital total vs base y límite del tope, la transferencia en vuelo, el motivo de bloqueo y los últimos
@@ -339,6 +343,9 @@ services:
     volumes:
       - ./rescate:/passivbot/rescate:ro             # el DIRECTORIO, read-only
 ```
+
+Para C3 (stop con reinicio) el mismo servicio suma `FUTURESBOARD_C3_*`, el directorio de forager y el latido
+para passivbot: ver [c3.md](c3.md#docker-compose).
 
 ## Permisos de la API key (modo real)
 

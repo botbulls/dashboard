@@ -393,6 +393,16 @@ class BinanceFuturesClient:
             raise BinanceError("Respuesta inesperada de Binance en GET /fapi/v1/exchangeInfo (no es un objeto).")
         return data
 
+    def klines(self, symbol: str, interval: str, start_ms: int, limit: int) -> List[List[Any]]:
+        """Velas públicas (``GET /fapi/v1/klines``, sin firma). Cada fila: [openTime, open, high, low, close,
+        volume, closeTime, ...]. La última puede estar abierta todavía (closeTime en el futuro)."""
+        path = "/fapi/v1/klines"
+        data = self._request("GET", path, {"symbol": symbol, "interval": interval, "startTime": int(start_ms),
+                                           "limit": int(limit)}, signed=False)
+        if not isinstance(data, list) or not all(isinstance(r, list) and len(r) >= 7 for r in data):
+            raise BinanceError(f"Respuesta inesperada de Binance en GET {path} (se esperaba una lista de velas).")
+        return data
+
     def market_order(self, symbol: str, side: str, quantity: str, position_side: Optional[str],
                      reduce_only: bool) -> Dict[str, Any]:
         params: Dict[str, Any] = {"symbol": symbol, "side": side, "type": "MARKET", "quantity": quantity,
@@ -1122,8 +1132,15 @@ def validate_stop(settings: Settings, modo: Any) -> str:
 
 
 def start_bot(settings: Settings, store: Store, riesgo: Any,
-              docker: Optional[DockerClient] = None, reporter: Optional[Reporter] = None) -> Dict[str, Any]:
-    validate_riesgo(riesgo)
+              docker: Optional[DockerClient] = None, reporter: Optional[Reporter] = None,
+              mantener_twe: bool = False) -> Dict[str, Any]:
+    """START del panel: aplica el preset ``riesgo`` (twe_long/twe_short), modos normales y reinicia passivbot.
+
+    ``mantener_twe=True`` (solo lo usa el reinicio automático de C3 con una config "personalizado") no toca
+    twe_long/twe_short: ``riesgo`` se ignora y el resto es idéntico (modos, backup, escritura, reinicio).
+    """
+    if not mantener_twe:
+        validate_riesgo(riesgo)
     (reporter or NULL_REPORTER).step("validar", PASO_EN_CURSO)
     settings.require_enabled()
     path = settings.require_config()
@@ -1145,13 +1162,17 @@ def start_bot(settings: Settings, store: Store, riesgo: Any,
     else:
         new_short = current_short
 
-    twe_long, twe_short = RISK_PRESETS[riesgo]
-    updates = {
-        "twe_long": twe_long,
-        "twe_short": twe_short,
-        "long_mode": MODE_NORMAL,
-        "short_mode": new_short,
-    }
+    if mantener_twe:
+        riesgo = detect_preset(cfg)
+        updates = {"long_mode": MODE_NORMAL, "short_mode": new_short}
+    else:
+        twe_long, twe_short = RISK_PRESETS[riesgo]
+        updates = {
+            "twe_long": twe_long,
+            "twe_short": twe_short,
+            "long_mode": MODE_NORMAL,
+            "short_mode": new_short,
+        }
     state.pop("short_mode_before_stop", None)
     action, backup = _apply_and_restart(settings, store, docker, info, path, updates, prev_state, state,
                                         reporter)
