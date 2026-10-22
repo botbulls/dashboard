@@ -26,6 +26,7 @@ from typing_extensions import TypedDict
 from futuresboard import bot_control
 from futuresboard import jobs
 from futuresboard import rescate
+from futuresboard import resumen_rescate
 from futuresboard import telegram_notify
 from futuresboard import db
 from futuresboard.config import BINANCE_FUTURES_MAINNET_URL
@@ -257,6 +258,11 @@ def timeranges():
     ]
 
 
+def _rescate_resumen():
+    """Tarjetas del rescate para el dashboard principal: solo lee archivos (nunca Binance) y nunca lanza."""
+    return resumen_rescate.tarjetas(pathlib.Path(current_app.config["DATABASE"]).parent)
+
+
 @app.route("/", methods=["GET"])
 def index_page():
     daterange = request.args.get("daterange")
@@ -429,6 +435,7 @@ def index_page():
         enddate=enddate,
         timeranges=ranges,
         custom=current_app.config["CUSTOM"],
+        rescate_resumen=_rescate_resumen(),
     )
 
 
@@ -611,6 +618,7 @@ def dashboard_page(start, end):
         enddate=enddate,
         timeranges=ranges,
         custom=current_app.config["CUSTOM"],
+        rescate_resumen=_rescate_resumen(),
     )
 
 
