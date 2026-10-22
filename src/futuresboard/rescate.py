@@ -816,7 +816,7 @@ class RescateService:
                  apagar: Optional[Callable[[], Tuple[str, Dict[str, Any]]]] = None,
                  apagar_disponible: Optional[bool] = None,
                  send: Optional[Callable[[str], bool]] = None,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time, c3: Optional[Any] = None) -> None:
         self.data_dir = pathlib.Path(data_dir)
         self.settings = settings
         self.mode = settings.mode
@@ -830,6 +830,12 @@ class RescateService:
         self._restricciones: Optional[List[str]] = None  # None = sin verificar todavía
         self._alertas: Dict[str, str] = {}
         self._primer_tick = True
+        # C3 (stop con reinicio, ``futuresboard.c3``): corre después del rescate en el mismo ciclo y con el mismo
+        # lock, en cualquier modo del rescate. Reusa la lectura de futuros del ciclo si el rescate la hizo.
+        self.c3 = c3
+        self._fut_ciclo: Optional[Dict[str, Any]] = None
+        self._fut_error: Optional[str] = None
+        self._fut_leido = False
 
     # -- utilidades -------------------------------------------------------------------
     def _now_ms(self) -> int:
@@ -940,13 +946,40 @@ class RescateService:
                 self._alert("config", cfg_err)
             else:
                 self._clear("config")
+            self._fut_ciclo, self._fut_error, self._fut_leido = None, None, False
+            error_rescate: Optional[BaseException] = None
             try:
                 self._tick(state, cfg)
+            except Exception as exc:  # C3 corre igual; el error se relanza después
+                error_rescate = exc
             finally:
                 state["servicio"] = {"modo": self.mode, "heartbeat": now_iso(self.clock()),
                                      "intervalo": self.settings.interval, "testnet": self.testnet}
                 save_state(self.data_dir, state)
+            if self.c3 is not None:
+                self._tick_c3(state, cfg)
+            if error_rescate is not None:
+                raise error_rescate
             return {"ok": True}
+
+    def _tick_c3(self, state: Dict[str, Any], cfg: Dict[str, Any]) -> None:
+        """Paso de C3. Un error no tira el ciclo, y en ese caso NO se escribe el latido (dead-man)."""
+        try:
+            if not self._fut_leido and self.c3.mode != MODE_OFF:
+                # El rescate no leyó futuros este ciclo (off, o cortó antes): C3 lee por su cuenta.
+                try:
+                    self._fut_ciclo = self.binance.futures_account()
+                except RescateError as exc:
+                    self._fut_error = f"No se pudo leer la cuenta en Binance (futuros): {exc}"
+                self._fut_leido = True
+            self.c3.step(state, self._fut_ciclo, self._fut_error, cfg)
+        except Exception as exc:  # defensivo: sin latido, passivbot deja de abrir entradas (C3 en real)
+            log.exception("Paso de C3 con error (%s): no se escribe el latido.", exc.__class__.__name__)
+            self._alert("c3", f"C3 con error ({exc.__class__.__name__}): no se escribe el latido.")
+        else:
+            self._clear("c3", "C3 sin errores otra vez.")
+        finally:
+            save_state(self.data_dir, state)
 
     def _tick(self, state: Dict[str, Any], cfg: Dict[str, Any]) -> None:
         now_ms = self._now_ms()
@@ -986,6 +1019,7 @@ class RescateService:
         try:
             fut = self.binance.futures_account()
         except RescateError as exc:
+            self._fut_leido, self._fut_error = True, f"No se pudo leer la cuenta en Binance (futuros): {exc}"
             msg = (f"No se pudo leer la cuenta en Binance (futuros): {exc}. Hasta que vuelva la lectura el tope de "
                    "pérdida no se puede evaluar y no se hacen transferencias.")
             msg += self._aviso_confirmacion_sin_lectura(state, espera_maxima=False)
@@ -993,6 +1027,7 @@ class RescateService:
             self._alert("lectura", msg)
             self._tope_sin_lectura(state, cfg, now_ms, "futuros", espera_maxima=False)
             return
+        self._fut_leido, self._fut_ciclo = True, fut
         try:
             spot = self.binance.spot_usdt_free()
         except RescateError as exc:
@@ -1726,8 +1761,12 @@ class RescateService:
 def make_apagar(data_dir: pathlib.Path, bot_settings: bot_control.Settings,
                 futures_client: bot_control.BinanceFuturesClient,
                 docker: Optional[bot_control.DockerClient] = None,
-                lock_timeout: float = APAGAR_LOCK_TIMEOUT_S) -> Callable[[], Tuple[str, Dict[str, Any]]]:
-    """Devuelve la acción Apagar del panel: ``bot_control.stop_bot(..., "apagar")`` bajo el lock de acciones."""
+                lock_timeout: float = APAGAR_LOCK_TIMEOUT_S, usuario: str = APAGAR_USUARIO,
+                origen: str = "rescate_tope") -> Callable[[], Tuple[str, Dict[str, Any]]]:
+    """Devuelve la acción Apagar del panel: ``bot_control.stop_bot(..., "apagar")`` bajo el lock de acciones.
+
+    ``usuario`` / ``origen`` solo cambian la auditoría (la usa también C3, ver ``futuresboard.c3``).
+    """
     store = bot_control.Store(data_dir)
 
     def apagar() -> Tuple[str, Dict[str, Any]]:
@@ -1736,7 +1775,7 @@ def make_apagar(data_dir: pathlib.Path, bot_settings: bot_control.Settings,
         while handle is None and time.monotonic() < deadline:
             time.sleep(LOCK_POLL_S)
             handle = store.try_lock()
-        params = {"modo": "apagar", "origen": "rescate_tope"}
+        params = {"modo": "apagar", "origen": origen}
         if handle is None:
             payload = {"ok": False, "error": "No se pudo tomar el lock de acciones del panel (hay una acción en curso). "
                                              "Se reintenta."}
@@ -1751,7 +1790,7 @@ def make_apagar(data_dir: pathlib.Path, bot_settings: bot_control.Settings,
         finally:
             handle.release()
         try:
-            store.audit(APAGAR_USUARIO, "stop", params, outcome, jobs.audit_detail(payload), None)
+            store.audit(usuario, "stop", params, outcome, jobs.audit_detail(payload), None)
         except OSError:
             log.exception("No se pudo escribir el log de auditoría")
         return outcome, payload
@@ -1829,7 +1868,9 @@ def _load_app_config() -> Any:
 
 
 def build_service(settings: RescateSettings, config: Any) -> RescateService:
+    from futuresboard import c3
     from futuresboard import logs
+    from futuresboard.config import BINANCE_FUTURES_MAINNET_URL
 
     logs.register_secret(config.API_KEY)
     logs.register_secret(config.API_SECRET)
@@ -1840,14 +1881,39 @@ def build_service(settings: RescateSettings, config: Any) -> RescateService:
                              config.API_KEY or "", config.API_SECRET or "")
     bot_settings = bot_control.Settings()
     apagar = None
+    apagar_c3 = start_c3 = contenedor = forager = klines = None
     if bot_settings.enabled:
         try:
             futures_client = bot_control.BinanceFuturesClient(config.API_BASE_URL or "", config.API_KEY or "",
                                                               config.API_SECRET or "", algo_optional=testnet)
             apagar = make_apagar(data_dir, bot_settings, futures_client)
+            apagar_c3 = make_apagar(data_dir, bot_settings, futures_client, usuario=c3.USUARIO_APAGAR,
+                                    origen="c3_corte")
+            start_c3 = c3.make_start(data_dir, bot_settings)
+            docker = bot_control.DockerClient(bot_settings.docker_url)
+
+            def contenedor() -> Optional[bool]:
+                return bool(docker.inspect(bot_settings.container)["running"])
         except bot_control.BotControlError as exc:
             log.error("Apagar no disponible: %s", exc)
-    return RescateService(data_dir, settings, binance, testnet=testnet, exchange=str(exchange), apagar=apagar)
+    if bot_settings.forager_config is not None:
+        def forager() -> Dict[str, Any]:
+            return bot_control.read_forager_config(bot_settings.require_config())
+    try:
+        # Velas públicas para el índice de rebote de C3 (en testnet, las de Demo, como el resto del dashboard).
+        publico = (config.API_BASE_URL or "") if testnet else BINANCE_FUTURES_MAINNET_URL
+        klines = bot_control.BinanceFuturesClient(publico, config.API_KEY or "", config.API_SECRET or "").klines
+    except bot_control.BotControlError as exc:
+        log.error("Velas de Binance no disponibles para C3: %s", exc)
+    c3_settings = c3.C3Settings()
+    for error in (c3_settings.mode_error, c3_settings.pares_error):
+        if error:
+            log.error("%s", error)
+    watcher = c3.C3Watcher(data_dir, c3_settings, interval=settings.interval, exchange=str(exchange),
+                           testnet=testnet, apagar=apagar_c3, start=start_c3, contenedor=contenedor,
+                           forager=forager, klines=klines)
+    return RescateService(data_dir, settings, binance, testnet=testnet, exchange=str(exchange), apagar=apagar,
+                          c3=watcher)
 
 
 def _simular(settings: RescateSettings, config: Any, tipo: str, monto: Optional[str]) -> int:
@@ -1931,6 +1997,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     telegram_notify.log_startup_state(log)
     log.info("Rescate iniciado: modo %s, intervalo %ss, loan_state %s, datos %s, testnet %s.", settings.mode,
              settings.interval, settings.loan_state_path, service.data_dir, service.testnet)
+    if service.c3 is not None:
+        log.info("C3 (stop con reinicio): modo %s, latido %s, pares %s.", service.c3.mode,
+                 service.c3.settings.heartbeat_path, ",".join(service.c3.settings.pares))
     # Una sola instancia: una segunda queda esperando el lock (standby), no opera en paralelo.
     service.data_dir.mkdir(parents=True, exist_ok=True)
     with open(service.data_dir / SERVICE_LOCK_NAME, "a") as lock_fh:

@@ -100,6 +100,105 @@
         </div>
     </div>
 
+    <h4 class="mt-4 mb-3" id="c3"><i class="fas fa-redo-alt me-2"></i>Stop con reinicio (C3)</h4>
+    <div class="alert alert-warning" role="note">
+        <strong>Importante.</strong> {{ c3_aviso }}
+        El piso es sobre la cuenta de <strong>futuros</strong> (equity menos el préstamo del rescate), con la misma
+        confirmación que el tope: al primer cruce queda en confirmación y corta si una lectura posterior sigue debajo.
+    </div>
+    <div id="c3Errores" class="alert alert-danger d-none" role="alert"></div>
+    <div class="alert alert-warning d-none" id="c3Confirmacion" role="status" aria-live="polite">
+        <h5 class="alert-heading"><i class="fas fa-hourglass-half me-2"></i>Piso de C3 en confirmación</h5>
+        <p class="mb-0" data-c3="confirmacion-texto"></p>
+    </div>
+    <div class="alert alert-danger d-none" id="c3Corte" role="alert" aria-live="assertive">
+        <h5 class="alert-heading"><i class="fas fa-stop-circle me-2"></i>C3 parado</h5>
+        <p class="mb-1" data-c3="corte-texto"></p>
+        <p class="mb-0" data-c3="corte-reinicio"></p>
+    </div>
+
+    <div class="row g-3">
+        <div class="col-lg-6">
+            <div class="card h-100">
+                <div class="card-header"><strong>Estado de C3</strong> <span class="small ms-2" data-c3="servicio"></span></div>
+                <div class="card-body">
+                    <table class="table table-sm mb-0">
+                        <tbody>
+                            <tr><th scope="row">Estado</th><td data-c3="estado">-</td></tr>
+                            <tr><th scope="row">Base (capital de futuros)</th><td data-c3="base">-</td></tr>
+                            <tr><th scope="row">Piso</th><td data-c3="piso">-</td></tr>
+                            <tr><th scope="row">Capital de futuros actual</th><td data-c3="capital">-</td></tr>
+                            <tr><th scope="row">Distancia al piso</th><td data-c3="distancia">-</td></tr>
+                            <tr><th scope="row">Índice desde el corte</th><td data-c3="indice">-</td></tr>
+                            <tr><th scope="row">Próximo reinicio estimado</th><td data-c3="proximo">-</td></tr>
+                            <tr><th scope="row">Reinicios automáticos</th><td data-c3="reinicios">-</td></tr>
+                            <tr><th scope="row">Latido para passivbot</th><td data-c3="latido">-</td></tr>
+                        </tbody>
+                    </table>
+                    <p class="small text-danger mt-2 mb-0 d-none" data-c3="bloqueo"></p>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-6">
+            <div class="card h-100">
+                <div class="card-header"><strong>Configuración de C3</strong></div>
+                <div class="card-body">
+                    <form id="c3Form" novalidate>
+                        <div class="form-check form-switch mb-3">
+                            <input class="form-check-input" type="checkbox" role="switch" id="c3Habilitado">
+                            <label class="form-check-label" for="c3Habilitado">C3 habilitado</label>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small" for="c3Tope">Tope sobre futuros (%)</label>
+                            <input class="form-control form-control-sm" type="number" id="c3Tope" step="any" min="{{ c3_limites['tope_pct'][0] }}" max="{{ c3_limites['tope_pct'][1] }}">
+                            <div class="form-text">Piso = base × (1 − tope%) ({{ c3_limites['tope_pct'][0] }}–{{ c3_limites['tope_pct'][1] }}). La base es el capital de futuros al habilitar o al reiniciar.</div>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small" for="c3Politica">Política de reinicio</label>
+                            <select class="form-select form-select-sm" id="c3Politica">
+                                <option value="rebote">Rebote del índice</option>
+                                <option value="cooldown">Cooldown (días)</option>
+                                <option value="ambos">Lo que ocurra primero</option>
+                            </select>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small" for="c3Rebote">Rebote (%)</label>
+                            <input class="form-control form-control-sm" type="number" id="c3Rebote" step="any" min="{{ c3_limites['rebote_pct'][0] }}" max="{{ c3_limites['rebote_pct'][1] }}">
+                            <div class="form-text">Reinicia si el índice equiponderado de los pares sube este % desde su mínimo posterior al corte (muestreado cada hora).</div>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small" for="c3Cooldown">Cooldown (días)</label>
+                            <input class="form-control form-control-sm" type="number" id="c3Cooldown" step="any" min="{{ c3_limites['cooldown_dias'][0] }}" max="{{ c3_limites['cooldown_dias'][1] }}">
+                        </div>
+                        <div class="row g-2 mb-3">
+                            <div class="col-6">
+                                <label class="form-label small" for="c3MaxReinicios">Máx. reinicios automáticos</label>
+                                <input class="form-control form-control-sm" type="number" id="c3MaxReinicios" step="1" min="{{ c3_limites['max_reinicios'][0] }}" max="{{ c3_limites['max_reinicios'][1] }}">
+                            </div>
+                            <div class="col-6">
+                                <label class="form-label small" for="c3Ventana">en (días)</label>
+                                <input class="form-control form-control-sm" type="number" id="c3Ventana" step="1" min="{{ c3_limites['ventana_dias'][0] }}" max="{{ c3_limites['ventana_dias'][1] }}">
+                            </div>
+                            <div class="form-text">Superado el límite queda parado esperando un START a mano (que re-ancla la base). 0 = nunca reinicia solo.</div>
+                        </div>
+                        <button type="submit" class="btn btn-primary btn-sm" id="c3Guardar">Guardar</button>
+                        <span class="small ms-2" id="c3Respuesta" role="status" aria-live="polite"></span>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mt-3">
+        <div class="card-header"><strong>Historial de C3</strong> <span class="small text-muted">(cortes, reinicios y bases)</span></div>
+        <div class="card-body table-responsive">
+            <table class="table table-sm mb-0">
+                <thead><tr><th>Fecha (UTC)</th><th>Tipo</th><th>Modo</th><th>Detalle</th></tr></thead>
+                <tbody data-c3="historial"><tr><td colspan="4">Sin historial.</td></tr></tbody>
+            </table>
+        </div>
+    </div>
+
     <div class="card mt-3 mb-4">
         <div class="card-header"><strong>Últimos eventos</strong></div>
         <div class="card-body table-responsive">
@@ -138,7 +237,99 @@
          function usdt(v) { return (v === null || v === undefined) ? '-' : `${v} USDT`; }
          function set(k, t) { q(k).textContent = t; }
 
+         const c3q = (k) => document.querySelector(`[data-c3="${k}"]`);
+         const c3set = (k, t) => { c3q(k).textContent = t; };
+         const c3Form = document.getElementById('c3Form');
+         const c3Inputs = {
+             habilitado: document.getElementById('c3Habilitado'),
+             tope_pct: document.getElementById('c3Tope'),
+             politica: document.getElementById('c3Politica'),
+             rebote_pct: document.getElementById('c3Rebote'),
+             cooldown_dias: document.getElementById('c3Cooldown'),
+             max_reinicios: document.getElementById('c3MaxReinicios'),
+             ventana_dias: document.getElementById('c3Ventana'),
+         };
+         const c3Respuesta = document.getElementById('c3Respuesta');
+         let c3Editando = false;
+         const C3_ESTADOS = {
+             deshabilitado: 'deshabilitado', off: 'servicio en off (no vigila)', bloqueado: 'bloqueado',
+             parado: 'PARADO (cortó)', en_confirmacion: 'piso en confirmación', base_pendiente: 'base pendiente (próximo ciclo)',
+             operando: 'operando (vigilando el piso)',
+         };
+
+         function filasTabla(tbody, filas, vacio) {
+             const trs = filas.map((cols) => {
+                 const tr = document.createElement('tr');
+                 cols.forEach((c) => {
+                     const td = document.createElement('td');
+                     td.textContent = c == null ? '' : String(c);
+                     tr.appendChild(td);
+                 });
+                 return tr;
+             });
+             if (!trs.length) {
+                 const tr = document.createElement('tr');
+                 const td = document.createElement('td');
+                 td.colSpan = 4;
+                 td.textContent = vacio;
+                 tr.appendChild(td);
+                 trs.push(tr);
+             }
+             tbody.replaceChildren(...trs);
+         }
+
+         function renderC3(c) {
+             if (!c) return;
+             const cfg = c.config || {};
+             const sim = c.modo === 'dry_run' ? ' (simulado)' : '';
+             c3set('servicio', c.servicio_vivo ? `modo ${c.modo || 'sin datos'}` : `servicio sin latido reciente (modo ${c.modo || 'sin datos'})`);
+             c3set('estado', `${C3_ESTADOS[c.estado] || c.estado}${c.c3_parado ? sim : ''}`);
+             c3set('base', c.base ? `${usdt(c.base.capital)} · ${c.base.fijada_en} (${c.base.motivo})` : '-');
+             c3set('piso', c.piso ? `${usdt(c.piso)} (tope ${cfg.tope_pct}%)` : '-');
+             const u = c.ultimo || {};
+             c3set('capital', u.capital ? `${usdt(u.capital)} · ${u.ts || ''}${u.error ? ` · ${u.error}` : ''}${u.prestamo_real && u.prestamo_real !== '0.00' ? ` · descontado préstamo ${u.prestamo_real}` : ''}` : (u.error || '-'));
+             c3set('distancia', c.distancia_usdt ? `${usdt(c.distancia_usdt)} (${c.distancia_pct}%)` : '-');
+             const corte = c.corte;
+             const idx = corte && corte.indice ? corte.indice : null;
+             c3set('indice', idx ? `${idx.actual || 'sin muestras'} (mínimo ${idx.min}, ${idx.muestras} muestras${idx.rebote_en ? `, rebote ${idx.rebote_en}` : ''})${idx.error ? ` · ${idx.error}` : ''}` : '-');
+             c3set('proximo', c.proximo_reinicio || '-');
+             c3set('reinicios', `${c.reinicios_recientes} en los últimos ${cfg.ventana_dias} días (máximo ${cfg.max_reinicios})`);
+             const lat = c.latido || {};
+             c3set('latido', lat.ts ? `${lat.ts} · c3_mode ${lat.c3_mode}` : (lat.error ? `error: ${lat.error}` : '-'));
+             const bloqueo = c3q('bloqueo');
+             bloqueo.textContent = c.bloqueo || '';
+             bloqueo.classList.toggle('d-none', !c.bloqueo);
+             const errores = c.errores || [];
+             const errBox = document.getElementById('c3Errores');
+             errBox.textContent = errores.join(' ');
+             errBox.classList.toggle('d-none', !errores.length);
+
+             const conf = c.confirmacion;
+             document.getElementById('c3Confirmacion').classList.toggle('d-none', !conf);
+             if (conf) {
+                 c3set('confirmacion-texto', `Primer cruce ${conf.desde_en}: capital de futuros ${conf.capital} USDT <= piso ${conf.piso} USDT (base ${conf.base}, tope ${conf.pct}%)${conf.modo === 'dry_run' ? ' · SIMULADO' : ''}. Última lectura ${conf.ultimo_en}: ${conf.ultimo_capital} USDT. Corta si una lectura desde ${conf.ejecuta_desde_en} sigue en o debajo; si vuelve arriba, se cancela.${c.servicio_vivo ? '' : ' El servicio no late: nadie la está evaluando.'}`);
+             }
+             document.getElementById('c3Corte').classList.toggle('d-none', !c.c3_parado);
+             if (c.c3_parado && corte) {
+                 const ap = corte.apagar || {};
+                 c3set('corte-texto', `${corte.en}${corte.modo === 'dry_run' ? ' · SIMULADO' : ''}: ${corte.origen === 'tope_rescate' ? 'por el tope del rescate' : `capital ${corte.capital} USDT <= piso ${corte.piso} USDT`}. Apagar: ${ap.resultado || '-'}${ap.intentos ? ` (intentos ${ap.intentos})` : ''}. ${ap.detalle || ''}`);
+                 const r = corte.reinicio || {};
+                 c3set('corte-reinicio', `Reinicio: ${c.proximo_reinicio || '-'}${r.aviso ? ` · ${r.aviso}` : ''}${r.resultado === 'error' ? ` · último intento falló: ${r.detalle}` : ''}. Un START a mano desde el panel también lo reanuda (re-ancla la base).`);
+             }
+             if (!c3Editando) {
+                 c3Inputs.habilitado.checked = !!cfg.habilitado;
+                 c3Inputs.tope_pct.value = cfg.tope_pct ?? '';
+                 c3Inputs.politica.value = cfg.politica || 'rebote';
+                 c3Inputs.rebote_pct.value = cfg.rebote_pct ?? '';
+                 c3Inputs.cooldown_dias.value = cfg.cooldown_dias ?? '';
+                 c3Inputs.max_reinicios.value = cfg.max_reinicios ?? '';
+                 c3Inputs.ventana_dias.value = cfg.ventana_dias ?? '';
+             }
+             filasTabla(c3q('historial'), (c.historial || []).map((h) => [h.ts, h.tipo, h.modo || '-', h.texto]), 'Sin historial.');
+         }
+
          function render(s) {
+             renderC3(s.c3);
              const svc = s.servicio || {};
              const modo = svc.modo || 'sin datos';
              set('servicio', svc.vivo ? `servicio en modo ${modo}${svc.testnet ? ' (testnet/Demo)' : ''}` : `servicio sin latido reciente (modo ${modo})`);
@@ -267,6 +458,38 @@
                  respuesta.textContent = ok ? 'Guardado.' : (d.error || 'No se pudo guardar.');
                  if (ok) { editando = false; render(d.status); }
              }).catch(() => { respuesta.textContent = 'No se pudo guardar.'; });
+         });
+
+         Object.values(c3Inputs).forEach((el) => el.addEventListener('input', () => { c3Editando = true; }));
+         c3Inputs.habilitado.addEventListener('change', () => { c3Editando = true; });
+         c3Inputs.politica.addEventListener('change', () => { c3Editando = true; });
+
+         c3Form.addEventListener('submit', (ev) => {
+             ev.preventDefault();
+             const entero = (input) => {
+                 const raw = input.value.trim();
+                 if (raw === '') return null;
+                 const n = Number(raw);
+                 return Number.isInteger(n) ? n : NaN;
+             };
+             const body = {
+                 habilitado: c3Inputs.habilitado.checked,
+                 tope_pct: numero(c3Inputs.tope_pct),
+                 politica: c3Inputs.politica.value,
+                 rebote_pct: numero(c3Inputs.rebote_pct),
+                 cooldown_dias: numero(c3Inputs.cooldown_dias),
+                 max_reinicios: entero(c3Inputs.max_reinicios),
+                 ventana_dias: entero(c3Inputs.ventana_dias),
+             };
+             if (Object.values(body).some((v) => typeof v === 'number' && Number.isNaN(v))) {
+                 c3Respuesta.textContent = 'Hay valores que no son números (los reinicios y la ventana son enteros).';
+                 return;
+             }
+             c3Respuesta.textContent = 'Guardando...';
+             post('/api/c3/config', body).then(({ ok, d }) => {
+                 c3Respuesta.textContent = ok ? 'Guardado.' : (d.error || 'No se pudo guardar.');
+                 if (ok) { c3Editando = false; render(d.status); }
+             }).catch(() => { c3Respuesta.textContent = 'No se pudo guardar.'; });
          });
 
          topeCheck.addEventListener('change', () => { topeAck.disabled = !topeCheck.checked; });

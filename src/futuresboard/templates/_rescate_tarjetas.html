@@ -116,6 +116,28 @@
             </div>
             </a>
         </div>
+        {% if r.c3 %}
+        {% set c = r.c3 %}
+        <div class="col-6 col-md-4 col-xl-2">
+            <a href="{{ url_for('main.rescate_page') }}#c3" style="text-decoration: none;">
+            <div class="card text-center h-100" data-tarjeta="c3" data-c3-estado="{{ c.estado }}">
+                <div class="card-body">
+                    <h5 class="card-title mb-1" style="color: {% if c.parado %}var(--danger-color, #ef4444){% elif c.estado == 'en_confirmacion' %}var(--warning-color, #f59e0b){% elif c.estado == 'operando' %}var(--success-color, #10b981){% else %}var(--text-secondary, #64748b){% endif %};">
+                        {% if c.parado %}Parado{% elif c.estado == 'operando' %}Operando{% elif c.estado == 'en_confirmacion' %}En confirmación{% elif c.estado == 'base_pendiente' %}Base pendiente{% elif c.estado == 'off' %}Off{% elif c.estado == 'bloqueado' %}Bloqueado{% else %}{{ c.estado }}{% endif %}{% if c.simulado %} (sim.){% endif %}
+                    </h5>
+                    <p class="card-text mb-0">
+                        {% if c.piso %}piso ${{ c.piso }}{% endif %}
+                        {% if c.distancia_usdt is not none %}<br>a ${{ c.distancia_usdt }} ({{ c.distancia_pct }}%) del piso{% endif %}
+                        {% if c.parado and c.proximo_reinicio %}<br>reinicio: {{ c.proximo_reinicio|truncate(90) }}{% endif %}
+                        {% if c.ultimo_evento %}<br>último {{ c.ultimo_evento.tipo|replace('_', ' ') }} {{ c.ultimo_evento.hace }}{% endif %}
+                        {% if c.capital_hace %}<br>lectura {{ c.capital_hace }}{% endif %}
+                    </p>
+                </div>
+                <div class="card-footer text-muted">Stop con reinicio (C3)</div>
+            </div>
+            </a>
+        </div>
+        {% endif %}
     </div>
     {% if r.modo and not r.servicio_vivo %}
         <div class="alert alert-danger rescate_aviso mt-2 mb-0" role="alert">El servicio rescate no late (último latido {{ r.latido_hace or 'desconocido' }}): los datos pueden estar viejos y nadie está vigilando el tope.</div>

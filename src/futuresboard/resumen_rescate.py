@@ -21,6 +21,7 @@ from typing import Any
 from typing import Dict
 from typing import Optional
 
+from futuresboard import c3
 from futuresboard import rescate
 
 log = logging.getLogger("futuresboard.resumen_rescate")
@@ -173,4 +174,32 @@ def _tarjetas(data_dir: pathlib.Path, now: float) -> Dict[str, Any]:
     out["tope"] = {"estado": tope_estado, "limite": status.get("limite_tope"), "pct": status.get("tope_pct"),
                    "start_bloqueado": status.get("start_bloqueado")}
     out["sin_datos"] = spot["usdt"] is None and not lectura_ok
+    out["c3"] = _c3(data_dir, now)
     return out
+
+
+def _c3(data_dir: pathlib.Path, now: float) -> Optional[Dict[str, Any]]:
+    """Tarjeta de C3 (stop con reinicio): solo si está habilitado o quedó parado."""
+    st = c3.panel_status(data_dir, now=now)
+    if not st["config"].get("habilitado") and not st["c3_parado"]:
+        return None
+    ultimo = st.get("ultimo") or {}
+    evento = None
+    for h in st.get("historial") or []:
+        if h.get("tipo") in ("corte", "reinicio", "reinicio_manual"):
+            evento = h
+            break
+    return {
+        "estado": st["estado"],
+        "parado": st["c3_parado"],
+        "simulado": st.get("modo") == c3.MODE_DRY_RUN,
+        "piso": st.get("piso"),
+        "distancia_usdt": st.get("distancia_usdt"),
+        "distancia_pct": st.get("distancia_pct"),
+        "capital_ts": ultimo.get("ts"),
+        "capital_hace": antiguedad(ultimo.get("ts"), now),
+        "proximo_reinicio": st.get("proximo_reinicio"),
+        "ultimo_evento": None if evento is None else {"tipo": evento.get("tipo"), "ts": evento.get("ts"),
+                                                      "hace": antiguedad(evento.get("ts"), now)},
+        "errores": st.get("errores") or [],
+    }

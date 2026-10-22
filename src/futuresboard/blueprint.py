@@ -24,6 +24,7 @@ from flask import current_app
 from typing_extensions import TypedDict
 
 from futuresboard import bot_control
+from futuresboard import c3
 from futuresboard import jobs
 from futuresboard import rescate
 from futuresboard import resumen_rescate
@@ -1671,6 +1672,14 @@ def _rescate_audit(action: str, params: dict, outcome: str, detail: str) -> None
         current_app.logger.exception("No se pudo escribir el log de auditoria")
 
 
+def _rescate_status() -> dict:
+    """Estado del rescate y de C3 para el panel (solo lee archivos; no consulta Binance)."""
+    data_dir = _bot_store().data_dir
+    out = rescate.panel_status(data_dir)
+    out["c3"] = c3.panel_status(data_dir)
+    return out
+
+
 @app.route("/rescate", methods=["GET"])
 def rescate_page():
     return render_template(
@@ -1679,12 +1688,15 @@ def rescate_page():
         custom=current_app.config["CUSTOM"],
         limites={k: [str(lo), str(hi)] for k, (lo, hi) in rescate.LIMITES.items()},
         aviso=rescate.AVISO,
+        c3_limites={**{k: [str(lo), str(hi)] for k, (lo, hi) in c3.LIMITES.items()},
+                    **{k: [str(lo), str(hi)] for k, (lo, hi) in c3.LIMITES_ENTEROS.items()}},
+        c3_aviso=c3.AVISO,
     )
 
 
 @app.route("/api/rescate/status", methods=["GET"])
 def rescate_status():
-    return _json_response(rescate.panel_status(_bot_store().data_dir))
+    return _json_response(_rescate_status())
 
 
 @app.route("/api/rescate/config", methods=["POST"])
@@ -1702,7 +1714,7 @@ def rescate_config():
         _rescate_audit("rescate_config", params, "rechazado", str(exc))
         return _json_response({"ok": False, "error": str(exc)}, 409)
     _rescate_audit("rescate_config", params, "ok", f"generacion {cfg.get('generacion')}")
-    return _json_response({"ok": True, "status": rescate.panel_status(_bot_store().data_dir)})
+    return _json_response({"ok": True, "status": _rescate_status()})
 
 
 @app.route("/api/rescate/reconocer-tope", methods=["POST"])
@@ -1720,7 +1732,23 @@ def rescate_reconocer_tope():
         _rescate_audit("rescate_reconocer_tope", params, "rechazado", str(exc))
         return _json_response({"ok": False, "error": str(exc)}, 409)
     _rescate_audit("rescate_reconocer_tope", params, "ok", "START desbloqueado; rescate deshabilitado")
-    return _json_response({"ok": True, "status": rescate.panel_status(_bot_store().data_dir)})
+    return _json_response({"ok": True, "status": _rescate_status()})
+
+
+@app.route("/api/c3/config", methods=["POST"])
+@csrf_protect
+def c3_config():
+    """Config de C3 (stop con reinicio). Validación estricta; habilitar abre una generación nueva (base nueva)."""
+    body = request.get_json(silent=True)
+    params = body if isinstance(body, dict) else {}
+    try:
+        parsed = c3.validate_config_body(body)
+        cfg = c3.save_config(_bot_store().data_dir, parsed, session.get("username") or "?")
+    except ValueError as exc:
+        _rescate_audit("c3_config", params, "rechazado", str(exc))
+        return _json_response({"ok": False, "error": str(exc)}, 400)
+    _rescate_audit("c3_config", params, "ok", f"generacion {cfg.get('generacion')}")
+    return _json_response({"ok": True, "status": _rescate_status()})
 
 
 @app.route("/api/last-order", methods=["GET"])
