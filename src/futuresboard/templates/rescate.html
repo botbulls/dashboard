@@ -173,7 +173,7 @@
              const c = s.tope_confirmacion;
              confBox.classList.toggle('d-none', !c);
              if (c) {
-                 set('confirmacion-texto', `Primer cruce ${c.desde_en}: capital ${c.capital} USDT <= límite ${c.limite} USDT (base ${c.base}, tope ${c.pct}%)${c.modo === 'dry_run' ? ' · SIMULADO' : ''}. Última lectura ${c.ultimo_en}: ${c.ultimo_capital} USDT. Se ejecuta Apagar si una lectura desde ${c.ejecuta_desde_en} sigue en o debajo del límite; si vuelve arriba, se cancela. Sin lecturas, se ejecuta a más tardar el ${c.ejecuta_maximo_en}. Mientras tanto no se inyecta.`);
+                 set('confirmacion-texto', `Primer cruce ${c.desde_en}: capital ${c.capital} USDT <= límite ${c.limite} USDT (base ${c.base}, tope ${c.pct}%)${c.modo === 'dry_run' ? ' · SIMULADO' : ''}. Última lectura ${c.ultimo_en}: ${c.ultimo_capital} USDT. Se ejecuta Apagar si una lectura desde ${c.ejecuta_desde_en} sigue en o debajo del límite; si vuelve arriba, se cancela. Si se corta la lectura de futuros, decide la próxima (tras un corte largo, la confirmación arranca de cero). Mientras tanto no se inyecta.${c.evaluandose ? '' : ' El servicio no la está evaluando (sin latido reciente o en off): no se ejecuta nada hasta que vuelva, y entonces decide la primera lectura.'}`);
              }
 
              const t = s.tope;

@@ -110,15 +110,30 @@ Un ciclo cada `FUTURESBOARD_RESCATE_INTERVAL` segundos (default 15). En cada cic
    - **Lecturas caídas durante la confirmación** (misma lógica del punto 1): con spot caído se observa con
      el último saldo spot leído, y esa observación puede confirmar o cancelar. Con futuros caídos (o spot
      caído sin un saldo spot leído antes) no hay observación: la confirmación no se confirma ni se cancela.
-   - **Espera máxima**: para que no quede confirmando para siempre, si pasan `max(5 × confirmación, 300 s)`
-     desde el primer cruce (5 min con el default) sin una observación que la resuelva, se dispara con la
-     última observación, que estaba en o debajo del piso. El aviso de lectura caída dice hasta cuándo. Sin
-     la API de futuros, la parte de Binance del Apagar (cancelar y cerrar) puede fallar: sigue el camino de
-     reintentos de abajo, y detener passivbot no depende de Binance.
+   - **Con futuros caídos no se dispara a ciegas.** Apagar detendría passivbot pero no podría cancelar ni
+     cerrar en Binance: gastaría los 3 intentos durante la caída y quedarían el bot parado, las posiciones
+     abiertas y START bloqueado. Además se perdería el filtro de mechas, que suelen coincidir con las caídas de
+     la API. La confirmación espera y decide la próxima lectura, como antes de que existiera la confirmación.
+   - **Espera máxima**, solo con spot caído sin un saldo spot leído antes (futuros responde y Apagar puede
+     cerrar): si pasan `max(5 × confirmación, 300 s)` desde el primer cruce (5 min con el default) sin una
+     observación que la resuelva, se dispara con la última observación, que estaba en o debajo del piso. El
+     aviso de lectura caída dice hasta cuándo.
+   - **Arranca de cero** (la observación debajo del piso cuenta como un primer cruce nuevo, con su aviso):
+     - si pasaron más de `confirmación + 2 × FUTURESBOARD_RESCATE_INTERVAL` (90 s con los defaults) desde la
+       observación anterior. Con el servicio o futuros caídos no se sabe si el capital se quedó debajo o rebotó
+       y volvió a caer: dos mechas no son "sigue debajo";
+     - si cambió el modo del tope (por ejemplo de `dry_run` a `real`): un Apagar real necesita antes su propio
+       aviso real de confirmación.
+
+     Con `FUTURESBOARD_RESCATE_TOPE_CONFIRM_SECONDS=0` dispara en el momento, como cualquier primer cruce.
+   - En modo `off` no se evalúa: una confirmación en curso se cancela con aviso. Si el servicio no late, el
+     panel aclara que nadie la está evaluando.
    - Si el host atrasa el reloj durante una confirmación, la cuenta se reinicia desde ese momento.
    - Si el capital oscila alrededor del piso (cruza, vuelve arriba antes de confirmarse, cruza de nuevo),
      cada rebote cancela y el cruce siguiente abre una confirmación nueva: dispara recién cuando el capital
-     se queda debajo una confirmación completa.
+     se queda debajo una confirmación completa. Para no llenar Telegram, una confirmación que se abre a menos
+     de 5 min de la última cancelación no avisa ni al abrirse ni al cancelarse (queda en los eventos y en el
+     panel). El disparo y el resultado del Apagar se avisan siempre.
    - Si el tope se desarma durante la confirmación (rescate deshabilitado sin préstamo real pendiente), la
      confirmación se cancela con aviso.
 
@@ -147,16 +162,34 @@ Un ciclo cada `FUTURESBOARD_RESCATE_INTERVAL` segundos (default 15). En cada cic
    hay préstamo: `min(préstamo, maxWithdrawAmount)`. Si no alcanza, sigue en los ciclos siguientes. La
    devolución sigue aunque el rescate esté deshabilitado o con el tope disparado (es plata prestada).
 7. **Devolución parcial con margen sano** (futuros → spot, `UMFUTURE_MAIN`) con préstamo y posiciones
-   abiertas, si `totalMarginBalance / totalMaintMargin >= umbral_devolucion_ratio` (default 16, el doble del
-   de inyección; tiene que ser mayor que `umbral_ratio`). Monto
+   abiertas, si `totalMarginBalance / totalMaintMargin >= umbral_devolucion_ratio` (default 32; tiene que ser
+   mayor que `umbral_ratio`). Monto
    `r = min(préstamo, maxWithdrawAmount, totalMarginBalance - umbral_devolucion × totalMaintMargin)`, en
    centavos hacia abajo: después de devolver, el ratio queda en el umbral de devolución o arriba. Solo si
    `r >= FUTURESBOARD_RESCATE_DEVOLUCION_MIN_USDT` (100) y pasaron
-   `FUTURESBOARD_RESCATE_DEVOLUCION_COOLDOWN_SECONDS` (600 s) desde el último intento de devolución parcial.
-   El motivo: en caídas largas la cuenta casi nunca queda sin posiciones (en la simulación, en febrero
-   quedaron 8.000 USDT prestados).
-   - **Histéresis**: se inyecta debajo de 8 y se devuelve desde 16. Como lo devuelto deja el ratio en 16 o
-     más, no vuelve a entrar enseguida (sin ping-pong); entre los dos umbrales no se mueve nada.
+   `FUTURESBOARD_RESCATE_DEVOLUCION_COOLDOWN_SECONDS` (600 s) desde el último intento de devolución parcial
+   **o desde la última inyección**. Sin el cooldown después de inyectar, un paso grande frente al
+   mantenimiento (por ejemplo 1.000 USDT con un mantenimiento de 50) deja el ratio muy arriba del umbral de
+   devolución y el ciclo siguiente devolvía casi 400 USDT recién inyectados, justo antes de una posible segunda
+   caída. El motivo de la devolución parcial: en caídas largas la cuenta casi nunca queda sin posiciones (en la
+   simulación, en febrero quedaron 8.000 USDT prestados).
+   - **Histéresis**: se inyecta debajo de 8 y se devuelve desde 32. Como lo devuelto deja el ratio en 32 o
+     más, no vuelve a entrar enseguida (sin ping-pong); entre los dos umbrales no se mueve nada. La validación
+     exige solo que el de devolución sea mayor: con umbrales pegados (por ejemplo 8 y 8,01) hay ping-pong cada
+     10 min.
+   - **Por qué 32** (simulación de 1.350 corridas: 30 caminos × TWE 4/8/12 × tope 50 %/70 %/sin tope × umbral
+     de devolución 12/16/24/32/sin devolución; inyección debajo de 8, paso 1.000, reserva 10.000, apalancamiento
+     10):
+     - Ningún valor mejora la supervivencia. 32 es el único que no la empeora: con 12, 16 y 24, con TWE 8 y
+       tope 50 %, un camino que sobrevivía terminó en stop.
+     - Con 12 y 16 lo que limita la devolución es `maxWithdrawAmount` en el 82–98 % de las devoluciones: con
+       apalancamiento 10 el margen inicial es ~17–25 veces el de mantenimiento. Se devuelve todo lo retirable,
+       el margen libre queda en ~0 y las recompras de passivbot se rechazan por margen. Por eso 12 y 16 dan
+       resultados idénticos. Con otro apalancamiento ese rango se corre.
+     - Costo: aun con 32 el capital final baja (mediana pareada −253 y −299 USDT por camino con TWE 8, tope
+       70 % y sin tope; ningún camino mejora). Sin devolución parcial el préstamo sigue sirviendo de margen
+       para las recompras. La simulación no tenía el cooldown después de inyectar, que solo hace las
+       devoluciones más raras.
    - No cambia el dimensionamiento de passivbot: dimensiona sobre `wallet - préstamo` y devolver `r` baja
      las dos cosas. El préstamo publicado baja **solo** con la transferencia confirmada, igual que en la
      devolución total.
@@ -206,7 +239,8 @@ Sección **Rescate (colchón)** del menú lateral (`/rescate`, con login). Muest
 servicio, ratio margen/mantenimiento vs los umbrales de inyección y de devolución, posiciones, préstamo
 pendiente, USDT libre en spot, capital total vs base y límite del tope, la transferencia en vuelo, el motivo de bloqueo y los últimos
 eventos. Si hay un tope en confirmación, lo muestra con el capital del cruce, la última lectura y desde
-cuándo y hasta cuándo se ejecuta. Si hay un tope disparado, lo muestra con el resultado del Apagar y el
+cuándo se puede ejecutar (y aclara si el servicio no late y nadie la está evaluando). Si hay un tope
+disparado, lo muestra con el resultado del Apagar y el
 botón para reconocerlo.
 
 | Método | Ruta | Body | Efecto |
@@ -226,12 +260,12 @@ Validación estricta (400 si no se cumple): todos los campos presentes y ninguno
 | `reserva_max_usdt` | 10 – 1.000.000 | (obligatorio para habilitar) |
 | `paso_usdt` | 10 – 1.000.000 y ≤ reserva | 1000 |
 | `umbral_ratio` | 1,2 – 10 (Binance liquida en 1) | 8 |
-| `umbral_devolucion_ratio` | 2 – 100 y **mayor** que `umbral_ratio` | 16 |
+| `umbral_devolucion_ratio` | 2 – 100 y **mayor** que `umbral_ratio` | 32 |
 | `tope_perdida_pct` | 1 – 80 | (obligatorio para habilitar) |
 
 Los defaults solo se usan mientras no hay nada guardado: una config ya guardada conserva sus valores
 (por ejemplo, un umbral 3 guardado antes de que el default pasara a 8 sigue en 3 hasta cambiarlo en el panel).
-Una config guardada antes de `umbral_devolucion_ratio` toma 16 (siempre mayor que el umbral máximo de
+Una config guardada antes de `umbral_devolucion_ratio` toma 32 (siempre mayor que el umbral máximo de
 inyección). Una config guardada con `umbral_devolucion_ratio <= umbral_ratio` es inválida: rescate
 deshabilitado con el error en el panel. Una pestaña del panel abierta antes del deploy manda el body sin el
 campo nuevo y recibe 400: recargar la página.

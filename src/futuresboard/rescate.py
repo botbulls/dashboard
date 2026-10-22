@@ -18,12 +18,14 @@ Cómo funciona (ver ``docs/rescate.md``):
   ``min(préstamo, maxWithdrawAmount)``; si no alcanza, en partes en los ciclos siguientes.
 * **Devolución parcial con margen sano**: con préstamo y posiciones abiertas, si el ratio es
   ``>= umbral_devolucion_ratio`` (mayor que el de inyección: histéresis), devuelve lo que deja el ratio en ese
-  umbral (sin pasar del préstamo ni de ``maxWithdrawAmount``), con un mínimo por transferencia y un cooldown.
+  umbral (sin pasar del préstamo ni de ``maxWithdrawAmount``), con un mínimo por transferencia y un cooldown
+  (desde la última devolución parcial o inyección).
 * **Tope de pérdida total**: ``capital_total = equity de futuros + USDT libre en spot``. Al habilitar se
   fija una base; si ``capital_total <= base × (1 - tope%)`` el tope queda **en confirmación** (persistido,
   aviso por Telegram, sin inyectar). Se ejecuta la rutina de Apagar del panel (con el mismo lock) solo si
   una lectura separada al menos ``FUTURESBOARD_RESCATE_TOPE_CONFIRM_SECONDS`` (60 s) sigue en o debajo del
-  piso; si vuelve arriba se cancela. Sin lecturas, se ejecuta al cumplirse la espera máxima. Al ejecutarse,
+  piso; si vuelve arriba se cancela. Sin lectura de futuros no se ejecuta (Apagar no podría cerrar): decide la
+  próxima lectura, y tras un corte largo (o un cambio de modo) la confirmación arranca de cero. Al ejecutarse,
   START queda bloqueado hasta reconocerlo en el panel y se avisa por Telegram.
 * Binance no tiene idempotencia en ``/sapi/v1/asset/transfer``: ante un resultado ambiguo no se reintenta;
   se concilia con el historial (``GET /sapi/v1/asset/transfer``) y con la variación del saldo spot.
@@ -97,13 +99,22 @@ DEFAULT_LOAN_STATE = "/rescate/loan_state.json"
 # menos esto (filtra mechas de 1 minuto que rebotan enseguida). 0 = sin confirmación (Apagar inmediato).
 DEFAULT_TOPE_CONFIRM_S = 60
 MAX_TOPE_CONFIRM_S = 600
-# Espera máxima de una confirmación sin lecturas (futuros caídos, o spot caído sin un saldo spot leído antes):
-# al cumplirse se ejecuta con la última observación, que estaba en o debajo del piso.
+# Espera máxima de una confirmación sin observación con la API de futuros disponible (spot caído sin un saldo spot
+# leído antes): al cumplirse se ejecuta con la última observación, que estaba en o debajo del piso. Con futuros
+# caídos no aplica: Apagar no podría cerrar nada y se perdería el filtro de mechas (decide la próxima lectura).
 TOPE_ESPERA_MAX_FACTOR = 5
 TOPE_ESPERA_MAX_MIN_S = 300
+# Una confirmación se reinicia (la observación cuenta como un primer cruce nuevo) si pasó más que
+# ``confirmación + TOPE_HUECO_INTERVALOS × intervalo`` desde la observación anterior: sin lecturas en el medio no se
+# sabe si el capital se quedó debajo o rebotó y volvió a caer (servicio caído, futuros caídos).
+TOPE_HUECO_INTERVALOS = 2
+# Avisos de confirmación con el capital oscilando alrededor del piso: una confirmación que se abre antes de esto
+# desde la última cancelación no avisa por Telegram ni al abrirse ni al cancelarse (queda en los eventos). El disparo
+# y el resultado del Apagar se avisan siempre.
+TOPE_AVISO_SILENCIO_MS = 300_000
 
-# Devolución parcial con posiciones abiertas: mínimo por transferencia (USDT) y cooldown entre devoluciones
-# parciales (evita goteo de transferencias chicas).
+# Devolución parcial con posiciones abiertas: mínimo por transferencia (USDT) y cooldown desde la última devolución
+# parcial o inyección (evita goteo de transferencias chicas y devolver lo recién inyectado).
 DEFAULT_DEVOLUCION_MIN_USDT = 100
 MAX_DEVOLUCION_MIN_USDT = 1_000_000
 DEFAULT_DEVOLUCION_COOLDOWN_S = 600
@@ -128,9 +139,11 @@ LOAN_STATE_VERSION = 1
 CENT = Decimal("0.01")
 DEFAULT_PASO = Decimal("1000")
 DEFAULT_UMBRAL = Decimal("8")
-# Provisorio: el doble del de inyección. Tiene que ser mayor que el de inyección (histéresis): si no, lo que se
-# devuelve deja el ratio debajo del umbral de inyección y vuelve a entrar (ping-pong).
-DEFAULT_UMBRAL_DEVOLUCION = Decimal("16")
+# Tiene que ser mayor que el de inyección (histéresis): si no, lo que se devuelve deja el ratio debajo del umbral de
+# inyección y vuelve a entrar (ping-pong). 32 sale de la simulación (1.350 corridas, ver docs/rescate.md): es el único
+# valor que no empeora la supervivencia frente a no devolver; con 12, 16 y 24 lo que limita es maxWithdrawAmount
+# (IM/MM ≈ 17-25 con apalancamiento 10), se devuelve todo lo retirable y una corrida sobreviviente pasó a stop.
+DEFAULT_UMBRAL_DEVOLUCION = Decimal("32")
 # (mínimo, máximo) inclusivos. El umbral es la relación margen / mantenimiento: Binance liquida en 1.
 LIMITES: Dict[str, Tuple[Decimal, Decimal]] = {
     "reserva_max_usdt": (Decimal("10"), Decimal("1000000")),
@@ -473,6 +486,7 @@ def default_state() -> Dict[str, Any]:
         "ultimo": None,
         "tope": None,
         "tope_confirmacion": None,
+        "tope_cancelada_ms": None,
         "bloqueo": None,
         "servicio": None,
         "cooldown_ms": {},
@@ -974,10 +988,10 @@ class RescateService:
         except RescateError as exc:
             msg = (f"No se pudo leer la cuenta en Binance (futuros): {exc}. Hasta que vuelva la lectura el tope de "
                    "pérdida no se puede evaluar y no se hacen transferencias.")
-            msg += self._aviso_confirmacion_sin_lectura(state)
+            msg += self._aviso_confirmacion_sin_lectura(state, espera_maxima=False)
             state["ultimo"] = {"ts": now_iso(self.clock()), "error": msg}
             self._alert("lectura", msg)
-            self._tope_sin_lectura(state, cfg, now_ms, "futuros")
+            self._tope_sin_lectura(state, cfg, now_ms, "futuros", espera_maxima=False)
             return
         try:
             spot = self.binance.spot_usdt_free()
@@ -1011,7 +1025,13 @@ class RescateService:
                 self._devolver_parcial(state, cfg, snap, now_ms)
 
     def _tick_off(self, state: Dict[str, Any]) -> None:
-        """off: no opera. Solo evita que un préstamo SIMULADO quede achicando a passivbot para siempre."""
+        """off: no opera. Solo evita que un préstamo SIMULADO quede achicando a passivbot para siempre.
+
+        Una confirmación del tope en curso se cancela: en off no se evalúa, y el panel no puede mostrarla como si se
+        fuera a ejecutar."""
+        conf = self._confirmacion(state)
+        if conf is not None:
+            self._cancelar_confirmacion(state, conf, "el servicio está en modo off y no evalúa el tope.")
         if not self._primer_tick:
             return
         self._primer_tick = False
@@ -1062,10 +1082,10 @@ class RescateService:
         if spot_est is None:
             msg += ("sin un saldo spot leído antes, el tope de pérdida queda DESARMADO hasta que vuelva la "
                     "lectura de spot.")
-            msg += self._aviso_confirmacion_sin_lectura(state)
+            msg += self._aviso_confirmacion_sin_lectura(state, espera_maxima=True)
             state["ultimo"] = {"ts": now_iso(self.clock()), "error": msg}
             self._alert("lectura", msg)
-            self._tope_sin_lectura(state, cfg, now_ms, "spot, sin un saldo spot leído antes")
+            self._tope_sin_lectura(state, cfg, now_ms, "spot, sin un saldo spot leído antes", espera_maxima=True)
             return
         msg += (f"el tope de pérdida se evalúa con el último saldo spot leído ({money(spot_est)} USDT, del "
                 f"{ref.get('ts')}).")
@@ -1134,6 +1154,9 @@ class RescateService:
                     raise ValueError(key)
             if conf["max_ms"] < conf["confirmar_ms"]:
                 raise ValueError("max_ms")
+            observaciones = conf.get("observaciones", 0)
+            if isinstance(observaciones, bool) or not isinstance(observaciones, int) or observaciones < 0:
+                raise ValueError("observaciones")
             dec(conf.get("ultimo_capital"))
         except ValueError:
             state["tope_confirmacion"] = None
@@ -1144,12 +1167,34 @@ class RescateService:
             return None
         return conf
 
-    def _aviso_confirmacion_sin_lectura(self, state: Dict[str, Any]) -> str:
+    def _aviso_confirmacion_sin_lectura(self, state: Dict[str, Any], espera_maxima: bool) -> str:
         conf = state.get("tope_confirmacion")
         if not isinstance(conf, dict) or not conf.get("ejecuta_maximo_en"):
             return ""
+        if not espera_maxima:
+            return (f" Hay un tope en confirmación desde {conf.get('desde_en')}: sin lectura de futuros no se ejecuta "
+                    "Apagar (no podría cerrar en Binance). Decide la próxima lectura; si el corte es largo, la "
+                    "confirmación arranca de cero.")
         return (f" Hay un tope en confirmación desde {conf.get('desde_en')}: si la lectura no vuelve, se ejecuta "
                 f"Apagar a más tardar el {conf.get('ejecuta_maximo_en')}.")
+
+    def _confirmacion_vencida(self, state: Dict[str, Any], conf: Dict[str, Any], now_ms: int) -> Optional[str]:
+        """Motivo por el que una confirmación ya no puede confirmarse con esta observación (None = sigue vigente).
+
+        * Cambió el modo del tope (por ejemplo dry_run -> real): un Apagar real necesita su propio aviso
+          "EN CONFIRMACIÓN" real antes de ejecutarse.
+        * Hueco de lecturas mayor que ``confirmación + 2 × intervalo`` (servicio o futuros caídos): no se sabe si el
+          capital se quedó debajo o rebotó y volvió a caer (dos mechas no son "sigue debajo").
+        """
+        modo = self._modo_tope(state)
+        if conf.get("modo") != modo:
+            return f"cambió el modo del tope ({conf.get('modo')} -> {modo})."
+        hueco_ms = now_ms - conf["ultimo_ms"]
+        max_hueco_ms = conf["confirmar_ms"] + TOPE_HUECO_INTERVALOS * self.settings.interval * 1000
+        if hueco_ms > max_hueco_ms:
+            return (f"pasaron {hueco_ms // 1000} s sin observar el capital (más de {max_hueco_ms // 1000} s), no se "
+                    "sabe si se quedó debajo del límite.")
+        return None
 
     @staticmethod
     def _reanclar(conf: Dict[str, Any], now_ms: int) -> None:
@@ -1180,11 +1225,19 @@ class RescateService:
                 self._cancelar_confirmacion(state, conf, f"el capital volvió a {money(capital)} USDT, arriba del "
                                                          f"límite {money(limite)} USDT.{nota}")
             return
+        reinicio = ""
+        vencida = None if conf is None else self._confirmacion_vencida(state, conf, now_ms)
+        if conf is not None and vencida:
+            # La observación cuenta como un primer cruce nuevo (o un disparo inmediato si la confirmación está en 0).
+            reinicio = f" La confirmación abierta el {conf.get('desde_en')} arrancó de cero: {vencida}"
+            self._event(state, "tope", reinicio.strip(), conf.get("modo"))
+            state["tope_confirmacion"] = conf = None
         if conf is None:
             if self.settings.tope_confirm_seconds > 0:
-                self._iniciar_confirmacion(state, base_capital, pct, capital, limite, now_ms, nota)
+                self._iniciar_confirmacion(state, base_capital, pct, capital, limite, now_ms, nota + reinicio,
+                                           avisar=bool(reinicio))
                 return
-            detalle = ""
+            detalle = reinicio
         else:
             self._reanclar(conf, now_ms)
             conf.update(ultimo_ms=now_ms, ultimo_en=now_iso(now_ms / 1000), ultimo_capital=money(capital),
@@ -1197,10 +1250,15 @@ class RescateService:
         self._disparar_tope(state, base, pct, por_prestamo, capital, limite, now_ms, nota + detalle)
 
     def _iniciar_confirmacion(self, state: Dict[str, Any], base_capital: Decimal, pct: Decimal, capital: Decimal,
-                              limite: Decimal, now_ms: int, nota: str) -> None:
+                              limite: Decimal, now_ms: int, nota: str, avisar: bool = False) -> None:
+        """``avisar`` fuerza el aviso por Telegram (un reinicio siempre se avisa: puede ser el primer aviso real)."""
         confirm_s = self.settings.tope_confirm_seconds
         max_s = tope_espera_max_s(confirm_s)
         modo = self._modo_tope(state)
+        # El capital oscila alrededor del piso: sin Telegram para esta confirmación (ni al abrir ni al cancelar).
+        cancelada_ms = state.get("tope_cancelada_ms")
+        silenciosa = (not avisar and isinstance(cancelada_ms, int) and not isinstance(cancelada_ms, bool)
+                      and 0 <= now_ms - cancelada_ms < TOPE_AVISO_SILENCIO_MS)
         conf = {
             "id": secrets.token_hex(8),
             "modo": modo,
@@ -1218,27 +1276,40 @@ class RescateService:
             "ultimo_en": now_iso(now_ms / 1000),
             "ultimo_capital": money(capital),
             "observaciones": 1,
+            "silenciosa": silenciosa,
         }
         state["tope_confirmacion"] = conf
         texto = (f"Tope de pérdida EN CONFIRMACIÓN: capital {money(capital)} USDT <= límite {money(limite)} "
                  f"(base {money(base_capital)}, tope {conf['pct']}%). Se ejecuta Apagar si una lectura desde "
                  f"{conf['ejecuta_desde_en']} ({confirm_s} s) sigue en o debajo del límite; si vuelve arriba, se "
-                 f"cancela. Sin lecturas, se ejecuta a más tardar el {conf['ejecuta_maximo_en']}. Mientras tanto "
-                 f"no se inyecta.{nota}")
+                 f"cancela. Si se corta la lectura de futuros, decide la próxima (tras un corte largo, la confirmación "
+                 f"arranca de cero). Mientras tanto no se inyecta.{nota}")
+        if silenciosa:
+            texto += (" Sin aviso por Telegram: el capital oscila alrededor del límite (se avisa si se ejecuta "
+                      "Apagar).")
         self._event(state, "tope", texto, modo)
         save_state(self.data_dir, state)  # sobrevive a un reinicio
-        self._notify(f"⏳ <b>Rescate</b>: {esc(texto)}", modo == MODE_DRY_RUN)
+        if not silenciosa:
+            self._notify(f"⏳ <b>Rescate</b>: {esc(texto)}", modo == MODE_DRY_RUN)
 
     def _cancelar_confirmacion(self, state: Dict[str, Any], conf: Dict[str, Any], motivo: str) -> None:
         state["tope_confirmacion"] = None
+        state["tope_cancelada_ms"] = self._now_ms()
         texto = f"Confirmación del tope cancelada (primer cruce {conf.get('desde_en')}): {motivo} No se ejecutó Apagar."
         modo = conf.get("modo") if conf.get("modo") in (MODE_REAL, MODE_DRY_RUN) else self._modo_tope(state)
         self._event(state, "tope", texto, modo)
-        self._notify(f"✅ <b>Rescate</b>: {esc(texto)}", modo == MODE_DRY_RUN)
+        if conf.get("silenciosa") is not True:
+            self._notify(f"✅ <b>Rescate</b>: {esc(texto)}", modo == MODE_DRY_RUN)
 
-    def _tope_sin_lectura(self, state: Dict[str, Any], cfg: Dict[str, Any], now_ms: int, motivo: str) -> None:
-        """Ciclo sin observación del capital. Una confirmación en curso no se confirma ni se cancela, salvo que se
-        cumpla la espera máxima: ahí se ejecuta con la última observación (que estaba en o debajo del piso)."""
+    def _tope_sin_lectura(self, state: Dict[str, Any], cfg: Dict[str, Any], now_ms: int, motivo: str,
+                          espera_maxima: bool) -> None:
+        """Ciclo sin observación del capital. Una confirmación en curso no se confirma ni se cancela.
+
+        Con ``espera_maxima`` (spot caído sin un saldo spot leído antes: futuros responde y Apagar puede cerrar) se
+        ejecuta al cumplirse la espera máxima con la última observación (que estaba en o debajo del piso). Sin él
+        (futuros caídos) no se ejecuta nunca a ciegas: Apagar detendría passivbot sin poder cerrar, gastaría los
+        reintentos durante la caída y se perdería el filtro de mechas. Decide la próxima lectura.
+        """
         if tope_activo(state, cfg) is not None:
             return
         conf = self._confirmacion(state)
@@ -1249,6 +1320,8 @@ class RescateService:
             self._cancelar_confirmacion(state, conf, "el tope de pérdida quedó desarmado.")
             return
         self._reanclar(conf, now_ms)
+        if not espera_maxima or conf.get("modo") != self._modo_tope(state):
+            return  # un cambio de modo necesita una observación (reinicia la confirmación con su aviso)
         if now_ms - conf["desde_ms"] < conf["max_ms"]:
             return
         base, pct, por_prestamo = armado
@@ -1405,8 +1478,9 @@ class RescateService:
         """Con préstamo y posiciones abiertas, devuelve parte si el margen está sano.
 
         ``r = min(préstamo, maxWithdrawAmount, margen - umbral_devolucion × mantenimiento)``: después de devolver el
-        ratio queda en el umbral de devolución o arriba. Solo si ``r >= mínimo`` y pasó el cooldown entre
-        devoluciones parciales. Como cualquier devolución, el préstamo baja recién con la transferencia confirmada.
+        ratio queda en el umbral de devolución o arriba. Solo si ``r >= mínimo`` y pasó el cooldown desde la última
+        devolución parcial o inyección. Como cualquier devolución, el préstamo baja recién con la transferencia
+        confirmada.
         passivbot dimensiona sobre ``wallet - préstamo``: devolver ``r`` baja los dos y no cambia el dimensionamiento.
         """
         loan = get_loan(state, self.mode)
@@ -1525,6 +1599,10 @@ class RescateService:
         if tipo == TIPO_INYECCION:
             if ok:
                 self._aplicar_prestamo(state, entry)
+                # Un paso grande frente al mantenimiento deja el ratio arriba del umbral de devolución: sin esto se
+                # devolvería en el ciclo siguiente el margen recién inyectado (justo antes de una segunda caída).
+                self._set_cooldown(state, COOLDOWN_PARCIAL,
+                                   self._now_ms() + self.settings.devolucion_cooldown_seconds * 1000)
             else:
                 self._revertir_prestamo(state, entry)
         elif ok:
@@ -1700,6 +1778,10 @@ def panel_status(data_dir: pathlib.Path, now: Optional[float] = None) -> Dict[st
         except (TypeError, ValueError):
             vivo = False
     loan, loan_mode = loan_publicado(state, modo)
+    confirmacion = state.get("tope_confirmacion") if isinstance(state.get("tope_confirmacion"), dict) else None
+    if confirmacion is not None:
+        # Sin latido (o en off) nadie la evalúa: el panel no puede decir que se va a ejecutar.
+        confirmacion = {**confirmacion, "evaluandose": vivo and modo in (MODE_DRY_RUN, MODE_REAL)}
     base_vigente, limite, tope_pct, por_prestamo = None, None, None, False
     try:
         armado = tope_armado(state, cfg)
@@ -1726,8 +1808,7 @@ def panel_status(data_dir: pathlib.Path, now: Optional[float] = None) -> Dict[st
         "tope_pct": tope_pct,
         "tope_por_prestamo": por_prestamo,
         "tope": tope_activo(state, cfg),
-        "tope_confirmacion": (state.get("tope_confirmacion")
-                              if isinstance(state.get("tope_confirmacion"), dict) else None),
+        "tope_confirmacion": confirmacion,
         "start_bloqueado": start_bloqueado(data_dir),
         "en_vuelo": state.get("en_vuelo"),
         "eventos": list(reversed(state["eventos"][-20:])),

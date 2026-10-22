@@ -1278,19 +1278,16 @@ def test_tope_confirmacion_sobrevive_reinicio(h, rebota):
         assert h.apagados == [1] and st["tope"]["capital"] == "19500.00"
 
 
-@pytest.mark.parametrize("caida", ["futuros", "spot_sin_referencia"])
-def test_tope_confirmacion_espera_maxima_sin_lecturas(h, caida):
+def test_tope_confirmacion_espera_maxima_sin_lecturas(h):
+    """Spot caído sin un saldo spot leído antes: futuros responde (Apagar puede cerrar) => espera máxima."""
     svc = _base_sin_prestamo(h)
     _cruzar(h, svc)
     conf = h.state()["tope_confirmacion"]
     assert conf["max_ms"] == rescate.tope_espera_max_s(rescate.DEFAULT_TOPE_CONFIRM_S) * 1000 == 300_000
-    if caida == "futuros":
-        h.fake.read_fail.add("/fapi/v2/account")
-    else:
-        h.fake.read_fail.add("/api/v3/account")
-        st = h.state()
-        st["spot_ref"] = None
-        rescate.save_state(h.data_dir, st)
+    h.fake.read_fail.add("/api/v3/account")
+    st = h.state()
+    st["spot_ref"] = None
+    rescate.save_state(h.data_dir, st)
     for _ in range(19):  # 285 s sin poder observar: no se confirma ni se cancela
         h.avanzar(15)
         svc.tick()
@@ -1302,6 +1299,41 @@ def test_tope_confirmacion_espera_maxima_sin_lecturas(h, caida):
     st = h.state()
     assert h.apagados == [1] and st["tope_confirmacion"] is None and st["tope"]["capital"] == "19500.00"
     assert "espera máxima" in next(t for t in h.sent if "TOPE DE PÉRDIDA" in t)
+
+
+@pytest.mark.parametrize("al_volver", ["arriba", "debajo"])
+def test_tope_confirmacion_con_futuros_caidos_no_dispara_a_ciegas(h, al_volver):
+    """Revisión: con futuros caídos la espera máxima disparaba Apagar con la última observación; docker stop
+    funcionaba, el cierre fallaba y los 3 intentos se gastaban durante la caída (posiciones abiertas, bot parado)."""
+    svc = _base_sin_prestamo(h)
+    _cruzar(h, svc)  # primer cruce: 19500 <= 19800
+    h.fake.read_fail.add("/fapi/v2/account")
+    h.apagar_result = ("error", {"ok": False, "error": "Binance caído (el cierre falló)"})
+    for _ in range(60):  # 15 min sin futuros: ni se confirma, ni se cancela, ni se ejecuta a ciegas
+        h.avanzar(15)
+        svc.tick()
+    st = h.state()
+    assert h.apagados == [] and st["tope"] is None and st["tope_confirmacion"] is not None
+    aviso = next(t for t in h.sent if "No se pudo leer la cuenta" in t)
+    assert "sin lectura de futuros no se ejecuta Apagar" in aviso and "a más tardar" not in aviso
+    h.fake.read_fail.clear()
+    h.apagar_result = ("ok", {"ok": True})
+    if al_volver == "arriba":  # el mercado volvió: decide la lectura real
+        h.fake.margin = Decimal("2000")
+        h.avanzar(15)
+        svc.tick()
+        st = h.state()
+        assert h.apagados == [] and st["tope"] is None and st["tope_confirmacion"] is None
+        assert any("cancelada" in t for t in h.sent)
+        return
+    h.fake.margin = Decimal("-600")  # sigue debajo: tras el corte, la lectura es un primer cruce nuevo
+    h.avanzar(15)
+    svc.tick()
+    st = h.state()
+    assert h.apagados == [] and st["tope_confirmacion"]["capital"] == "19400.00"
+    assert "arrancó de cero" in [t for t in h.sent if "EN CONFIRMACIÓN" in t][-1]
+    confirmar_tope(h, svc)
+    assert h.apagados == [1] and h.state()["tope"]["apagar"]["resultado"] == "ok"
 
 
 def test_tope_confirmacion_con_spot_caido_cancela_con_el_ultimo_spot(h):
@@ -1386,6 +1418,111 @@ def test_tope_confirmacion_en_dry_run_es_simulada(h):
     confirmar_tope(h, svc)
     assert h.apagados == [] and h.state()["tope"]["apagar"]["resultado"] == "simulado"
     assert all(t.startswith("🧪") for t in h.sent)
+
+
+def test_tope_confirmacion_simulada_no_confirma_un_apagar_real(h):
+    """Revisión: cruce en dry_run y reinicio en real dentro de la ventana => el primer tick ejecutaba Apagar real
+    sin que hubiera llegado nunca un aviso real de EN CONFIRMACIÓN."""
+    h.configurar(tope=10)
+    h.fake.maint = Decimal("100")
+    svc = h.service(mode="dry_run")
+    svc.tick()
+    _cruzar(h, svc)
+    assert h.state()["tope_confirmacion"]["modo"] == "dry_run"
+    n = len(h.sent)
+    h.avanzar(61)
+    real = h.service(mode="real")
+    real.tick()  # sigue debajo: la observación es un primer cruce nuevo, ahora real
+    st = h.state()
+    assert h.apagados == [] and st["tope"] is None and st["tope_confirmacion"]["modo"] == "real"
+    aviso = next(t for t in h.sent[n:] if "EN CONFIRMACIÓN" in t)
+    assert not aviso.startswith("🧪") and "cambió el modo del tope (dry_run -&gt; real)" in aviso
+    confirmar_tope(h, real)
+    assert h.apagados == [1] and h.state()["tope"]["modo"] == "real"
+
+
+@pytest.mark.parametrize("confirm", ["60", "0"])
+def test_tope_confirmacion_tras_un_hueco_largo_arranca_de_cero(h, confirm):
+    """Revisión: mecha, rebote con el servicio caído y otra mecha al volver a los 5 min => Apagar con una sola
+    lectura nueva (el filtro de mechas se perdía)."""
+    svc = _base_sin_prestamo(h)
+    _cruzar(h, svc)  # mecha 1
+    h.avanzar(300)  # servicio caído: el rebote no se vio
+    nuevo = h.service(env={rescate.ENV_TOPE_CONFIRM: confirm})
+    nuevo.tick()  # primera lectura al volver: otra mecha
+    if confirm == "0":  # sin confirmación, el reinicio dispara en el momento (como cualquier primer cruce)
+        assert h.apagados == [1] and "arrancó de cero" in next(t for t in h.sent if "TOPE DE PÉRDIDA" in t)
+        return
+    st = h.state()
+    assert h.apagados == [] and st["tope_confirmacion"]["desde_ms"] == int(h.clock.t * 1000)
+    assert "300 s sin observar el capital" in [t for t in h.sent if "EN CONFIRMACIÓN" in t][-1]
+    h.fake.margin = Decimal("2000")  # la mecha rebota
+    h.avanzar(15)
+    nuevo.tick()
+    assert h.apagados == [] and h.state()["tope_confirmacion"] is None
+
+
+def test_tope_confirmacion_se_cancela_en_off(h):
+    """Revisión: en off no se evalúa, pero la confirmación quedaba y el panel seguía prometiendo ejecutarla."""
+    svc = _base_sin_prestamo(h)
+    _cruzar(h, svc)
+    h.avanzar(15)
+    h.service(mode="off").tick()
+    assert h.state()["tope_confirmacion"] is None and h.apagados == []
+    assert any("cancelada" in t and "modo off" in t for t in h.sent)
+    assert rescate.panel_status(h.data_dir, now=h.clock.t)["tope_confirmacion"] is None
+
+
+def test_panel_marca_la_confirmacion_sin_evaluar_si_el_servicio_no_late(h):
+    svc = _base_sin_prestamo(h)
+    _cruzar(h, svc)
+    assert rescate.panel_status(h.data_dir, now=h.clock.t)["tope_confirmacion"]["evaluandose"] is True
+    h.avanzar(600)  # sin latido: nadie la evalúa y no se va a ejecutar a la hora que dice
+    assert rescate.panel_status(h.data_dir, now=h.clock.t)["tope_confirmacion"]["evaluandose"] is False
+
+
+def test_tope_confirmacion_con_observaciones_corruptas_no_frena_el_tope(h):
+    """Revisión: con "observaciones": "x" en disco, int() tiraba ValueError en cada ciclo y el tope no se evaluaba
+    nunca más (solo quedaba el error en el log)."""
+    svc = _base_sin_prestamo(h)
+    _cruzar(h, svc)
+    st = h.state()
+    st["tope_confirmacion"]["observaciones"] = "x"  # el resto vigente (mismo modo, sin hueco): llega a contarla
+    rescate.save_state(h.data_dir, st)
+    h.avanzar(15)
+    assert svc.tick() == {"ok": True}
+    assert any("inválida" in t for t in h.sent)
+    conf = h.state()["tope_confirmacion"]
+    assert conf["observaciones"] == 1 and conf["desde_ms"] == int(h.clock.t * 1000)  # se abrió una nueva
+    confirmar_tope(h, svc)
+    assert h.apagados == [1]
+
+
+def test_tope_oscilando_alrededor_del_piso_no_llena_telegram(h):
+    """Revisión: con el capital oscilando alrededor del piso llegaban dos avisos cada ~30 s."""
+    svc = _base_sin_prestamo(h)
+    for _ in range(6):  # cruza y rebota cada 15 s durante 3 min
+        _cruzar(h, svc)
+        h.fake.margin = Decimal("2000")
+        h.avanzar(15)
+        svc.tick()
+
+    def avisos():
+        return [t for t in h.sent if "EN CONFIRMACIÓN" in t or "Confirmación del tope cancelada" in t]
+
+    assert len(avisos()) == 2  # el primer episodio (apertura y cancelación); el resto queda en los eventos
+    eventos = [e["texto"] for e in h.state()["eventos"]]
+    assert sum("EN CONFIRMACIÓN" in e for e in eventos) == 6 and sum("cancelada" in e for e in eventos) == 6
+    h.avanzar(300)
+    _cruzar(h, svc)  # 5 min sin cancelaciones: episodio nuevo, se avisa
+    h.fake.margin = Decimal("2000")
+    h.avanzar(15)
+    svc.tick()
+    assert len(avisos()) == 4
+    _cruzar(h, svc)  # oscila otra vez: sin aviso de apertura...
+    confirmar_tope(h, svc)  # ...pero el disparo se avisa siempre
+    assert len(avisos()) == 4 and h.apagados == [1]
+    assert "Confirmado: 61 s" in next(t for t in h.sent if "TOPE DE PÉRDIDA" in t)
 
 
 def test_panel_muestra_tope_en_confirmacion(app, client, fake, loan_path):  # noqa: F811
@@ -1536,14 +1673,42 @@ def test_histeresis_inyeccion_devolucion_sin_ping_pong(h):
         h.avanzar(15)
         svc.tick()
     assert len(h.fake.posts()) == 1 and h.state()["prestamo"]["real"] == "1000.00"
-    h.fake.margin = Decimal("17000")  # sube el precio: ratio 17 >= 16
-    h.avanzar(15)
+    h.fake.margin = Decimal("17000")  # sube el precio: ratio 17 >= 16 (pasado el cooldown desde la inyección)
+    h.avanzar(rescate.DEFAULT_DEVOLUCION_COOLDOWN_S)
     svc.tick()
     assert _devoluciones(h) == ["1000.00"] and h.state()["prestamo"]["real"] == "0.00"
     for _ in range(5):  # ratio 16 después de devolver: lejos del umbral de inyección
         h.avanzar(15)
         svc.tick()
     assert [p["type"] for p in h.fake.posts()] == ["MAIN_UMFUTURE", "UMFUTURE_MAIN"]
+
+
+class FakeConIM(FakeRescateBinance):
+    """maxWithdrawAmount realista: margen - margen inicial, con IM = 20 × mantenimiento (apalancamiento 10)."""
+
+    def request(self, method, url, headers=None, timeout=None, **kwargs):
+        self.max_withdraw = max(Decimal(0), self.margin - 20 * self.maint)
+        return super().request(method, url, headers, timeout, **kwargs)
+
+
+@pytest.mark.parametrize("umbral_dev,maint,devuelve", [(16, "50", "395.00"), (32, "25", "397.50")])
+def test_no_devuelve_lo_recien_inyectado(h, umbral_dev, maint, devuelve):
+    """Revisión: ratio 7,9 -> inyecta 1000 -> el ciclo siguiente (15 s) devolvía casi 400 (con 16 y con 32)."""
+    h.fake = fake = FakeConIM()
+    fake.now_ms = int(h.clock.t * 1000)
+    h.configurar(tope=80, devolucion=umbral_dev)
+    fake.maint = Decimal(maint)
+    fake.margin = fake.maint * Decimal("7.9")
+    svc = h.service()
+    svc.tick()  # base y ratio 7,9 < 8: inyecta 1000
+    assert [p["type"] for p in fake.posts()] == ["MAIN_UMFUTURE"]
+    for _ in range(39):  # 585 s: el ratio está sano, pero es el margen recién inyectado
+        h.avanzar(15)
+        svc.tick()
+    assert _devoluciones(h) == []
+    h.avanzar(15)  # 600 s desde la inyección: si sigue sano, devuelve
+    svc.tick()
+    assert _devoluciones(h) == [devuelve]
 
 
 def test_devolucion_parcial_sigue_con_rescate_deshabilitado(h):
@@ -1591,17 +1756,19 @@ def test_config_guardada_con_umbral_de_devolucion_invalido_deshabilita(data_dir)
     (data_dir / rescate.CONFIG_FILE_NAME).write_text(json.dumps(cfg))
     loaded, err = rescate.load_config(data_dir)
     assert loaded["habilitado"] is False and "mayor que el de inyección" in err
-    # Una config anterior a este campo toma el default (16), que siempre es mayor que el umbral máximo (10).
+    # Una config anterior a este campo toma el default (32), que siempre es mayor que el umbral máximo (10).
     del cfg["umbral_devolucion_ratio"]
     cfg["umbral_ratio"] = "10"
     (data_dir / rescate.CONFIG_FILE_NAME).write_text(json.dumps(cfg))
     loaded, err = rescate.load_config(data_dir)
-    assert err is None and loaded["habilitado"] is True and loaded["umbral_devolucion_ratio"] == "16"
+    assert err is None and loaded["habilitado"] is True and loaded["umbral_devolucion_ratio"] == "32"
 
 
 def test_panel_umbral_de_devolucion(app, client):  # noqa: F811
+    # Default 32 por la simulación (ver docs/rescate.md): 16 no deja margen libre (lo limita maxWithdrawAmount).
+    assert rescate.DEFAULT_UMBRAL_DEVOLUCION == Decimal("32") > rescate.LIMITES["umbral_ratio"][1]
     status = client.get("/api/rescate/status").get_json()
-    assert status["config"]["umbral_devolucion_ratio"] == "16"
+    assert status["config"]["umbral_devolucion_ratio"] == "32"
     assert status["limites"]["umbral_devolucion_ratio"] == ["2", "100"]
     ok = _post_raw(client, "/api/rescate/config", json.dumps(_cfg_body(umbral_devolucion_ratio=20.5)))
     assert ok.status_code == 200 and ok.get_json()["status"]["config"]["umbral_devolucion_ratio"] == "20.5"
