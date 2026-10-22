@@ -552,6 +552,17 @@ def loan_publicado(state: Dict[str, Any], mode: Optional[str]) -> Tuple[Decimal,
     return get_loan(state, MODE_REAL), MODE_REAL
 
 
+def prestamo_snapshot(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Préstamo real y transferencia en vuelo en un momento dado (copia).
+
+    C3 la toma junto con la lectura de futuros: si una inyección se aplica y se confirma más tarde en el mismo
+    ciclo, el préstamo nuevo con el ``totalMarginBalance`` viejo daría un capital ``paso`` USDT más bajo.
+    """
+    en_vuelo = state.get("en_vuelo")
+    return {"prestamo_real": get_loan(state, MODE_REAL),
+            "en_vuelo": dict(en_vuelo) if isinstance(en_vuelo, dict) else None}
+
+
 def tope_activo(state: Dict[str, Any], cfg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     tope = state.get("tope")
     if isinstance(tope, dict) and tope.get("id") and tope.get("id") != cfg.get("tope_reconocido"):
@@ -835,6 +846,7 @@ class RescateService:
         self.c3 = c3
         self._fut_ciclo: Optional[Dict[str, Any]] = None
         self._fut_error: Optional[str] = None
+        self._fut_prestamo: Optional[Dict[str, Any]] = None  # préstamo real al momento de la lectura
         self._fut_leido = False
 
     # -- utilidades -------------------------------------------------------------------
@@ -946,7 +958,7 @@ class RescateService:
                 self._alert("config", cfg_err)
             else:
                 self._clear("config")
-            self._fut_ciclo, self._fut_error, self._fut_leido = None, None, False
+            self._fut_ciclo, self._fut_error, self._fut_prestamo, self._fut_leido = None, None, None, False
             error_rescate: Optional[BaseException] = None
             try:
                 self._tick(state, cfg)
@@ -969,10 +981,11 @@ class RescateService:
                 # El rescate no leyó futuros este ciclo (off, o cortó antes): C3 lee por su cuenta.
                 try:
                     self._fut_ciclo = self.binance.futures_account()
+                    self._fut_prestamo = prestamo_snapshot(state)
                 except RescateError as exc:
                     self._fut_error = f"No se pudo leer la cuenta en Binance (futuros): {exc}"
                 self._fut_leido = True
-            self.c3.step(state, self._fut_ciclo, self._fut_error, cfg)
+            self.c3.step(state, self._fut_ciclo, self._fut_error, cfg, prestamo=self._fut_prestamo)
         except Exception as exc:  # defensivo: sin latido, passivbot deja de abrir entradas (C3 en real)
             log.exception("Paso de C3 con error (%s): no se escribe el latido.", exc.__class__.__name__)
             self._alert("c3", f"C3 con error ({exc.__class__.__name__}): no se escribe el latido.")
@@ -1027,7 +1040,7 @@ class RescateService:
             self._alert("lectura", msg)
             self._tope_sin_lectura(state, cfg, now_ms, "futuros", espera_maxima=False)
             return
-        self._fut_leido, self._fut_ciclo = True, fut
+        self._fut_leido, self._fut_ciclo, self._fut_prestamo = True, fut, prestamo_snapshot(state)
         try:
             spot = self.binance.spot_usdt_free()
         except RescateError as exc:
@@ -1892,13 +1905,17 @@ def build_service(settings: RescateSettings, config: Any) -> RescateService:
             start_c3 = c3.make_start(data_dir, bot_settings)
             docker = bot_control.DockerClient(bot_settings.docker_url)
 
-            def contenedor() -> Optional[bool]:
+            def _passivbot_corriendo() -> Optional[bool]:
                 return bool(docker.inspect(bot_settings.container)["running"])
+
+            contenedor = _passivbot_corriendo
         except bot_control.BotControlError as exc:
             log.error("Apagar no disponible: %s", exc)
     if bot_settings.forager_config is not None:
-        def forager() -> Dict[str, Any]:
+        def _leer_forager() -> Dict[str, Any]:
             return bot_control.read_forager_config(bot_settings.require_config())
+
+        forager = _leer_forager
     try:
         # Velas públicas para el índice de rebote de C3 (en testnet, las de Demo, como el resto del dashboard).
         publico = (config.API_BASE_URL or "") if testnet else BINANCE_FUTURES_MAINNET_URL

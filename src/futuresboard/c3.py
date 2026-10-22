@@ -336,15 +336,16 @@ def write_heartbeat(path: pathlib.Path, c3_mode: str, parado: bool, ts: float) -
 # --------------------------------------------------------------------------------------
 
 
-def capital_futuros(state: Dict[str, Any], fut: Dict[str, Any]) -> Tuple[Decimal, Decimal, Decimal]:
+def capital_futuros(prestamo: Dict[str, Any], fut: Dict[str, Any]) -> Tuple[Decimal, Decimal, Decimal]:
     """(capital, préstamo real, monto en vuelo) que mira C3.
 
-    ``totalMarginBalance - préstamo real + monto de una transferencia real en vuelo``. Con una transferencia en
-    vuelo no se sabe si ya llegó: se toma la hipótesis con más capital (inyección no llegada / devolución ya
-    salida), que nunca corta de más; a lo sumo protege ``monto`` menos mientras dura.
+    ``totalMarginBalance - préstamo real + monto de una transferencia real en vuelo``. ``prestamo`` es
+    ``rescate.prestamo_snapshot`` tomado junto con la lectura de futuros (no al final del ciclo). Con una
+    transferencia en vuelo no se sabe si ya llegó: se toma la hipótesis con más capital (inyección no llegada /
+    devolución ya salida), que nunca corta de más; a lo sumo protege ``monto`` menos mientras dura.
     """
-    loan = rescate.get_loan(state, MODE_REAL)
-    en_vuelo = state.get("en_vuelo")
+    loan = prestamo["prestamo_real"]
+    en_vuelo = prestamo.get("en_vuelo")
     extra = Decimal(0)
     if isinstance(en_vuelo, dict) and en_vuelo.get("modo") == MODE_REAL:
         try:
@@ -463,8 +464,9 @@ class C3Watcher:
 
     # -- ciclo ------------------------------------------------------------------------
     def step(self, state: Dict[str, Any], fut: Optional[Dict[str, Any]], lectura_error: Optional[str],
-             rescate_cfg: Dict[str, Any]) -> None:
-        """Un paso. ``fut`` es la lectura de futuros del ciclo (None si falló, con ``lectura_error``)."""
+             rescate_cfg: Dict[str, Any], prestamo: Optional[Dict[str, Any]] = None) -> None:
+        """Un paso. ``fut`` es la lectura de futuros del ciclo (None si falló, con ``lectura_error``) y
+        ``prestamo`` el préstamo del rescate tomado junto con esa lectura (``rescate.prestamo_snapshot``)."""
         now_ms = self._now_ms()
         c3, err = get_state(state)
         if err:
@@ -508,7 +510,7 @@ class C3Watcher:
 
         capital: Optional[Decimal] = None
         if fut is not None:
-            capital, loan, extra = capital_futuros(state, fut)
+            capital, loan, extra = capital_futuros(prestamo or rescate.prestamo_snapshot(state), fut)
             c3["ultimo"] = {"ts": now_iso(self.clock()), "error": None, "capital": money(capital),
                             "margin_balance": money(fut["margin_balance"]), "prestamo_real": money(loan),
                             "en_vuelo": money(extra), "posiciones": fut.get("posiciones")}
@@ -873,14 +875,15 @@ class C3Watcher:
         al_corte = corte.get("config_al_corte") if isinstance(corte.get("config_al_corte"), dict) else None
         try:
             actual = self._resumen_forager(self._forager()) if self._forager else None
-        except Exception as exc:  # noqa: BLE001 - cualquier error de lectura => sin plan
+        except Exception as exc:  # noqa: BLE001 - un error de lectura puede ser pasajero: se reintenta
             actual = None
             if not simulado:
-                return {"error": f"no se pudo leer la config de forager ({exc.__class__.__name__})."}
+                return {"error": f"no se pudo leer la config de forager ({exc.__class__.__name__}).",
+                        "transitorio": True}
         if actual is None:
             if simulado:
                 return {"descripcion": "la config de forager tal como quedó (sin leerla: modo dry_run)"}
-            return {"error": "no se pudo leer la config de forager."}
+            return {"error": "no se pudo leer la config de forager (falta FUTURESBOARD_FORAGER_CONFIG)."}
         if al_corte and (str(al_corte.get("twe_long")) != str(actual.get("twe_long"))
                          or str(al_corte.get("twe_short")) != str(actual.get("twe_short"))):
             return {"error": (f"la config de forager cambió desde el corte (twe {al_corte.get('twe_long')}/"
@@ -905,7 +908,7 @@ class C3Watcher:
             if now_ms - int(rein.get("ultimo_ms") or 0) < REINTENTO_MS:
                 return
         plan = self._plan_start(corte)
-        if plan.get("error"):
+        if plan.get("error") and not plan.get("transitorio"):
             texto = f"Sin reinicio automático: {plan['error']} Queda parado esperando acción manual."
             corte.update(auto=False, motivo_manual=plan["error"])
             self._historial(c3, "reinicio_fallido", texto, MODE_REAL)
@@ -913,10 +916,12 @@ class C3Watcher:
             self._notify(f"⚠️ <b>C3</b>: {esc(texto)}")
             return
         rein.update(intentos=intentos + 1, ultimo_ms=now_ms, resultado="pendiente",
-                    detalle=f"START con {plan['descripcion']} en curso.")
+                    detalle=f"START con {plan.get('descripcion')} en curso.")
         self._guardar(state)
         self._latir(c3, self.mode)  # el lock puede tardar: que passivbot no vea el latido viejo
-        if self._start is None:
+        if plan.get("transitorio"):
+            outcome, payload = "error", {"ok": False, "error": plan["error"]}
+        elif self._start is None:
             outcome, payload = "error", {"ok": False, "error": "START no disponible (falta FUTURESBOARD_DOCKER_URL)."}
         else:
             try:
@@ -1018,6 +1023,14 @@ class C3Watcher:
         rebote = dec(cfg["rebote_pct"]) / 100
         minimo = dec(idx.get("min") or "1")
         open_ms = proxima
+        ultimas = [max(closes[s]) for s in pares if closes[s]]
+        faltan = sorted(s for s in pares if proxima not in closes[s])
+        if faltan and ultimas and max(ultimas) > proxima:
+            self._alert("indice_hueco", f"Falta la vela de 1 h de {_ms_iso(proxima)} de {', '.join(faltan)} (otros "
+                                        "pares ya tienen velas posteriores): el índice no avanza hasta que aparezca.",
+                        corte.get("modo") == MODE_DRY_RUN)
+        elif not faltan:
+            self._clear("indice_hueco")
         while all(open_ms in closes[s] for s in pares):
             valor = sum((closes[s][open_ms] / ref_dec[s] for s in pares), Decimal(0)) / len(pares)
             idx.update(ultimo_open_ms=open_ms, actual=_ratio_txt(valor), actual_en=_ms_iso(open_ms + MS_HORA),

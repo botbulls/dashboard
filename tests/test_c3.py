@@ -54,6 +54,8 @@ class C3Harness:
         self.precio = {s: (lambda t: Decimal(100)) for s in PARES}  # precio(t_ms) por par
         self.klines_calls = []
         self.klines_fail = False
+        self.klines_sin = set()  # pares sin velas de 1 h (hueco en Binance)
+        self.forager_fallas = 0
 
     # -- dobles -----------------------------------------------------------------------
     @property
@@ -80,6 +82,9 @@ class C3Harness:
         return self.running
 
     def forager(self):
+        if self.forager_fallas:
+            self.forager_fallas -= 1
+            raise OSError("config de forager a medio escribir")
         return dict(self.forager_cfg)
 
     def klines(self, symbol, interval, start_ms, limit):
@@ -87,6 +92,8 @@ class C3Harness:
         if self.klines_fail:
             raise bot_control.BinanceError("Binance respondió 502 en GET /fapi/v1/klines: None")
         paso = {"1m": 60_000, "1h": H}[interval]
+        if interval == "1h" and symbol in self.klines_sin:
+            return []
         now_ms = int(self.clock.t * 1000)
         rows, o = [], start_ms
         while len(rows) < limit and o <= now_ms:  # como Binance: incluye la vela abierta
@@ -259,11 +266,30 @@ def test_capital_descuenta_el_prestamo_real_y_suma_lo_que_esta_en_vuelo():
     state = rescate.default_state()
     rescate.set_loan(state, "real", Decimal("1000"))
     fut = {"margin_balance": Decimal("9000")}
-    assert c3.capital_futuros(state, fut)[0] == Decimal("8000")
+    assert c3.capital_futuros(rescate.prestamo_snapshot(state), fut)[0] == Decimal("8000")
     state["en_vuelo"] = {"modo": "real", "tipo": "devolucion", "monto": "500.00"}
-    assert c3.capital_futuros(state, fut)[0] == Decimal("8500")
+    assert c3.capital_futuros(rescate.prestamo_snapshot(state), fut)[0] == Decimal("8500")
     state["en_vuelo"] = {"modo": "dry_run", "tipo": "inyeccion", "monto": "500.00"}
-    assert c3.capital_futuros(state, fut)[0] == Decimal("8000")
+    assert c3.capital_futuros(rescate.prestamo_snapshot(state), fut)[0] == Decimal("8000")
+
+
+def test_inyeccion_confirmada_en_el_mismo_ciclo_no_corta(h):
+    """El préstamo se toma junto con la lectura de futuros, no al final del ciclo."""
+    h.r.configurar(tope=80, reserva=5000, paso=1000, umbral=8, devolucion=16)
+    h.configurar()
+    svc = h.service("real", rescate_mode="real", env={c3.ENV_CONFIRM: "0"})
+    svc.tick()
+    assert h.c3()["base"]["capital"] == "10000.00"
+    h.capital("7500")
+    h.r.fake.maint = Decimal("1000")  # ratio 7,5 < 8: el rescate inyecta 1000 y se confirma en el ciclo
+    h.avanzar(15)
+    svc.tick()
+    st, _ = rescate.load_state(h.data_dir)
+    assert st["prestamo"]["real"] == "1000.00" and st["en_vuelo"] is None
+    assert h.c3()["ultimo"]["capital"] == "7500.00" and h.c3()["c3_parado"] is False and h.apagados == []
+    h.avanzar(15)
+    svc.tick()  # ahora la equity ya incluye la inyección: 8500 - 1000
+    assert h.c3()["ultimo"]["capital"] == "7500.00" and h.apagados == []
 
 
 def test_inyeccion_del_rescate_no_tapa_la_perdida(h):
@@ -470,6 +496,22 @@ def test_indice_tras_un_corte_del_servicio_procesa_las_velas_en_orden(h):
     assert idx is None
 
 
+def test_par_sin_vela_frena_el_indice_y_avisa(h):
+    svc = operando(h)
+    corte = cortar(h, svc)
+    for s in PARES:
+        h.precio[s] = lambda t: Decimal(150) if t > corte["desde_ms"] + 120_000 else Decimal(100)
+    h.klines_sin = {"XRPUSDT"}
+    h.avanzar(3 * 3600)
+    svc.tick()
+    assert h.starts == [] and h.c3()["corte"]["indice"]["muestras"] == 0
+    assert any("Falta la vela de 1 h" in t and "XRPUSDT" in t for t in h.sent)
+    h.klines_sin = set()
+    h.avanzar(15)
+    svc.tick()
+    assert len(h.starts) == 1
+
+
 def test_velas_caidas_no_reinician_y_avisan(h):
     svc = operando(h)
     cortar(h, svc)
@@ -561,6 +603,19 @@ def test_corte_en_graceful_stop_no_reinicia_solo(h):
     h.avanzar(86400 + 60)
     svc.tick()
     assert h.starts == []
+
+
+def test_config_de_forager_ilegible_un_momento_se_reintenta(h):
+    svc = operando(h, politica="cooldown", cooldown=1)
+    cortar(h, svc)
+    h.forager_fallas = 1
+    h.avanzar(86400 + 60)
+    svc.tick()
+    corte = h.c3()["corte"]
+    assert h.starts == [] and corte["auto"] is True and corte["reinicio"]["resultado"] == "error"
+    h.avanzar(c3.REINTENTO_MS / 1000 + 1)
+    svc.tick()
+    assert len(h.starts) == 1 and h.c3()["c3_parado"] is False
 
 
 def test_start_fallido_reintenta_y_despues_pide_accion_manual(h):
@@ -692,6 +747,12 @@ def test_apagar_de_c3_cierra_reduce_only_con_el_lock_y_su_usuario(tmp_path, env,
     apagar = rescate.make_apagar(tmp_path, bot_control.Settings(),
                                  bot_control.BinanceFuturesClient("https://fapi.binance.com", "k", "s"),
                                  usuario=c3.USUARIO_APAGAR, origen="c3_corte")
+    handle = bot_control.Store(tmp_path).try_lock()  # una acción del panel en curso
+    bloqueado = rescate.make_apagar(tmp_path, bot_control.Settings(),
+                                    bot_control.BinanceFuturesClient("https://fapi.binance.com", "k", "s"),
+                                    lock_timeout=0.05, usuario=c3.USUARIO_APAGAR, origen="c3_corte")
+    assert bloqueado()[0] == "error" and binance.market_orders() == []
+    handle.release()
     outcome, payload = apagar()
     assert outcome == "ok"
     orders = binance.market_orders()
