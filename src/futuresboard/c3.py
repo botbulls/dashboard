@@ -15,7 +15,9 @@ estado, y su estado vive en ``rescate_state.json`` bajo la clave ``c3``. La conf
   cada vela de 1 h) ``>= mínimo posterior × (1 + X%)``, o cooldown de N días, o lo primero de los dos. Al reiniciar
   se re-ancla la base y se ejecuta START con la config que quedó (la rutina del panel). Límite de reinicios
   automáticos en una ventana; superado, queda parado esperando acción manual.
-* **Dead-man**: en cada ciclo se escribe ``watcher_heartbeat.json`` (atómico) para passivbot.
+* **Dead-man**: ``watcher_heartbeat.json`` (atómico) para passivbot. En ``real`` se escribe solo mientras C3
+  protege: con lectura de futuros reciente, sin un Apagar pendiente (propio o del tope del rescate) y sin
+  bloqueo ni config inválida. Si no, se deja el latido viejo y passivbot deja de abrir entradas.
 
 Es una herramienta, no un asesor: cortar realiza la pérdida y reiniciar puede volver a perder.
 """
@@ -160,14 +162,32 @@ def _check_int(name: str, value: Any) -> int:
 
 def load_config(data_dir: pathlib.Path) -> Tuple[Dict[str, Any], Optional[str]]:
     """Config del panel. Si el archivo es inválido se devuelve deshabilitada + el error (fail-closed)."""
+    cfg, err, _transitorio = _load_config(data_dir)
+    return cfg, err
+
+
+def _load_config(data_dir: pathlib.Path) -> Tuple[Dict[str, Any], Optional[str], bool]:
+    """``load_config`` + si el error es de lectura (``OSError``, puede ser pasajero) y no de contenido."""
+    cfg, err = _load_config_contenido(data_dir)
+    return cfg, err, bool(err) and err.startswith(_ERROR_LECTURA)
+
+
+_ERROR_LECTURA = f"No se pudo leer {CONFIG_FILE_NAME}"
+
+
+def _load_config_contenido(data_dir: pathlib.Path) -> Tuple[Dict[str, Any], Optional[str]]:
     cfg = default_config()
     path = pathlib.Path(data_dir) / CONFIG_FILE_NAME
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return cfg, None
-    except (OSError, ValueError) as exc:
-        return cfg, f"No se pudo leer {CONFIG_FILE_NAME} ({exc.__class__.__name__}): C3 deshabilitado."
+    except OSError as exc:
+        return cfg, f"{_ERROR_LECTURA} ({exc.__class__.__name__}): C3 deshabilitado."
+    try:
+        raw = json.loads(text)
+    except ValueError as exc:
+        return cfg, f"{CONFIG_FILE_NAME} inválido (JSON: {exc.__class__.__name__}): C3 deshabilitado."
     try:
         if not isinstance(raw, dict):
             raise ValueError("no es un objeto")
@@ -216,6 +236,37 @@ def validate_config_body(body: Any) -> Dict[str, Any]:
     return out
 
 
+def corte_al_guardar(data_dir: pathlib.Path, parsed: Dict[str, Any]) -> Optional[str]:
+    """Aviso si guardar ``parsed`` deja el último capital leído en o debajo del piso nuevo (y arriba del vigente):
+    C3 cortaría a mercado en cuanto se confirme. Habilitar (base nueva) o un C3 parado no cortan por esto."""
+    if not parsed.get("habilitado"):
+        return None
+    prev, err = load_config(data_dir)
+    if err or not prev.get("habilitado"):
+        return None
+    state, state_err = rescate.load_state(pathlib.Path(data_dir))
+    if state_err:
+        return None
+    c3, _err = get_state(dict(state))
+    base = c3.get("base") if isinstance(c3.get("base"), dict) else None
+    ultimo = c3.get("ultimo") if isinstance(c3.get("ultimo"), dict) else None
+    if c3.get("c3_parado") or c3.get("generacion") != prev.get("generacion") or not base or not ultimo:
+        return None
+    try:
+        base_capital, capital = dec(base["capital"]), dec(ultimo["capital"])
+        piso_vigente, piso_nuevo = piso_de(base_capital, dec(prev["tope_pct"])), piso_de(base_capital,
+                                                                                         dec(parsed["tope_pct"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not piso_vigente < capital <= piso_nuevo:
+        return None
+    return (f"Con tope {_pct_txt(dec(parsed['tope_pct']))}% el piso pasa a {money(piso_nuevo)} USDT y el último "
+            f"capital de futuros leído es {money(capital)} USDT ({ultimo.get('ts')}): C3 va a cortar en cuanto se "
+            "confirme (FUTURESBOARD_C3_CONFIRM_SECONDS, 60 s por defecto). Apagar detiene passivbot y cierra todo a "
+            "mercado. "
+            "¿Guardar igual?")
+
+
 def save_config(data_dir: pathlib.Path, parsed: Dict[str, Any], user: str) -> Dict[str, Any]:
     """Guarda la config. Habilitar (false -> true) abre una generación nueva => base nueva."""
     data_dir = pathlib.Path(data_dir)
@@ -256,6 +307,7 @@ def default_state() -> Dict[str, Any]:
         "ultimo": None,
         "bloqueo": None,
         "latido": None,
+        "sin_observacion": None,
     }
 
 
@@ -367,6 +419,27 @@ def _ratio_txt(value: Decimal) -> str:
     return format(value.quantize(Decimal("0.0001"), rounding=decimal.ROUND_DOWN), "f")
 
 
+def _start_automatico_intentado(corte: Dict[str, Any]) -> bool:
+    """True si C3 ya intentó un START automático para este corte (con error o sin resultado conocido)."""
+    rein = corte.get("reinicio") if isinstance(corte.get("reinicio"), dict) else {}
+    try:
+        intentos = int(rein.get("intentos") or 0)
+    except (TypeError, ValueError):
+        intentos = 1
+    return rein.get("resultado") in ("pendiente", "error") or intentos > 0
+
+
+def aviso_max_age(interval: int, max_age: int = 120) -> Optional[str]:
+    """Error de arranque si el intervalo del servicio no entra en el MAX_AGE del dead-man de passivbot (default 120):
+    con un intervalo largo passivbot cancelaría entradas de forma intermitente con C3 sano."""
+    necesario = 3 * int(interval) + 30
+    if necesario <= max_age:
+        return None
+    return (f"C3 en real con FUTURESBOARD_RESCATE_INTERVAL={interval} s: passivbot tiene que tener "
+            f"PASSIVBOT_WATCHER_MAX_AGE_SECONDS >= {necesario} (3 × intervalo + 30; el default es {max_age}). Si no, "
+            "el dead-man frena entradas de forma intermitente con C3 sano.")
+
+
 def _int(value: Any) -> Optional[int]:
     if isinstance(value, bool) or not isinstance(value, int):
         return None
@@ -416,6 +489,8 @@ class C3Watcher:
         self.send = send or telegram_notify.send
         self.clock = clock
         self._alertas: Dict[str, str] = {}
+        self._cfg_valida: Optional[Dict[str, Any]] = None  # última c3_config.json válida (ante un OSError pasajero)
+        self._tope: Optional[Dict[str, Any]] = None  # tope activo del rescate en este ciclo
 
     # -- utilidades -------------------------------------------------------------------
     def _now_ms(self) -> int:
@@ -449,18 +524,88 @@ class C3Watcher:
     def _guardar(self, state: Dict[str, Any]) -> None:
         rescate.save_state(self.data_dir, state)
 
-    def _latir(self, c3: Dict[str, Any], efectivo: str) -> None:
-        """Escribe el latido para passivbot. Si falla, passivbot ve un latido viejo (fail-safe) y se avisa."""
+    def max_hueco_ms(self) -> int:
+        """Cuánto puede pasar sin observar el capital: confirmación + 2 intervalos (90 s por defecto)."""
+        return (self.settings.confirm_seconds + HUECO_INTERVALOS * self.interval) * 1000
+
+    def _sin_observacion(self, c3: Dict[str, Any], now_ms: int) -> Optional[Dict[str, Any]]:
+        """None si la última lectura OK de futuros es reciente; si no, desde cuándo C3 está ciego."""
+        ultimo = c3.get("ultimo") if isinstance(c3.get("ultimo"), dict) else {}
+        ts_ok = ultimo.get("ts") if ultimo.get("capital") is not None else None
+        try:
+            ok_ms = int(dt.datetime.fromisoformat(ts_ok).timestamp() * 1000) if ts_ok else None
+        except (TypeError, ValueError):
+            ok_ms = None
+        if ok_ms is None:
+            return {"desde": None, "texto": "todavía no hubo una lectura de la cuenta de futuros."}
+        if now_ms - ok_ms <= self.max_hueco_ms():
+            return None
+        return {"desde": ts_ok, "texto": f"sin lectura de la cuenta de futuros desde {ts_ok}."}
+
+    def _motivo_sin_latido(self, state: Dict[str, Any], c3: Dict[str, Any]) -> Optional[str]:
+        """Por qué C3 en real no está protegiendo (y no tiene que latir), o None."""
+        corte = c3.get("corte") if isinstance(c3.get("corte"), dict) else None
+        if c3.get("c3_parado") and corte and corte.get("modo") == MODE_REAL and corte.get("origen") != "tope_rescate":
+            if (corte.get("apagar") or {}).get("resultado") != "ok":
+                return (f"el Apagar del corte del {corte.get('en')} todavía no se completó: passivbot puede seguir "
+                        "corriendo.")
+        tope = self._tope
+        if tope is not None and tope.get("modo") == MODE_REAL and (tope.get("apagar") or {}).get("resultado") != "ok":
+            return (f"el tope de pérdida del rescate ({tope.get('disparado_en')}) no completó su Apagar: passivbot "
+                    "puede seguir corriendo.")
+        ciego = c3.get("sin_observacion")
+        if isinstance(ciego, dict):
+            return f"C3 no observa el capital: {ciego.get('texto')}"
+        return None
+
+    def _latir(self, state: Dict[str, Any], c3: Dict[str, Any], efectivo: str) -> None:
+        """Escribe el latido para passivbot. Si falla, passivbot ve un latido viejo (fail-safe) y se avisa.
+
+        En ``real`` solo se escribe si C3 está protegiendo (``_motivo_sin_latido``): si no, queda el latido viejo y
+        passivbot, con el dead-man, deja de abrir entradas nuevas.
+        """
+        if efectivo == MODE_REAL:
+            motivo = self._motivo_sin_latido(state, c3)
+            if motivo:
+                self._no_latir(c3, motivo)
+                return
         ts = self.clock()
         try:
             write_heartbeat(self.settings.heartbeat_path, efectivo, c3.get("c3_parado") is True, ts)
         except (OSError, ValueError) as exc:
-            c3["latido"] = {"ts": None, "c3_mode": efectivo, "error": f"{exc.__class__.__name__}"}
+            c3["latido"] = {"ts": None, "c3_mode": efectivo, "error": f"{exc.__class__.__name__}", "suspendido": None}
             self._alert("latido", f"No se pudo escribir {self.settings.heartbeat_path} ({exc.__class__.__name__}): "
                                   "passivbot va a ver el latido viejo.")
             return
-        c3["latido"] = {"ts": now_iso(ts), "c3_mode": efectivo, "error": None}
+        c3["latido"] = {"ts": now_iso(ts), "c3_mode": efectivo, "error": None, "suspendido": None}
         self._clear("latido", "Latido de C3 escrito otra vez.")
+        self._clear("latido_suspendido", "C3 escribe el latido otra vez.")
+
+    def _no_latir(self, c3: Dict[str, Any], motivo: str) -> None:
+        """C3 en real que no protege: no se escribe el latido (passivbot ve el viejo) y se avisa una vez."""
+        prev = c3.get("latido") if isinstance(c3.get("latido"), dict) else {}
+        desde = prev.get("suspendido_desde") if prev.get("suspendido") else None
+        c3["latido"] = {"ts": prev.get("ts"), "c3_mode": prev.get("c3_mode"), "error": prev.get("error"),
+                        "suspendido": motivo, "suspendido_desde": desde or now_iso(self.clock())}
+        self._alert("latido_suspendido", f"C3 no escribe el latido: {motivo} Con el dead-man, passivbot deja de "
+                                         "abrir entradas nuevas cuando el latido supera "
+                                         "PASSIVBOT_WATCHER_MAX_AGE_SECONDS.")
+
+    def _cargar_config(self) -> Tuple[Dict[str, Any], Optional[str]]:
+        """``c3_config.json``. Un error de lectura (``OSError``) usa la última config válida: un tropiezo del
+        disco no cancela una confirmación ni deja de proteger. Un contenido inválido sigue siendo fail-closed."""
+        cfg, err, transitorio = _load_config(self.data_dir)
+        if err and transitorio and self._cfg_valida is not None:
+            self._alert("config", f"{err.split(':')[0]}: se usa la última config válida leída.")
+            return dict(self._cfg_valida), None
+        if err:
+            self._alert("config", err)
+            if not transitorio:
+                self._cfg_valida = None  # un contenido inválido (fail-closed) no se tapa con una config anterior
+        else:
+            self._clear("config")
+            self._cfg_valida = dict(cfg)
+        return cfg, err
 
     # -- ciclo ------------------------------------------------------------------------
     def step(self, state: Dict[str, Any], fut: Optional[Dict[str, Any]], lectura_error: Optional[str],
@@ -468,22 +613,19 @@ class C3Watcher:
         """Un paso. ``fut`` es la lectura de futuros del ciclo (None si falló, con ``lectura_error``) y
         ``prestamo`` el préstamo del rescate tomado junto con esa lectura (``rescate.prestamo_snapshot``)."""
         now_ms = self._now_ms()
+        self._tope = None
         c3, err = get_state(state)
         if err:
             self._event(state, err)
             self._alert("estado", err)
-        cfg, cfg_err = load_config(self.data_dir)
-        if cfg_err:
-            self._alert("config", cfg_err)
-        else:
-            self._clear("config")
+        cfg, cfg_err = self._cargar_config()
         self._cambio_de_modo(state, c3, now_ms)
 
         if self.mode == MODE_OFF:
             if c3.get("confirmacion"):
                 self._cancelar(state, c3, "C3 está en modo off.", now_ms)
-            c3["bloqueo"] = None
-            self._latir(c3, MODE_OFF)
+            c3.update(bloqueo=None, sin_observacion=None)
+            self._latir(state, c3, MODE_OFF)
             return
 
         habilitado = bool(cfg.get("habilitado")) and not cfg_err
@@ -492,8 +634,12 @@ class C3Watcher:
         if not habilitado:
             if c3.get("confirmacion"):
                 self._cancelar(state, c3, "C3 deshabilitado.", now_ms)
-            c3["bloqueo"] = None
-            self._latir(c3, MODE_OFF)
+            c3.update(bloqueo=None, sin_observacion=None)
+            if cfg_err and self.mode == MODE_REAL:
+                # No es un "deshabilitado" explícito: en real no se anuncia off, se deja el latido que había.
+                self._no_latir(c3, cfg_err)
+            else:
+                self._latir(state, c3, MODE_OFF)
             return
 
         bloqueo = self._bloqueo()
@@ -504,7 +650,11 @@ class C3Watcher:
             self._alert("bloqueo", bloqueo)
             if c3.get("confirmacion"):
                 self._cancelar(state, c3, bloqueo, now_ms)
-            self._latir(c3, MODE_OFF)  # no puede proteger: el dead-man no aplica
+            c3["sin_observacion"] = None
+            if self.mode == MODE_REAL:
+                self._no_latir(c3, bloqueo)  # no puede proteger: en real no se anuncia off
+            else:
+                self._latir(state, c3, MODE_OFF)
             return
         self._clear("bloqueo")
 
@@ -518,8 +668,10 @@ class C3Watcher:
             prev = c3.get("ultimo") if isinstance(c3.get("ultimo"), dict) else {}
             c3["ultimo"] = {**prev, "ts_error": now_iso(self.clock()),
                             "error": lectura_error or "Sin lectura de la cuenta de futuros."}
+        c3["sin_observacion"] = self._sin_observacion(c3, now_ms)
 
         tope = rescate.tope_activo(state, rescate_cfg)
+        self._tope = tope
         tope_real = tope is not None and tope.get("modo") == MODE_REAL
         if c3.get("c3_parado"):
             self._parado(state, c3, cfg, capital, now_ms, tope_real)
@@ -531,7 +683,7 @@ class C3Watcher:
                                                                     "(capital de futuros)")
         else:
             self._evaluar_piso(state, c3, cfg, capital, now_ms)
-        self._latir(c3, self.mode)
+        self._latir(state, c3, self.mode)
 
     def _bloqueo(self) -> Optional[str]:
         if self.exchange != "binance":
@@ -605,8 +757,7 @@ class C3Watcher:
             except (KeyError, TypeError, ValueError):
                 conf, reinicio = None, " La confirmación guardada era inválida: arrancó de cero."
             else:
-                max_hueco = self.settings.confirm_seconds * 1000 + HUECO_INTERVALOS * self.interval * 1000
-                if now_ms - ultimo_ms > max_hueco:
+                if now_ms - ultimo_ms > self.max_hueco_ms():
                     reinicio = (f" La confirmación abierta el {conf.get('desde_en')} arrancó de cero: pasaron "
                                 f"{(now_ms - ultimo_ms) // 1000} s sin observar el capital.")
                     conf = None
@@ -664,9 +815,16 @@ class C3Watcher:
         if real:
             config_al_corte = self._leer_forager()
             contenedor = self._estado_contenedor()
-            if contenedor is False:
+            # Sin cualquiera de las dos lecturas no se puede comprobar lo que el reinicio automático necesita.
+            if contenedor is None:
+                auto, motivo_manual = False, "no se pudo saber si passivbot estaba corriendo al momento del corte."
+            elif contenedor is False:
                 auto, motivo_manual = False, "passivbot ya estaba detenido al momento del corte."
-            elif config_al_corte and config_al_corte.get("long_mode") not in (None, bot_control.MODE_NORMAL):
+            elif config_al_corte is None:
+                auto = False
+                motivo_manual = ("no se pudo leer la config de forager al momento del corte (no se sabe si estaba en "
+                                 "graceful_stop ni con qué twe reiniciar).")
+            elif config_al_corte.get("long_mode") not in (None, bot_control.MODE_NORMAL):
                 auto = False
                 motivo_manual = (f"al corte forager estaba con long_mode {config_al_corte.get('long_mode')}: START "
                                  "lo pasaría a normal.")
@@ -686,8 +844,9 @@ class C3Watcher:
             texto += f" Sin reinicio automático: {motivo_manual}"
         self._historial(c3, "corte", texto, self.mode, capital=money(capital), piso=money(piso), id=corte["id"])
         self._event(state, texto)
-        self._guardar(state)  # el corte queda persistido antes de Apagar
-        self._latir(c3, self.mode)
+        # El corte queda persistido antes de Apagar. En real no se late hasta que Apagar termine bien: mientras tanto
+        # passivbot ve el latido de antes del corte (si Apagar falla, el dead-man deja de abrir entradas).
+        self._guardar(state)
         self._notify(f"🛑 <b>C3</b>: {esc(texto)}", not real)
         self._ejecutar_apagar(state, c3, corte, now_ms)
 
@@ -831,6 +990,13 @@ class C3Watcher:
             self._aviso_reinicio(state, c3["corte"], "passivbot está corriendo otra vez: C3 espera una lectura de "
                                                      "futuros para re-anclar la base.")
             return True
+        if _start_automatico_intentado(c3["corte"]):
+            # El START automático dio error (timeout incierto del proxy, verify_running) pero dejó passivbot
+            # corriendo: es el reinicio de C3 y cuenta para el límite. Un START a mano después de un intento
+            # automático fallido también cuenta (no se pueden distinguir): queda del lado seguro.
+            self._reanudar(state, c3, cfg, capital, "reinicio", "passivbot en ejecución después de un START automático "
+                           "que había dado error (cuenta como reinicio automático)", self._now_ms())
+            return True
         self._reanudar(state, c3, cfg, capital, "reinicio_manual", "passivbot en ejecución otra vez (START a mano)",
                        self._now_ms(), contar=False)
         return True
@@ -873,6 +1039,8 @@ class C3Watcher:
         twe_short, solo si siguen iguales a los del corte (si cambiaron, no se adivina: reinicio manual).
         """
         al_corte = corte.get("config_al_corte") if isinstance(corte.get("config_al_corte"), dict) else None
+        if al_corte is None and not simulado:
+            return {"error": "no se leyó la config de forager al corte: no se puede comprobar que no cambió."}
         try:
             actual = self._resumen_forager(self._forager()) if self._forager else None
         except Exception as exc:  # noqa: BLE001 - un error de lectura puede ser pasajero: se reintenta
@@ -918,7 +1086,7 @@ class C3Watcher:
         rein.update(intentos=intentos + 1, ultimo_ms=now_ms, resultado="pendiente",
                     detalle=f"START con {plan.get('descripcion')} en curso.")
         self._guardar(state)
-        self._latir(c3, self.mode)  # el lock puede tardar: que passivbot no vea el latido viejo
+        self._latir(state, c3, self.mode)  # el lock puede tardar: que passivbot no vea el latido viejo
         if plan.get("transitorio"):
             outcome, payload = "error", {"ok": False, "error": plan["error"]}
         elif self._start is None:
@@ -936,6 +1104,12 @@ class C3Watcher:
                            f"Reinicio automático ({motivo}): START con {plan['descripcion']}", now_ms)
             return
         if outcome == "ya_corriendo":
+            if intentos > 0:  # un intento anterior con error pudo haberlo arrancado: cuenta (lado seguro)
+                rein.update(resultado="ok", detalle="passivbot ya estaba corriendo después de un START automático con "
+                                                    "error: cuenta como reinicio automático.")
+                self._reanudar(state, c3, cfg, capital, "reinicio", "passivbot ya estaba en ejecución después de un "
+                               "START automático que había dado error", now_ms)
+                return
             rein.update(resultado="ok", detalle="passivbot ya estaba corriendo (START a mano): no se reinició.")
             self._reanudar(state, c3, cfg, capital, "reinicio_manual", "passivbot ya estaba en ejecución (START a "
                                                                       "mano)", now_ms, contar=False)
@@ -1150,6 +1324,8 @@ def panel_status(data_dir: pathlib.Path, now: Optional[float] = None) -> Dict[st
             vivo = False
     base = c3.get("base") if isinstance(c3.get("base"), dict) else None
     ultimo = c3.get("ultimo") if isinstance(c3.get("ultimo"), dict) else None
+    # Lo decide el servicio (conoce la confirmación y el intervalo): el panel no recalcula umbrales.
+    ciego = c3.get("sin_observacion") if isinstance(c3.get("sin_observacion"), dict) else None
     out: Dict[str, Any] = {
         "config": {k: cfg.get(k) for k in (*CAMPOS, "generacion", "actualizado_en", "actualizado_por")},
         "limites": {**{k: [str(lo), str(hi)] for k, (lo, hi) in LIMITES.items()},
@@ -1165,6 +1341,7 @@ def panel_status(data_dir: pathlib.Path, now: Optional[float] = None) -> Dict[st
         "piso": None,
         "capital": ultimo.get("capital") if ultimo else None,
         "ultimo": ultimo,
+        "sin_observacion": ciego,
         "distancia_usdt": None,
         "distancia_pct": None,
         "confirmacion": c3.get("confirmacion"),
@@ -1181,7 +1358,7 @@ def panel_status(data_dir: pathlib.Path, now: Optional[float] = None) -> Dict[st
         if base and cfg.get("tope_pct") is not None:
             piso = piso_de(dec(base["capital"]), dec(cfg["tope_pct"]))
             out["piso"] = money(piso)
-            if out["capital"] is not None:
+            if out["capital"] is not None and ciego is None:  # sin distancia sobre un capital viejo
                 distancia = dec(out["capital"]) - piso
                 out["distancia_usdt"] = money(distancia)
                 cap = dec(out["capital"])
@@ -1202,6 +1379,8 @@ def panel_status(data_dir: pathlib.Path, now: Optional[float] = None) -> Dict[st
         out["estado"] = "bloqueado"
     elif c3.get("c3_parado"):
         out["estado"] = "parado"
+    elif ciego is not None:
+        out["estado"] = "sin_observacion"
     elif c3.get("confirmacion"):
         out["estado"] = "en_confirmacion"
     elif base is None:

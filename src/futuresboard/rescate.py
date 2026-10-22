@@ -1923,7 +1923,8 @@ def build_service(settings: RescateSettings, config: Any) -> RescateService:
     except bot_control.BotControlError as exc:
         log.error("Velas de Binance no disponibles para C3: %s", exc)
     c3_settings = c3.C3Settings()
-    for error in (c3_settings.mode_error, c3_settings.pares_error):
+    for error in (c3_settings.mode_error, c3_settings.pares_error,
+                  c3.aviso_max_age(settings.interval) if c3_settings.mode == MODE_REAL else None):
         if error:
             log.error("%s", error)
     watcher = c3.C3Watcher(data_dir, c3_settings, interval=settings.interval, exchange=str(exchange),

@@ -182,3 +182,41 @@ def test_resumen_sin_variacion_si_el_tope_no_esta_armado(hd):
     assert r["error"] is None and r["capital"]["usdt"] == "22000.00"
     assert r["capital"]["variacion_usdt"] is None and r["tope"]["estado"] == "sin_armar"
     assert json.dumps(r)  # serializable (sin Decimal)
+
+
+def test_tarjetas_con_el_rescate_en_off_marcan_la_lectura_vieja(client, hd):  # noqa: F811
+    """Rescate de dry_run a off: el servicio late pero no lee. La lectura de hace 10 días no se muestra en verde
+    ni sin antigüedad (antes: semáforo verde, sin "hace" en ratio ni préstamo)."""
+    hd.configurar()
+    hd.clock.t = time.time() - 10 * 86400
+    hd.fake.now_ms = int(hd.clock.t * 1000)
+    hd.service("dry_run").tick()
+    hd.clock.t = time.time()
+    hd.fake.now_ms = int(hd.clock.t * 1000)
+    hd.service("off").tick()
+    r = resumen_rescate.tarjetas(hd.data_dir, now=time.time())
+    assert r["servicio_vivo"] is True and r["lectura_vieja"] is True
+    assert r["ratio"]["semaforo"] == "gris" and r["ratio"]["hace"] == "hace 10 d"
+    html = _home(client)
+    assert 'data-semaforo="gris"' in html
+    ratio = _tarjeta(html, "ratio")
+    assert "hace 10 d" in ratio and "rescate en off" in ratio
+    assert "rescate en off" in _tarjeta(html, "capital") and "rescate en off" in _tarjeta(html, "billetera")
+    assert "hace" in _tarjeta(html, "prestamo")
+
+
+def test_tarjetas_con_lectura_vieja_y_servicio_vivo_en_real(client, hd):  # noqa: F811
+    """El servicio late pero la última lectura OK tiene más de 3 × intervalo + 30 s: semáforo gris."""
+    hd.configurar()
+    hd.fake.maint = Decimal("100")  # ratio 20: verde con una lectura de ahora
+    hd.clock.t = time.time() - 600
+    hd.fake.now_ms = int(hd.clock.t * 1000)
+    svc = hd.service("real")
+    svc.tick()
+    r = resumen_rescate.tarjetas(hd.data_dir, now=time.time())
+    assert r["lectura_vieja"] is True and r["ratio"]["semaforo"] == "gris" and r["ratio"]["hace"] == "hace 10 min"
+    hd.clock.t = time.time()
+    hd.fake.now_ms = int(hd.clock.t * 1000)
+    svc.tick()
+    r = resumen_rescate.tarjetas(hd.data_dir, now=time.time())
+    assert r["lectura_vieja"] is False and r["ratio"]["semaforo"] == "verde"

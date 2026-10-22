@@ -9,6 +9,9 @@ Semáforo del ratio margen / mantenimiento (Binance liquida en 1):
 * rojo: debajo del umbral de inyección (el rescate inyecta ahí);
 * amarillo: entre el umbral y ``umbral × 1,5`` (cerca de la inyección);
 * verde: desde ``umbral × 1,5`` (o sin posiciones abiertas).
+* gris: sin lectura, o con una lectura **vieja**: el rescate en ``off`` (late pero no lee), el servicio sin latido
+  o la última lectura con más de ``3 × intervalo + 30`` s (el mismo criterio con el que se da por vivo al
+  servicio). Una lectura vieja muestra su antigüedad y no se pinta como si fuera de ahora.
 """
 from __future__ import annotations
 
@@ -104,6 +107,23 @@ def _tarjetas(data_dir: pathlib.Path, now: float) -> Dict[str, Any]:
     ultimo = status.get("ultimo") if isinstance(status.get("ultimo"), dict) else {}
     lectura_ok = bool(ultimo) and not ultimo.get("error") and ultimo.get("capital") is not None
     simulado = modo == rescate.MODE_DRY_RUN
+    servicio_state = state.get("servicio") if not state_err and isinstance(state.get("servicio"), dict) else {}
+    try:
+        limite_s = 3 * int(servicio_state.get("intervalo") or rescate.DEFAULT_INTERVAL) + 30
+    except (TypeError, ValueError):
+        limite_s = 3 * rescate.DEFAULT_INTERVAL + 30
+
+    def _vieja(ts: Any) -> bool:
+        moment = _parse_ts(ts)
+        return modo == rescate.MODE_OFF or not vivo or moment is None or now - moment > limite_s
+
+    vieja = lectura_ok and _vieja(ultimo.get("ts"))
+    if modo == rescate.MODE_OFF:
+        motivo_vieja = "rescate en off: no se actualiza"
+    elif not vivo:
+        motivo_vieja = "el servicio no late"
+    else:
+        motivo_vieja = "lectura vieja"
 
     out: Dict[str, Any] = {
         "error": None,
@@ -117,6 +137,8 @@ def _tarjetas(data_dir: pathlib.Path, now: float) -> Dict[str, Any]:
         "testnet": bool(servicio.get("testnet")),
         "como_activar": COMO_ACTIVAR,
         "lectura_error": ultimo.get("error") if ultimo.get("error") else None,
+        "lectura_vieja": vieja,
+        "motivo_vieja": motivo_vieja,
     }
 
     # Billetera de rescate: USDT libre en spot (real). Sin lectura OK en el último ciclo, el último saldo leído.
@@ -130,13 +152,16 @@ def _tarjetas(data_dir: pathlib.Path, now: float) -> Dict[str, Any]:
         if isinstance(ref, dict) and ref.get("usdt") is not None:
             spot.update(usdt=ref["usdt"], ts=ref.get("ts"), fuente="ultimo_saldo_leido")
     spot["hace"] = antiguedad(spot["ts"], now)
+    spot["vieja"] = spot["usdt"] is not None and _vieja(spot["ts"])
     out["spot"] = spot
 
-    out["prestamo"] = {"usdt": status.get("prestamo"), "simulado": status.get("prestamo_modo") == rescate.MODE_DRY_RUN}
+    # El préstamo no es una lectura de Binance: es el registro del servicio, al día con su último latido.
+    out["prestamo"] = {"usdt": status.get("prestamo"), "simulado": status.get("prestamo_modo") == rescate.MODE_DRY_RUN,
+                       "hace": out["latido_hace"]}
 
     # Capital total (futuros + spot) y su variación contra la base (solo con el tope armado).
     capital: Dict[str, Any] = {"usdt": None, "ts": None, "hace": None, "base": None, "variacion_usdt": None,
-                               "variacion_pct": None, "limite": status.get("limite_tope")}
+                               "variacion_pct": None, "limite": status.get("limite_tope"), "vieja": vieja}
     if lectura_ok:
         capital.update(usdt=ultimo["capital"], ts=ultimo.get("ts"), hace=antiguedad(ultimo.get("ts"), now))
         base = status.get("base")
@@ -158,8 +183,10 @@ def _tarjetas(data_dir: pathlib.Path, now: float) -> Dict[str, Any]:
         "posiciones": posiciones,
         "umbral": None if umbral is None else format(umbral.normalize(), "f"),
         "amarillo_hasta": None if umbral is None else format((umbral * FACTOR_AMARILLO).normalize(), "f"),
-        "semaforo": semaforo(ratio, umbral, posiciones) if lectura_ok else "gris",
+        "semaforo": semaforo(ratio, umbral, posiciones) if lectura_ok and not vieja else "gris",
         "simulado": bool(ultimo.get("simulado")) if lectura_ok else False,
+        "hace": antiguedad(ultimo.get("ts"), now) if lectura_ok else None,
+        "vieja": vieja,
     }
 
     # Estado del tope de pérdida total.
@@ -184,6 +211,7 @@ def _c3(data_dir: pathlib.Path, now: float) -> Optional[Dict[str, Any]]:
     if not st["config"].get("habilitado") and not st["c3_parado"]:
         return None
     ultimo = st.get("ultimo") or {}
+    latido = st.get("latido") if isinstance(st.get("latido"), dict) else {}
     evento = None
     for h in st.get("historial") or []:
         if h.get("tipo") in ("corte", "reinicio", "reinicio_manual"):
@@ -198,6 +226,12 @@ def _c3(data_dir: pathlib.Path, now: float) -> Optional[Dict[str, Any]]:
         "distancia_pct": st.get("distancia_pct"),
         "capital_ts": ultimo.get("ts"),
         "capital_hace": antiguedad(ultimo.get("ts"), now),
+        "lectura_error": ultimo.get("error") or None,
+        "sin_observacion": (st.get("sin_observacion") or {}).get("texto"),
+        "latido_hace": antiguedad(latido.get("ts"), now),
+        "latido_modo": latido.get("c3_mode"),
+        "latido_suspendido": latido.get("suspendido"),
+        "latido_error": latido.get("error"),
         "proximo_reinicio": st.get("proximo_reinicio"),
         "ultimo_evento": None if evento is None else {"tipo": evento.get("tipo"), "ts": evento.get("ts"),
                                                       "hace": antiguedad(evento.get("ts"), now)},

@@ -254,7 +254,7 @@
          const C3_ESTADOS = {
              deshabilitado: 'deshabilitado', off: 'servicio en off (no vigila)', bloqueado: 'bloqueado',
              parado: 'PARADO (cortó)', en_confirmacion: 'piso en confirmación', base_pendiente: 'base pendiente (próximo ciclo)',
-             operando: 'operando (vigilando el piso)',
+             operando: 'operando (vigilando el piso)', sin_observacion: 'SIN OBSERVACIÓN (no puede leer la cuenta de futuros)',
          };
 
          function filasTabla(tbody, filas, vacio) {
@@ -295,7 +295,11 @@
              c3set('proximo', c.proximo_reinicio || '-');
              c3set('reinicios', `${c.reinicios_recientes} en los últimos ${cfg.ventana_dias} días (máximo ${cfg.max_reinicios})`);
              const lat = c.latido || {};
-             c3set('latido', lat.ts ? `${lat.ts} · c3_mode ${lat.c3_mode}` : (lat.error ? `error: ${lat.error}` : '-'));
+             if (lat.suspendido) {
+                 c3set('latido', `SUSPENDIDO desde ${lat.suspendido_desde || '-'}: ${lat.suspendido} Último latido ${lat.ts || 'ninguno'}${lat.c3_mode ? ` (c3_mode ${lat.c3_mode})` : ''}: passivbot deja de abrir entradas cuando supera su máximo.`);
+             } else {
+                 c3set('latido', lat.ts ? `${lat.ts} · c3_mode ${lat.c3_mode}` : (lat.error ? `error: ${lat.error}` : '-'));
+             }
              const bloqueo = c3q('bloqueo');
              bloqueo.textContent = c.bloqueo || '';
              bloqueo.classList.toggle('d-none', !c.bloqueo);
@@ -486,10 +490,18 @@
                  return;
              }
              c3Respuesta.textContent = 'Guardando...';
-             post('/api/c3/config', body).then(({ ok, d }) => {
+             const enviar = (confirmar) => post('/api/c3/config', confirmar ? { ...body, confirmar_corte: true } : body).then(({ ok, d }) => {
+                 // 409 requiere_confirmacion: con el tope nuevo C3 cortaría a mercado (Apagar) en cuanto se confirme.
+                 if (!ok && d.requiere_confirmacion && !confirmar) {
+                     if (window.confirm(d.error)) return enviar(true);
+                     c3Respuesta.textContent = 'No se guardó.';
+                     return undefined;
+                 }
                  c3Respuesta.textContent = ok ? 'Guardado.' : (d.error || 'No se pudo guardar.');
                  if (ok) { c3Editando = false; render(d.status); }
-             }).catch(() => { c3Respuesta.textContent = 'No se pudo guardar.'; });
+                 return undefined;
+             });
+             enviar(false).catch(() => { c3Respuesta.textContent = 'No se pudo guardar.'; });
          });
 
          topeCheck.addEventListener('change', () => { topeAck.disabled = !topeCheck.checked; });

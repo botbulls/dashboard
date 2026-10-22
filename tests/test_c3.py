@@ -200,12 +200,14 @@ def test_latido_con_el_modo_efectivo(h, mode, habilitado, esperado):
     assert h.latido()["c3_mode"] == esperado
 
 
-def test_latido_real_sin_apagar_disponible_es_off_y_bloquea(h):
+def test_latido_real_sin_apagar_disponible_no_late_y_bloquea(h):
+    """Cambio deliberado (revisión adversarial): en real, bloqueado no anuncia ``off`` (passivbot se quedaría sin
+    dead-man sin que nadie lo decida); no escribe y deja el latido que había. Acá no había ninguno."""
     h.configurar()
     svc = h.r.service("off")
     svc.c3 = h.watcher("real", apagar=False)
     svc.tick()
-    assert h.latido()["c3_mode"] == "off"
+    assert not h.heartbeat.exists()
     assert "FUTURESBOARD_DOCKER_URL" in h.c3()["bloqueo"]
 
 
@@ -1032,4 +1034,318 @@ def test_config_c3_invalida_en_disco_deshabilita(h):
     cfg, err = c3.load_config(h.data_dir)
     assert cfg["habilitado"] is False and "inválido" in err
     h.service("real").tick()
-    assert h.latido()["c3_mode"] == "off"
+    # Cambio deliberado (revisión adversarial): en real, una config inválida no anuncia off; deja el latido que
+    # había (acá ninguno). Deshabilitar desde el panel sí escribe off (test_latido_con_el_modo_efectivo).
+    assert not h.heartbeat.exists() and "inválido" in h.c3()["latido"]["suspendido"]
+    h.service("dry_run").tick()
+    assert h.latido()["c3_mode"] == "off"  # en dry_run el dead-man no aplica: off como antes
+
+
+# ---------------------------------------------------------------- revisión adversarial: latido solo si C3 protege
+
+
+def _edad_latido(h):
+    return h.clock.t - dt.datetime.fromisoformat(h.latido()["ts"]).timestamp()
+
+
+def test_apagar_fallido_suspende_el_latido(h):
+    """Corte real con Apagar fallido (docker-proxy caído): passivbot sigue corriendo, así que C3 no late y el
+    dead-man de passivbot deja de abrir entradas. Antes latía fresco con c3_parado (que passivbot ignora)."""
+    svc = operando(h)
+    h.apagar_result = ("error", {"ok": False, "error": "No se pudo contactar al docker-proxy"})
+    cortar(h, svc)
+    for _ in range(40):
+        h.avanzar(15)
+        svc.tick()
+    st = h.c3()
+    assert h.running is True and st["corte"]["apagar"]["intentos"] == 3
+    assert h.latido()["c3_mode"] == "real" and _edad_latido(h) > 600  # el último es de antes del corte
+    assert "Apagar" in st["latido"]["suspendido"]
+    assert any("no escribe el latido" in t for t in h.sent)
+
+
+def test_latido_vuelve_cuando_el_apagar_se_completa(h):
+    svc = operando(h)
+    ok = h.apagar_result
+    h.apagar_result = ("error", {"ok": False, "error": "docker-proxy caído"})
+    cortar(h, svc)
+    ts = h.latido()["ts"]
+    h.avanzar(15)
+    svc.tick()
+    assert h.latido()["ts"] == ts
+    h.apagar_result = ok
+    h.avanzar(c3.REINTENTO_MS / 1000 + 1)
+    svc.tick()
+    assert h.c3()["corte"]["apagar"]["resultado"] == "ok"
+    assert _edad_latido(h) == 0 and h.latido()["c3_parado"] is True
+    assert h.c3()["latido"].get("suspendido") is None
+    assert any("escribe el latido otra vez" in t for t in h.sent)
+
+
+def test_no_late_mientras_corre_el_apagar(h):
+    svc = operando(h)
+    vistos = []
+    apagar = h.apagar
+
+    def apagar_mirando():
+        vistos.append(h.latido())
+        return apagar()
+
+    svc.c3._apagar = apagar_mirando
+    h.capital("6900")
+    h.avanzar(15)
+    svc.tick()
+    previo = h.latido()
+    h.avanzar(c3.DEFAULT_CONFIRM_S + 1)
+    svc.tick()
+    assert vistos == [previo]  # durante el Apagar passivbot ve el latido de antes del corte
+
+
+def test_tope_del_rescate_con_apagar_sin_completar_suspende_el_latido(h):
+    svc = operando(h, politica="cooldown", cooldown=1)
+    ts = h.latido()["ts"]
+    st, _ = rescate.load_state(h.data_dir)
+    st["tope"] = {"id": "t3", "disparado_en": "2026-10-22T10:00:00+00:00", "modo": "real",
+                  "apagar": {"resultado": "error", "intentos": 3, "detalle": "docker-proxy caído"}}
+    rescate.save_state(h.data_dir, st)
+    h.avanzar(15)
+    svc.tick()
+    assert h.c3()["corte"]["origen"] == "tope_rescate"
+    assert h.latido()["ts"] == ts and "tope" in h.c3()["latido"]["suspendido"]
+    st, _ = rescate.load_state(h.data_dir)
+    st["tope"]["apagar"]["resultado"] = "ok"  # el rescate completó su Apagar
+    rescate.save_state(h.data_dir, st)
+    h.avanzar(15)
+    svc.tick()
+    assert _edad_latido(h) == 0 and h.c3()["latido"].get("suspendido") is None
+
+
+def test_sin_lectura_de_futuros_deja_de_latir_en_real(h):
+    """C3 ciego (futuros caídos) con el capital debajo del piso: después de confirmación + 2 intervalos sin
+    observar deja de latir; el panel lo muestra como sin observación y sin distancia sobre un capital viejo."""
+    svc = operando(h)
+    ts_ok = h.c3()["ultimo"]["ts"]
+    h.capital("5000")
+    h.r.fake.read_fail.add("/fapi/v2/account")
+    for _ in range(6):  # 90 s = 60 s de confirmación + 2 × 15 s
+        h.avanzar(15)
+        svc.tick()
+    assert _edad_latido(h) == 0
+    h.avanzar(15)
+    svc.tick()
+    assert _edad_latido(h) == 15 and h.c3()["c3_parado"] is False
+    st = c3.panel_status(h.data_dir, now=h.clock.t)
+    assert st["estado"] == "sin_observacion" and st["distancia_usdt"] is None and st["distancia_pct"] is None
+    assert "No se pudo leer" in st["ultimo"]["error"] and ts_ok in st["latido"]["suspendido"]
+    h.r.fake.read_fail.discard("/fapi/v2/account")
+    h.avanzar(15)
+    svc.tick()
+    assert _edad_latido(h) == 0
+    assert c3.panel_status(h.data_dir, now=h.clock.t)["estado"] == "en_confirmacion"
+
+
+def test_sin_ninguna_lectura_no_late_en_real(h):
+    h.configurar()
+    h.r.fake.read_fail.add("/fapi/v2/account")
+    h.service("real").tick()
+    assert not h.heartbeat.exists()
+    assert c3.panel_status(h.data_dir, now=h.clock.t)["estado"] == "sin_observacion"
+
+
+def test_start_automatico_con_error_y_contenedor_vivo_cuenta_para_el_limite(h):
+    """START automático que da error pero deja passivbot corriendo (timeout incierto, verify_running): es el START
+    de C3, cuenta para el límite. Antes se tomaba como START a mano y el límite nunca se alcanzaba."""
+    svc = operando(h, politica="cooldown", cooldown=0.5, max_reinicios=1)
+
+    def start(plan):
+        h.starts.append(dict(plan))
+        h.running = True  # el docker start ocurrió; verify_running falló
+        return "error", {"ok": False, "error": "passivbot no quedó en ejecución (timeout)"}
+
+    svc.c3._start = start
+    cortar(h, svc)
+    h.avanzar(int(0.5 * 86400) + 60)
+    svc.tick()
+    h.avanzar(15)
+    svc.tick()
+    st = h.c3()
+    assert st["c3_parado"] is False and len(st["reinicios"]) == 1 and st["historial"][-1]["tipo"] == "reinicio"
+    cortar(h, svc, capital="4700")  # base 6900, piso 4830
+    h.avanzar(int(0.5 * 86400) + 60)
+    svc.tick()
+    assert len(h.starts) == 1
+    assert "límite de reinicios" in h.c3()["corte"]["motivo_manual"]
+
+
+def test_ya_corriendo_tras_un_start_automatico_fallido_cuenta(h):
+    svc = operando(h, politica="cooldown", cooldown=1)
+    cortar(h, svc)
+    respuestas = [("error", {"ok": False, "error": "timeout del docker-proxy"}),
+                  ("ya_corriendo", {"ok": True, "docker_action": "ninguna"})]
+
+    def start(plan):
+        h.starts.append(dict(plan))
+        return respuestas.pop(0)
+
+    svc.c3._start = start
+    h.avanzar(86400 + 60)
+    svc.tick()
+    h.avanzar(c3.REINTENTO_MS / 1000 + 1)
+    svc.tick()
+    st = h.c3()
+    assert st["c3_parado"] is False and len(st["reinicios"]) == 1 and st["historial"][-1]["tipo"] == "reinicio"
+
+
+def test_forager_ilegible_al_corte_no_reinicia_solo(h):
+    """Si al cortar no se pudo leer forager, no se sabe si estaba en graceful_stop (START lo pasaría a normal)."""
+    svc = operando(h, politica="cooldown", cooldown=0.5)
+    h.forager_fallas = 1
+    h.forager_cfg["long_mode"] = "graceful_stop"
+    corte = cortar(h, svc)
+    assert corte["auto"] is False and corte["config_al_corte"] is None
+    assert "config de forager" in corte["motivo_manual"]
+    h.avanzar(int(0.5 * 86400) + 60)
+    svc.tick()
+    assert h.starts == [] and h.c3()["c3_parado"] is True
+
+
+def test_contenedor_desconocido_al_corte_no_reinicia_solo(h):
+    svc = operando(h, politica="cooldown", cooldown=0.5)
+    contenedor = svc.c3._contenedor
+    svc.c3._contenedor = lambda: (_ for _ in ()).throw(RuntimeError("docker-proxy"))
+    corte = cortar(h, svc)
+    svc.c3._contenedor = contenedor
+    assert corte["auto"] is False and corte["contenedor_al_corte"] is None
+    assert "passivbot" in corte["motivo_manual"]
+
+
+def test_corte_guardado_sin_config_al_corte_no_reinicia_solo(h):
+    """Defensivo: un corte real persistido sin la config de forager no reinicia a ciegas."""
+    svc = operando(h, politica="cooldown", cooldown=1)
+    cortar(h, svc)
+    st, _ = rescate.load_state(h.data_dir)
+    st["c3"]["corte"]["config_al_corte"] = None
+    rescate.save_state(h.data_dir, st)
+    h.avanzar(86400 + 60)
+    svc.tick()
+    assert h.starts == [] and h.c3()["corte"]["auto"] is False
+
+
+def test_config_ilegible_un_momento_usa_la_ultima_valida(h, monkeypatch):
+    """Un OSError pasajero al leer c3_config.json no cancela la confirmación ni deja de proteger."""
+    svc = operando(h)
+    h.capital("6900")
+    h.avanzar(15)
+    svc.tick()
+    assert h.c3()["confirmacion"] is not None
+    leer = pathlib.Path.read_text
+
+    def read_text(self, *a, **kw):
+        if self.name == c3.CONFIG_FILE_NAME:
+            raise OSError(5, "Input/output error")
+        return leer(self, *a, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", read_text)
+    h.avanzar(c3.DEFAULT_CONFIRM_S + 1)
+    svc.tick()
+    assert h.c3()["c3_parado"] is True and len(h.apagados) == 1
+    assert h.latido()["c3_mode"] == "real" and _edad_latido(h) == 0
+    assert any("última config válida" in t for t in h.sent)
+
+
+def test_config_invalida_con_c3_en_real_no_late(h):
+    svc = operando(h)
+    ts = h.latido()["ts"]
+    (h.data_dir / c3.CONFIG_FILE_NAME).write_text(json.dumps({"habilitado": True, "politica": "x"}))
+    h.avanzar(15)
+    svc.tick()
+    assert h.latido()["ts"] == ts and h.latido()["c3_mode"] == "real"
+    assert "inválido" in h.c3()["latido"]["suspendido"]
+
+
+def test_latido_real_bloqueado_no_late(h):
+    svc = operando(h)
+    ts = h.latido()["ts"]
+    svc.c3 = h.watcher("real", apagar=False)
+    h.avanzar(15)
+    svc.tick()
+    assert "FUTURESBOARD_DOCKER_URL" in h.c3()["bloqueo"]
+    assert h.latido()["ts"] == ts and h.latido()["c3_mode"] == "real"
+    assert "FUTURESBOARD_DOCKER_URL" in h.c3()["latido"]["suspendido"]
+
+
+def test_aviso_max_age_con_intervalo_largo(monkeypatch, tmp_path, caplog):
+    assert c3.aviso_max_age(15) is None and c3.aviso_max_age(30) is None
+    msg = c3.aviso_max_age(60)
+    assert "210" in msg and "PASSIVBOT_WATCHER_MAX_AGE_SECONDS" in msg
+    from types import SimpleNamespace
+
+    for var in ("FUTURESBOARD_DOCKER_URL", "FUTURESBOARD_FORAGER_CONFIG"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv(c3.ENV_MODE, "real")
+    config = SimpleNamespace(API_KEY="k", API_SECRET="s", DATABASE=str(tmp_path / "futures.db"), EXCHANGE="binance",
+                             BINANCE_TESTNET=True, API_BASE_URL="https://demo-fapi.binance.com")
+    settings = rescate.RescateSettings({rescate.ENV_MODE: "off", rescate.ENV_INTERVAL: "60",
+                                        rescate.ENV_LOAN_STATE: str(tmp_path / "loan_state.json")})
+    with caplog.at_level("ERROR"):
+        rescate.build_service(settings, config)
+    assert any("PASSIVBOT_WATCHER_MAX_AGE_SECONDS" in r.getMessage() for r in caplog.records)
+
+
+def test_panel_c3_bajar_el_tope_hasta_cortar_pide_confirmacion(app, client, tmp_path):  # noqa: F811
+    _post(client, _body())  # tope 30
+    harness = C3Harness(_data_dir(app), tmp_path)
+    svc = harness.service("real")
+    svc.tick()  # base 10000
+    harness.capital("9000")
+    harness.avanzar(15)
+    svc.tick()
+    resp = _post(client, _body(tope_pct=5))  # piso 9500 > capital 9000: cortaría a mercado
+    assert resp.status_code == 409
+    d = resp.get_json()
+    assert d["requiere_confirmacion"] is True and "9500.00" in d["error"] and "9000.00" in d["error"]
+    assert c3.load_config(_data_dir(app))[0]["tope_pct"] == "30"
+    assert _post(client, _body(tope_pct=20)).status_code == 200  # piso 8000: no corta
+    assert _post(client, {**_body(tope_pct=5), "confirmar_corte": "si"}).status_code == 400
+    resp = _post(client, {**_body(tope_pct=5), "confirmar_corte": True})
+    assert resp.status_code == 200 and c3.load_config(_data_dir(app))[0]["tope_pct"] == "5"
+    html = client.get("/rescate").get_data(as_text=True)
+    assert "requiere_confirmacion" in html and "confirmar_corte" in html
+
+
+def test_tarjeta_c3_muestra_latido_y_lectura_con_error(app, client, tmp_path):  # noqa: F811
+    import time as _time
+
+    _post(client, _body())
+    harness = C3Harness(_data_dir(app), tmp_path)
+    harness.clock.t = _time.time()
+    svc = harness.service("real")
+    svc.tick()
+    m = client.get("/").get_data(as_text=True).split('data-tarjeta="c3"', 1)[1].split("card-footer", 1)[0]
+    assert "latido C3 hace" in m
+    harness.r.fake.read_fail.add("/fapi/v2/account")
+    for _ in range(8):
+        harness.avanzar(15)
+        svc.tick()
+    m = client.get("/").get_data(as_text=True).split('data-tarjeta="c3"', 1)[1].split("card-footer", 1)[0]
+    assert "Sin observación" in m and "No se pudo leer" in m and "latido C3 suspendido" in m
+    assert "del piso" not in m
+
+
+def test_config_invalida_no_se_tapa_con_la_ultima_valida_ante_un_oserror(h, monkeypatch):
+    svc = operando(h)
+    (h.data_dir / c3.CONFIG_FILE_NAME).write_text(json.dumps({"habilitado": True, "politica": "x"}))
+    h.avanzar(15)
+    svc.tick()
+    leer = pathlib.Path.read_text
+
+    def read_text(self, *a, **kw):
+        if self.name == c3.CONFIG_FILE_NAME:
+            raise OSError(5, "Input/output error")
+        return leer(self, *a, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", read_text)
+    h.capital("6000")
+    h.avanzar(15)
+    svc.tick()
+    assert h.c3()["confirmacion"] is None and "deshabilitado" in h.c3()["latido"]["suspendido"]

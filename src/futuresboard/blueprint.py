@@ -1741,8 +1741,19 @@ def c3_config():
     """Config de C3 (stop con reinicio). Validación estricta; habilitar abre una generación nueva (base nueva)."""
     body = request.get_json(silent=True)
     params = body if isinstance(body, dict) else {}
+    confirmar = False
+    if isinstance(body, dict) and "confirmar_corte" in body:
+        body = dict(body)
+        confirmar = body.pop("confirmar_corte")
     try:
+        if not isinstance(confirmar, bool):
+            raise ValueError("confirmar_corte tiene que ser true o false.")
         parsed = c3.validate_config_body(body)
+        aviso = None if confirmar else c3.corte_al_guardar(_bot_store().data_dir, parsed)
+        if aviso:
+            # Bajar el tope con la cuenta en pérdida corta a mercado en ~1 min: el panel pide confirmarlo.
+            _rescate_audit("c3_config", params, "requiere_confirmacion", aviso)
+            return _json_response({"ok": False, "requiere_confirmacion": True, "error": aviso}, 409)
         cfg = c3.save_config(_bot_store().data_dir, parsed, session.get("username") or "?")
     except ValueError as exc:
         _rescate_audit("c3_config", params, "rechazado", str(exc))
