@@ -147,8 +147,9 @@ RETIRO_SIMULADO = "simulado"  # servicio en dry_run o FUTURESBOARD_RESCATE_RETIR
 RETIRO_REAL = "real"          # servicio y retiro en real: transfiere de verdad
 FRECUENCIA_OFF = "off"
 FRECUENCIAS = (FRECUENCIA_OFF, "diaria", "semanal", "mensual", "trimestral", "anual")
-# Frecuencia que preselecciona el perfil "Con rescate" (y el panel cuando el retiro está apagado). Sale del backtest de
-# retiro del lab (botbulls-lab multianual/retiro, preregistro_retiro.json): ver docs/rescate.md ("Retiro periódico").
+# Frecuencia que pone el perfil "Con rescate" (el panel del rescate la muestra como recomendada, pero no la preselecciona:
+# con el retiro apagado muestra off, si no el próximo guardado lo prendería). Sale del backtest de retiro del lab
+# (botbulls-lab multianual/retiro, preregistro_retiro.json): ver docs/rescate.md ("Retiro periódico").
 FRECUENCIA_RECOMENDADA = "anual"
 DEFAULT_RETIRO_BASE = Decimal("10000")
 MIN_RETIRO = Decimal("10")       # no se retiran montos menores (y un excedente menor cierra el período)
@@ -2162,19 +2163,16 @@ class RescateService:
         periodo = retiro_periodo(ts, frecuencia)
         ancla = f"{frecuencia}|{cfg.get('retiro_desde')}|{estado}"
         if rs.get("ancla") != ancla:
-            rs.update(ancla=ancla, estado=estado, periodo_cerrado=periodo, vencido_desde=None, sim_offset="0.00")
+            rs.update(ancla=ancla, estado=estado, periodo_cerrado=periodo, vencido_desde=None)
             texto = (f"Retiro periódico activo ({'simulado' if simulado else 'real'}, {frecuencia}, base de futuros "
                      f"{money(base)} USDT): el primer retiro es al comienzo del próximo período "
                      f"({retiro_proximo_inicio(ts, frecuencia).isoformat()}).")
             self._event(state, TIPO_RETIRO, texto, modo_txt)
             self._notify(f"💸 <b>Rescate</b>: {esc(texto)}", simulado)
         vencido = rs.get("periodo_cerrado") != periodo
-        offset = Decimal(0)
-        if simulado:
-            try:
-                offset = dec(rs.get("sim_offset") or "0")
-            except ValueError:
-                offset = Decimal(0)
+        # En simulación se descuenta todo lo retirado simulado (el acumulado simulado): como si hubiera salido de
+        # futuros, así el mismo excedente no se "retira" otra vez en cada período (ni al cambiar la frecuencia).
+        offset = self._retirado(state, MODE_DRY_RUN) if simulado else Decimal(0)
         ev: Dict[str, Any] = {"ts": now_iso(ts), "estado": estado, "frecuencia": frecuencia, "base": money(base),
                               "periodo": periodo, "vencido": vencido, "motivo_espera": None, "error": None,
                               "proximo_en": retiro_proximo_inicio(ts, frecuencia).isoformat(),
@@ -2242,15 +2240,9 @@ class RescateService:
             self._transferir(state, TIPO_RETIRO, calc["monto"], snap, now_ms, motivo)
 
     def _retiro_simulado(self, state: Dict[str, Any], monto: Decimal, motivo: str) -> None:
-        """Retiro en estado simulado: no llama a /sapi. Registra lo que HARÍA y lo descuenta de la wallet que mira el
-        retiro (``sim_offset``) para no volver a "retirar" el mismo excedente en cada período."""
+        """Retiro en estado simulado: no llama a /sapi. Registra lo que HARÍA; suma al acumulado simulado, que el retiro
+        descuenta de la wallet que mira (ver ``_retiro``) para no volver a "retirar" el mismo excedente."""
         self._transferencias += 1
-        rs = state.setdefault("retiro", {})
-        try:
-            offset = dec(rs.get("sim_offset") or "0")
-        except ValueError:
-            offset = Decimal(0)
-        rs["sim_offset"] = money(offset + monto)
         entry = {"id": secrets.token_hex(8), "tipo": TIPO_RETIRO, "modo": MODE_DRY_RUN, "monto": money(monto),
                  "creada_en": now_iso(self.clock()), "motivo": motivo}
         self._sumar_retirado(state, MODE_DRY_RUN, monto, None, entry)

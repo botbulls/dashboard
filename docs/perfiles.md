@@ -39,6 +39,10 @@ apalancamiento 10). OOS = ventanas de 12 meses que arrancan desde 2023-11-10, re
 | Conservador (TWE 3 sin rescate) | +59,5 % | +41,9 % | −9,4 % | 45 % | 20.000 (10.000 de futuros + 10.000 quietos) |
 | Con rescate (TWE 4 + rescate + U70) | +86,3 % | +60 % | −12 % | 63–65 % | 20.000 (10.000 de futuros + 10.000 de reserva) |
 
+Esas filas se midieron sin tope de pérdida total; con el tope 60 % del perfil las ventanas OOS dan lo mismo (mediana
+86,5 %, media 60,2 %, peor −11,6 % a −12,0 % según el escenario, drawdown 61,7 % a 64,8 %): en ninguna ventana se
+llega al tope.
+
 Lo que la tabla no dice:
 
 - **Conservador**: en las ventanas OOS la cuenta de futuros llegó a bajar 71 % (3.369 de 10.000) sin liquidarse.

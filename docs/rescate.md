@@ -371,7 +371,7 @@ se midieron todas con este disparo (X 70 %, paso 1.000) como rescate de referenc
 |---|---|---|---|
 | cualquiera | `off` (default) | off | No se evalúa. |
 | `off` | cualquiera | off | El rescate no opera. |
-| `dry_run` | `dry_run` o `real` | simulado | No transfiere. Registra lo que HARÍA (ledger `simulada`, `[SIMULACIÓN]` en Telegram) y lo descuenta de la wallet que mira el retiro, para no "retirar" el mismo excedente en cada período. El resto del rescate no lo ve. |
+| `dry_run` | `dry_run` o `real` | simulado | No transfiere. Registra lo que HARÍA (ledger `simulada`, `[SIMULACIÓN]` en Telegram) y el retiro descuenta de la wallet que mira todo el acumulado simulado, para no "retirar" el mismo excedente en cada período ni al cambiar la frecuencia. El resto del rescate no lo ve. Después de retirar en real, una simulación posterior sigue descontando el acumulado simulado viejo (es una estimación). |
 | `real` | `dry_run` | simulado | Igual, con el rescate transfiriendo de verdad. |
 | `real` | `real` | real | Transfiere de verdad. |
 

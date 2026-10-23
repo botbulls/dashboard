@@ -589,3 +589,18 @@ def test_tarjeta_retiro_off_en_el_servicio(client, hd):  # noqa: F811
     _servicio(hd, retiro_mode="off").tick()
     tarjeta = _tarjeta(_home(client), "retiro")
     assert "FUTURESBOARD_RESCATE_RETIRO_MODE=off" in tarjeta
+
+
+def test_simulado_no_recuenta_al_cambiar_la_frecuencia(h):  # noqa: F811
+    svc = _arrancar(h, "dry_run", "real")
+    _ir_a(h, "2023-11-15 00:00:05")
+    svc.tick()
+    assert h.state()["retiro"]["acumulado"]["dry_run"] == "2000.00"
+    _configurar(h, retiro={"retiro_frecuencia": "semanal", "retiro_base_usdt": 10000})  # re-ancla
+    h.avanzar(15)
+    svc.tick()
+    _ir_a(h, "2023-11-20 00:00:05")
+    svc.tick()
+    st = h.state()
+    assert st["retiro"]["periodo_cerrado"] == "2023-S47" and st["retiro"]["acumulado"]["dry_run"] == "2000.00"
+    assert st["retiro"]["eval"]["simulado_descontado"] == "2000.00"
