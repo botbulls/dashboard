@@ -492,6 +492,8 @@ body.bb {
 .bb-fila-destacada > * { font-weight: 600; background: var(--bb-surface-2) !important; }
 .bb-tabla-nota { font-weight: 400; color: var(--bb-text-2); font-size: var(--bb-fs-13); }
 .bb-seccion--angosta { max-width: 760px; }
+.bb-seccion--formulario { max-width: 560px; }
+.bb-seccion--formulario .card-body { display: grid; gap: var(--bb-s1); }
 .bb table.dataTable { width: 100% !important; margin: 0 !important; border-collapse: collapse !important; color: var(--bb-text); }
 .bb table.dataTable thead th, .bb table.dataTable thead td { padding: var(--bb-s2) var(--bb-s3); border-bottom: 1px solid var(--bb-border) !important; background-color: var(--bb-surface-2); color: var(--bb-text-2); }
 .bb table.dataTable tbody th, .bb table.dataTable tbody td { padding: var(--bb-s2) var(--bb-s3); border-top: 0 !important; border-bottom: 1px solid var(--bb-border); }
@@ -513,6 +515,34 @@ body.bb {
 .bb .dataTables_wrapper .dataTables_paginate .paginate_button.disabled { color: var(--bb-text-3) !important; }
 .bb-calculadora th[scope="row"] { color: var(--bb-text-2); font-weight: 500; white-space: nowrap; }
 .bb-calculadora .form-control { min-width: 7em; }
+
+/* ------------------------------------------------------------------ 11b. Avisos, formularios y páginas de configuración */
+.bb-alerta { display: flex; gap: var(--bb-s3); align-items: flex-start; padding: var(--bb-s3) var(--bb-s4); border-radius: var(--bb-r-lg); font-size: var(--bb-fs-14); margin: 0; }
+.bb-alerta > i { margin-top: 4px; }
+.bb-alerta > div { min-width: 0; display: grid; gap: var(--bb-s1); }
+.bb-alerta--info { background: var(--bb-info-bg); color: var(--bb-info); }
+.bb-alerta--aviso { background: var(--bb-warn-bg); color: var(--bb-warn); }
+.bb-alerta--peligro { background: var(--bb-loss-bg); color: var(--bb-loss); }
+.bb-alerta .bb-detalle, .bb-alerta .bb-detalle summary { color: inherit; }
+.bb-alerta .bb-detalle summary, .bb .alert .bb-detalle summary { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+.bb-alerta-accion .alert-heading { display: flex; align-items: center; }
+.bb-alerta-accion .form-check { display: flex; gap: var(--bb-s3); align-items: flex-start; padding-left: 0; }
+.bb-alerta-accion .form-check-input { float: none; margin: 2px 0 0; flex: 0 0 20px; width: 20px; height: 20px; }
+.bb-dos-columnas { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--bb-s4); align-items: start; }
+.bb-dos-columnas > * { min-width: 0; }
+.bb-card-titulo { display: inline; font-size: var(--bb-fs-16); margin: 0; }
+.bb-card-sub { font-size: var(--bb-fs-13); font-weight: 400; color: var(--bb-text-2); margin-left: var(--bb-s2); }
+.bb-tabla-dato th[scope="row"] { width: 42%; color: var(--bb-text-2); font-weight: 500; font-size: var(--bb-fs-13); }
+.bb-tabla-dato td { overflow-wrap: anywhere; }
+.bb-form__pie { display: flex; align-items: center; gap: var(--bb-s3); flex-wrap: wrap; }
+.bb-form__respuesta { font-size: var(--bb-fs-14); color: var(--bb-text-2); }
+.bb .form-switch .form-check-input { width: 2.5em; height: 1.4em; margin-top: 0; }
+.bb .form-switch { display: flex; align-items: center; gap: var(--bb-s3); padding-left: 0; }
+.bb .form-switch .form-check-input { float: none; margin-left: 0; flex: 0 0 auto; }
+.bb .form-switch .form-check-label { font-weight: 500; }
+@media (max-width: 991.98px) {
+  .bb-dos-columnas { grid-template-columns: minmax(0, 1fr); }
+}
 
 /* ------------------------------------------------------------------ 12. Pie */
 .bb-pie { padding: var(--bb-s5); padding-right: calc(var(--bb-s5) + 56px); border-top: 1px solid var(--bb-border); color: var(--bb-text-2); font-size: var(--bb-fs-13); display: grid; gap: var(--bb-s2); }
@@ -553,6 +583,7 @@ body.bb {
   .bb-contenido { padding: var(--bb-s4); gap: var(--bb-s4); }
   .bb-contenido__cuerpo { gap: var(--bb-s4); }
   .bb-pie { padding: var(--bb-s4) var(--bb-s4) calc(var(--bb-s4) + env(safe-area-inset-bottom, 0px)); }
+  .bb-pie a { display: inline-flex; align-items: center; min-height: var(--bb-tap); }
   .bb-encabezado { align-items: flex-start; }
   .bb-encabezado h1 { font-size: var(--bb-fs-24); }
   .bb-solo-escritorio { display: none !important; }
@@ -610,6 +641,11 @@ body.bb {
   .bb-confirmacion__botones .btn { flex: 1 1 0; }
   .bb .dataTables_wrapper .dataTables_filter input, .bb .dataTables_wrapper .dataTables_length select { min-height: var(--bb-tap); font-size: var(--bb-fs-16); }
   .bb .dataTables_wrapper .dataTables_paginate .paginate_button { min-height: var(--bb-tap); min-width: var(--bb-tap); display: inline-flex; align-items: center; justify-content: center; }
+  /* Casillas y switches: la etiqueta completa los 44 px del objetivo táctil. */
+  .bb .form-check { min-height: var(--bb-tap); align-items: center; }
+  .bb .form-check-label { padding: var(--bb-s2) 0; }
+  .bb .form-switch .form-check-input { width: 3em; height: 1.75em; }
+  .bb-alerta-accion .form-check-input { width: 24px; height: 24px; flex-basis: 24px; }
 }
 
 /* ------------------------------------------------------------------ 16. Neutralizar lo viejo mientras queden reglas de

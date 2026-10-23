@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Ajustes de la cuenta{% endblock %}
 {% block content %}
-  <div class="row justify-content-center">
-    <div class="col-lg-6">
+  <div class="bb-seccion bb-seccion--formulario">
+    <div>
       {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
           <div class="mb-3">
@@ -19,43 +19,44 @@
         <div class="card-body">
           <form method="POST">
             <div class="mb-3">
-              <label for="username" class="form-label">Username</label>
-              <input class="form-control" id="username" name="username" type="text" value="{{ username }}" required>
+              <label for="username" class="form-label">Usuario</label>
+              <input class="form-control" id="username" name="username" type="text" value="{{ username }}" required autocapitalize="none" autocorrect="off" spellcheck="false">
             </div>
 
             <div class="mb-3">
-              <label for="theme_default" class="form-label">Default theme</label>
+              <label for="theme_default" class="form-label">Tema por defecto</label>
               <select class="form-select" id="theme_default" name="theme_default">
-                <option value="light" {% if theme_default == 'light' %}selected{% endif %}>Light</option>
-                <option value="dark" {% if theme_default == 'dark' %}selected{% endif %}>Dark</option>
+                <option value="light" {% if theme_default == 'light' %}selected{% endif %}>Claro</option>
+                <option value="dark" {% if theme_default == 'dark' %}selected{% endif %}>Oscuro</option>
               </select>
-              <div class="form-text">Used when the browser has no saved preference.</div>
+              <div class="form-text">Se usa cuando este navegador no tiene un tema elegido.</div>
             </div>
 
             <hr>
+            <h2 class="bb-card-titulo d-block mb-3">Cambiar la contraseña</h2>
 
             <div class="mb-3">
-              <label for="current_password" class="form-label">Current password</label>
+              <label for="current_password" class="form-label">Contraseña actual</label>
               <div class="input-group">
                 <input class="form-control" id="current_password" name="current_password" type="password" autocomplete="current-password">
-                <button class="btn btn-outline-secondary" type="button" data-toggle-password="current_password" aria-label="Show password">
+                <button class="btn btn-outline-secondary" type="button" data-toggle-password="current_password" aria-label="Mostrar contraseña">
                   <i class="fas fa-eye" aria-hidden="true"></i>
                 </button>
               </div>
             </div>
 
             <div class="mb-3">
-              <label for="new_password" class="form-label">New password</label>
+              <label for="new_password" class="form-label">Contraseña nueva</label>
               <div class="input-group">
                 <input class="form-control" id="new_password" name="new_password" type="password" autocomplete="new-password">
-                <button class="btn btn-outline-secondary" type="button" data-toggle-password="new_password" aria-label="Show password">
+                <button class="btn btn-outline-secondary" type="button" data-toggle-password="new_password" aria-label="Mostrar contraseña">
                   <i class="fas fa-eye" aria-hidden="true"></i>
                 </button>
               </div>
-              <div class="form-text">Leave blank to keep your current password.</div>
+              <div class="form-text">Dejala vacía para no cambiarla.</div>
             </div>
 
-            <button type="submit" class="btn btn-primary">Save</button>
+            <button type="submit" class="btn btn-primary">Guardar cambios</button>
           </form>
         </div>
       </div>
@@ -81,7 +82,7 @@
             icon.classList.toggle('fa-eye', !isPassword);
             icon.classList.toggle('fa-eye-slash', isPassword);
           }
-          btn.setAttribute('aria-label', isPassword ? 'Hide password' : 'Show password');
+          btn.setAttribute('aria-label', isPassword ? 'Ocultar contraseña' : 'Mostrar contraseña');
         });
       });
     })();

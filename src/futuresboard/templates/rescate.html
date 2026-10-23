@@ -1,241 +1,260 @@
 {% extends "base.html" %}
 {% block title %}Rescate (colchón){% endblock %}
+{% block bajada %}<p>Préstamo de spot a futuros cuando el margen se acerca a la liquidación, con tope de pérdida total.</p>{% endblock %}
 {% block content %}
-    <div class="alert alert-warning" role="note">
-        <strong>Importante.</strong> {{ aviso }}
-        El bot dimensiona sobre el capital propio (wallet menos lo prestado); la reserva de spot solo se inyecta
-        cerca de la liquidación. Se devuelve sola cuando no hay posiciones y, en partes, con posiciones abiertas
-        si el margen está sano (ratio en o arriba del umbral de devolución). El tope de pérdida total ejecuta
-        <strong>Apagar</strong> (detiene passivbot y cierra todo a mercado) cuando se confirma: al primer cruce
-        queda en confirmación y se ejecuta si una lectura posterior (por defecto 60 s después) sigue debajo del límite.
+    {# Avisos que piden acción primero (los muestra el JS con d-none); después la explicación, corta y con el detalle plegado. #}
+    <div class="alert alert-danger d-none bb-alerta-accion" id="rescateTope" role="alert" aria-live="assertive">
+        <h2 class="alert-heading"><i class="fas fa-exclamation-triangle me-2" aria-hidden="true"></i>Tope de pérdida disparado</h2>
+        <p class="mb-2" data-r="tope-texto"></p>
+        <div class="form-check mb-2">
+            <input class="form-check-input" type="checkbox" id="rescateTopeCheck">
+            <label class="form-check-label" for="rescateTopeCheck">Revisé el estado en Binance. Al reconocerlo se desbloquea START y el rescate queda deshabilitado (habilitarlo de nuevo fija una base nueva).</label>
+        </div>
+        <button type="button" class="btn btn-danger" id="rescateTopeAck" disabled>Reconocer tope</button>
+        <details class="bb-detalle mt-2">
+            <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Qué hizo Apagar</summary>
+            <p class="mb-0 mt-1" data-r="tope-apagar"></p>
+        </details>
+    </div>
+
+    <div class="alert alert-warning d-none bb-alerta-accion" id="rescateConfirmacion" role="status" aria-live="polite">
+        <h2 class="alert-heading"><i class="fas fa-hourglass-half me-2" aria-hidden="true"></i>Tope de pérdida en confirmación</h2>
+        <p class="mb-0" data-r="confirmacion-texto"></p>
     </div>
 
     <div id="rescateErrores" class="alert alert-danger d-none" role="alert"></div>
 
-    <div class="alert alert-warning d-none" id="rescateConfirmacion" role="status" aria-live="polite">
-        <h5 class="alert-heading"><i class="fas fa-hourglass-half me-2"></i>Tope de pérdida en confirmación</h5>
-        <p class="mb-0" data-r="confirmacion-texto"></p>
-    </div>
-
-    <div class="alert alert-danger d-none" id="rescateTope" role="alert" aria-live="assertive">
-        <h5 class="alert-heading"><i class="fas fa-exclamation-triangle me-2"></i>Tope de pérdida disparado</h5>
-        <p class="mb-2" data-r="tope-texto"></p>
-        <p class="mb-2" data-r="tope-apagar"></p>
-        <div class="form-check mb-2">
-            <input class="form-check-input" type="checkbox" id="rescateTopeCheck">
-            <label class="form-check-label small" for="rescateTopeCheck">Revisé el estado en Binance. Al reconocerlo se desbloquea START y el rescate queda deshabilitado (habilitarlo de nuevo fija una base nueva).</label>
+    <div class="bb-alerta bb-alerta--aviso" role="note">
+        <i class="fas fa-exclamation-triangle" aria-hidden="true"></i>
+        <div>
+            <p class="mb-0"><strong>Importante.</strong> {{ aviso }}</p>
+            <details class="bb-detalle">
+                <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Cómo funciona</summary>
+                <p class="mb-0 mt-1">El bot dimensiona sobre el capital propio (wallet menos lo prestado); la reserva de spot solo se inyecta
+                cerca de la liquidación. Se devuelve sola cuando no hay posiciones y, en partes, con posiciones abiertas
+                si el margen está sano (ratio en o arriba del umbral de devolución). El tope de pérdida total ejecuta
+                <strong>Apagar</strong> (detiene passivbot y cierra todo a mercado) cuando se confirma: al primer cruce
+                queda en confirmación y se ejecuta si una lectura posterior (por defecto 60 s después) sigue debajo del límite.</p>
+            </details>
         </div>
-        <button type="button" class="btn btn-sm btn-outline-light bg-danger" id="rescateTopeAck" disabled>Reconocer tope</button>
     </div>
 
-    <div class="row g-3">
-        <div class="col-lg-6">
-            <div class="card h-100">
-                <div class="card-header"><strong>Estado</strong> <span class="small ms-2" data-r="servicio"></span></div>
-                <div class="card-body">
-                    <table class="table table-sm mb-0">
-                        <tbody>
-                            <tr><th scope="row">Ratio margen / mantenimiento</th><td data-r="ratio">-</td></tr>
-                            <tr><th scope="row">Disparo por uPnL</th><td data-r="upnl">-</td></tr>
-                            <tr><th scope="row">Retiro periódico de ganancias</th><td data-r="retiro">-</td></tr>
-                            <tr><th scope="row">Posiciones abiertas</th><td data-r="posiciones">-</td></tr>
-                            <tr><th scope="row">Préstamo pendiente</th><td data-r="prestamo">-</td></tr>
-                            <tr><th scope="row">USDT libre en spot</th><td data-r="spot">-</td></tr>
-                            <tr><th scope="row">Capital total (futuros + spot)</th><td data-r="capital">-</td></tr>
-                            <tr><th scope="row">Base / límite del tope</th><td data-r="base">-</td></tr>
-                            <tr><th scope="row">Transferencia en vuelo</th><td data-r="en-vuelo">-</td></tr>
-                            <tr><th scope="row">Última lectura</th><td data-r="ultimo">-</td></tr>
-                        </tbody>
-                    </table>
-                    <p class="small text-danger mt-2 mb-0 d-none" data-r="bloqueo"></p>
-                </div>
+    <div class="bb-dos-columnas">
+        <div class="card">
+            <div class="card-header"><h2 class="bb-card-titulo">Estado</h2> <span class="bb-card-sub" data-r="servicio"></span></div>
+            <div class="card-body">
+                <table class="table bb-tabla-dato mb-0">
+                    <tbody>
+                        <tr><th scope="row">Ratio margen / mantenimiento</th><td data-r="ratio">-</td></tr>
+                        <tr><th scope="row">Disparo por uPnL</th><td data-r="upnl">-</td></tr>
+                        <tr><th scope="row">Retiro periódico de ganancias</th><td data-r="retiro">-</td></tr>
+                        <tr><th scope="row">Posiciones abiertas</th><td data-r="posiciones">-</td></tr>
+                        <tr><th scope="row">Préstamo pendiente</th><td data-r="prestamo">-</td></tr>
+                        <tr><th scope="row">USDT libre en spot</th><td data-r="spot">-</td></tr>
+                        <tr><th scope="row">Capital total (futuros + spot)</th><td data-r="capital">-</td></tr>
+                        <tr><th scope="row">Base / límite del tope</th><td data-r="base">-</td></tr>
+                        <tr><th scope="row">Transferencia en vuelo</th><td data-r="en-vuelo">-</td></tr>
+                        <tr><th scope="row">Última lectura</th><td data-r="ultimo">-</td></tr>
+                    </tbody>
+                </table>
+                <p class="bb-alerta bb-alerta--peligro mt-2 mb-0 d-none" data-r="bloqueo"></p>
             </div>
         </div>
-        <div class="col-lg-6">
-            <div class="card h-100">
-                <div class="card-header"><strong>Configuración</strong></div>
-                <div class="card-body">
-                    <form id="rescateForm" novalidate>
-                        <div class="form-check form-switch mb-3">
-                            <input class="form-check-input" type="checkbox" role="switch" id="rescateHabilitado">
-                            <label class="form-check-label" for="rescateHabilitado">Rescate habilitado</label>
-                        </div>
-                        <div class="mb-2">
-                            <label class="form-label small" for="rescateReserva">Reserva máxima (USDT)</label>
-                            <input class="form-control form-control-sm" type="number" id="rescateReserva" step="any" min="{{ limites['reserva_max_usdt'][0] }}" max="{{ limites['reserva_max_usdt'][1] }}">
-                            <div class="form-text">Lo máximo que se puede prestar de spot a futuros en total ({{ limites['reserva_max_usdt'][0] }}–{{ limites['reserva_max_usdt'][1] }}).</div>
-                        </div>
-                        <div class="mb-2">
-                            <label class="form-label small" for="rescatePaso">Paso por inyección (USDT)</label>
-                            <input class="form-control form-control-sm" type="number" id="rescatePaso" step="any" min="{{ limites['paso_usdt'][0] }}" max="{{ limites['paso_usdt'][1] }}">
-                            <div class="form-text">Monto de cada inyección; no puede superar la reserva.</div>
-                        </div>
-                        <div class="mb-2">
-                            <label class="form-label small" for="rescateUmbral">Umbral margen / mantenimiento</label>
-                            <input class="form-control form-control-sm" type="number" id="rescateUmbral" step="any" min="{{ limites['umbral_ratio'][0] }}" max="{{ limites['umbral_ratio'][1] }}">
-                            <div class="form-text">Se inyecta solo si el ratio baja de este valor ({{ limites['umbral_ratio'][0] }}–{{ limites['umbral_ratio'][1] }}; Binance liquida en 1).</div>
-                        </div>
-                        <div class="mb-2">
-                            <label class="form-label small" for="rescateUmbralDevolucion">Umbral de devolución parcial</label>
-                            <input class="form-control form-control-sm" type="number" id="rescateUmbralDevolucion" step="any" min="{{ limites['umbral_devolucion_ratio'][0] }}" max="{{ limites['umbral_devolucion_ratio'][1] }}">
-                            <div class="form-text">Con posiciones abiertas, si el ratio está en o arriba de este valor se devuelve lo que lo deja ahí ({{ limites['umbral_devolucion_ratio'][0] }}–{{ limites['umbral_devolucion_ratio'][1] }}). Tiene que ser mayor que el de inyección, para que lo devuelto no vuelva a entrar.</div>
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label small" for="rescateTopePct">Tope de pérdida total (%)</label>
-                            <input class="form-control form-control-sm" type="number" id="rescateTopePct" step="any" min="{{ limites['tope_perdida_pct'][0] }}" max="{{ limites['tope_perdida_pct'][1] }}">
-                            <div class="form-text">Obligatorio para habilitar ({{ limites['tope_perdida_pct'][0] }}–{{ limites['tope_perdida_pct'][1] }}). Sobre el capital total al momento de habilitar.</div>
-                        </div>
-                        <hr>
-                        <div class="form-check form-switch mb-1">
-                            <input class="form-check-input" type="checkbox" role="switch" id="rescateUpnlHabilitado">
-                            <label class="form-check-label" for="rescateUpnlHabilitado">Disparo anticipado por uPnL</label>
-                        </div>
-                        <div class="form-text mb-2">Además del disparo de margen (que tiene prioridad): inyecta un paso cuando <code>uPnL + préstamo ≤ -X % × (wallet - préstamo)</code>; el paso siguiente, recién cuando la pérdida vuelve a cruzar la línea. Con el disparo prendido, la devolución parcial no devuelve lo que volvería a pedir. Solo actúa si el servicio corre con <code>FUTURESBOARD_RESCATE_UPNL_MODE</code> en <code>dry_run</code> (solo registra y avisa: no presta, ni simulado) o <code>real</code> (transfiere con el servicio en <code>real</code>; con el servicio en <code>dry_run</code> simula, y el préstamo simulado achica el balance con el que dimensiona passivbot). Con la cuenta ya en pérdida, bajar X o prenderlo pide confirmación si inyectaría ya (uno o varios pasos seguidos). En el backtest no salvó ninguna ventana más que el disparo de margen ni cambió el capital final: solo decide cuánta reserva ya está en futuros cuando llega la mecha. Validado con TWE 4; con TWE 2 no inyectó nunca.</div>
-                        <div class="mb-2">
-                            <label class="form-label small" for="rescateUpnlX">X: pérdida no cubierta (% del capital propio de futuros)</label>
-                            <input class="form-control form-control-sm" type="number" id="rescateUpnlX" step="any" min="{{ limites['upnl_x_pct'][0] }}" max="{{ limites['upnl_x_pct'][1] }}">
-                            <div class="form-text">{{ limites['upnl_x_pct'][0] }}–{{ limites['upnl_x_pct'][1] }}. Default 70 (el elegido en el backtest).</div>
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label small" for="rescateUpnlPaso">Paso por inyección del disparo uPnL (USDT)</label>
-                            <input class="form-control form-control-sm" type="number" id="rescateUpnlPaso" step="any" min="{{ limites['upnl_paso_usdt'][0] }}" max="{{ limites['upnl_paso_usdt'][1] }}">
-                            <div class="form-text">No puede superar la reserva. Default 1000.</div>
-                        </div>
-                        <hr>
-                        <div class="mb-2">
-                            <label class="form-label small" for="rescateRetiroFrecuencia">Retiro periódico de ganancias (futuros → spot)</label>
-                            <select class="form-select form-select-sm" id="rescateRetiroFrecuencia">
-                                <option value="off">off</option>
-                                <option value="diaria">diaria</option>
-                                <option value="semanal">semanal (lunes)</option>
-                                <option value="mensual">mensual (día 1)</option>
-                                <option value="trimestral">trimestral (1 de ene/abr/jul/oct)</option>
-                                <option value="anual">anual (1 de enero)</option>
-                            </select>
-                            <div class="form-text">Al comienzo de cada período (UTC) pasa a spot lo que la wallet de futuros (realizada, sin el uPnL) tenga por encima de la base, sin préstamo pendiente ni tope en confirmación, limitado por <code>maxWithdrawAmount</code> y por las guardas (el ratio queda en el umbral de devolución o arriba; no dispara el disparo por uPnL). El primer retiro es al comienzo del próximo período. Solo actúa si el servicio corre con <code>FUTURESBOARD_RESCATE_RETIRO_MODE</code> en <code>dry_run</code> (simula) o <code>real</code>. Recomendada por el backtest: <span data-r="retiro-recomendada">{{ retiro_recomendada }}</span>. Los números de TWE 4 + rescate suponen retirar la ganancia: sin retiro, una caída profunda se lleva también la reserva.</div>
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label small" for="rescateRetiroBase">Base de futuros (USDT)</label>
-                            <input class="form-control form-control-sm" type="number" id="rescateRetiroBase" step="any" min="{{ limites['retiro_base_usdt'][0] }}" max="{{ limites['retiro_base_usdt'][1] }}">
-                            <div class="form-text">Lo que queda en futuros después de retirar ({{ limites['retiro_base_usdt'][0] }}–{{ limites['retiro_base_usdt'][1] }}). Default 10000.</div>
-                        </div>
-                        <button type="submit" class="btn btn-primary btn-sm" id="rescateGuardar">Guardar</button>
-                        <span class="small ms-2" id="rescateRespuesta" role="status" aria-live="polite"></span>
-                    </form>
-                </div>
+        <div class="card">
+            <div class="card-header"><h2 class="bb-card-titulo">Configuración</h2></div>
+            <div class="card-body">
+                <form id="rescateForm" novalidate>
+                    <div class="form-check form-switch mb-3">
+                        <input class="form-check-input" type="checkbox" role="switch" id="rescateHabilitado">
+                        <label class="form-check-label" for="rescateHabilitado">Rescate habilitado</label>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label" for="rescateReserva">Reserva máxima (USDT)</label>
+                        <input class="form-control" type="number" inputmode="decimal" id="rescateReserva" step="any" min="{{ limites['reserva_max_usdt'][0] }}" max="{{ limites['reserva_max_usdt'][1] }}">
+                        <div class="form-text">Lo máximo que se puede prestar de spot a futuros en total ({{ limites['reserva_max_usdt'][0] }}–{{ limites['reserva_max_usdt'][1] }}).</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label" for="rescatePaso">Paso por inyección (USDT)</label>
+                        <input class="form-control" type="number" inputmode="decimal" id="rescatePaso" step="any" min="{{ limites['paso_usdt'][0] }}" max="{{ limites['paso_usdt'][1] }}">
+                        <div class="form-text">Monto de cada inyección; no puede superar la reserva.</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label" for="rescateUmbral">Umbral margen / mantenimiento</label>
+                        <input class="form-control" type="number" inputmode="decimal" id="rescateUmbral" step="any" min="{{ limites['umbral_ratio'][0] }}" max="{{ limites['umbral_ratio'][1] }}">
+                        <div class="form-text">Se inyecta solo si el ratio baja de este valor ({{ limites['umbral_ratio'][0] }}–{{ limites['umbral_ratio'][1] }}; Binance liquida en 1).</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label" for="rescateUmbralDevolucion">Umbral de devolución parcial</label>
+                        <input class="form-control" type="number" inputmode="decimal" id="rescateUmbralDevolucion" step="any" min="{{ limites['umbral_devolucion_ratio'][0] }}" max="{{ limites['umbral_devolucion_ratio'][1] }}">
+                        <div class="form-text">Con posiciones abiertas, si el ratio está en o arriba de este valor se devuelve lo que lo deja ahí ({{ limites['umbral_devolucion_ratio'][0] }}–{{ limites['umbral_devolucion_ratio'][1] }}). Tiene que ser mayor que el de inyección, para que lo devuelto no vuelva a entrar.</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label" for="rescateTopePct">Tope de pérdida total (%)</label>
+                        <input class="form-control" type="number" inputmode="decimal" id="rescateTopePct" step="any" min="{{ limites['tope_perdida_pct'][0] }}" max="{{ limites['tope_perdida_pct'][1] }}">
+                        <div class="form-text">Obligatorio para habilitar ({{ limites['tope_perdida_pct'][0] }}–{{ limites['tope_perdida_pct'][1] }}). Sobre el capital total al momento de habilitar.</div>
+                    </div>
+                    <hr>
+                    <div class="form-check form-switch mb-1">
+                        <input class="form-check-input" type="checkbox" role="switch" id="rescateUpnlHabilitado">
+                        <label class="form-check-label" for="rescateUpnlHabilitado">Disparo anticipado por uPnL</label>
+                    </div>
+                    <details class="bb-detalle mb-2">
+                        <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Cómo funciona el disparo por uPnL</summary>
+                        <div class="form-text mt-1">Además del disparo de margen (que tiene prioridad): inyecta un paso cuando <code>uPnL + préstamo ≤ -X % × (wallet - préstamo)</code>; el paso siguiente, recién cuando la pérdida vuelve a cruzar la línea. Con el disparo prendido, la devolución parcial no devuelve lo que volvería a pedir. Solo actúa si el servicio corre con <code>FUTURESBOARD_RESCATE_UPNL_MODE</code> en <code>dry_run</code> (solo registra y avisa: no presta, ni simulado) o <code>real</code> (transfiere con el servicio en <code>real</code>; con el servicio en <code>dry_run</code> simula, y el préstamo simulado achica el balance con el que dimensiona passivbot). Con la cuenta ya en pérdida, bajar X o prenderlo pide confirmación si inyectaría ya (uno o varios pasos seguidos). En el backtest no salvó ninguna ventana más que el disparo de margen ni cambió el capital final: solo decide cuánta reserva ya está en futuros cuando llega la mecha. Validado con TWE 4; con TWE 2 no inyectó nunca.</div>
+                    </details>
+                    <div class="mb-3">
+                        <label class="form-label" for="rescateUpnlX">X: pérdida no cubierta (% del capital propio de futuros)</label>
+                        <input class="form-control" type="number" inputmode="decimal" id="rescateUpnlX" step="any" min="{{ limites['upnl_x_pct'][0] }}" max="{{ limites['upnl_x_pct'][1] }}">
+                        <div class="form-text">{{ limites['upnl_x_pct'][0] }}–{{ limites['upnl_x_pct'][1] }}. Default 70 (el elegido en el backtest).</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label" for="rescateUpnlPaso">Paso por inyección del disparo uPnL (USDT)</label>
+                        <input class="form-control" type="number" inputmode="decimal" id="rescateUpnlPaso" step="any" min="{{ limites['upnl_paso_usdt'][0] }}" max="{{ limites['upnl_paso_usdt'][1] }}">
+                        <div class="form-text">No puede superar la reserva. Default 1000.</div>
+                    </div>
+                    <hr>
+                    <div class="mb-3">
+                        <label class="form-label" for="rescateRetiroFrecuencia">Retiro periódico de ganancias (futuros → spot)</label>
+                        <select class="form-select" id="rescateRetiroFrecuencia">
+                            <option value="off">off</option>
+                            <option value="diaria">diaria</option>
+                            <option value="semanal">semanal (lunes)</option>
+                            <option value="mensual">mensual (día 1)</option>
+                            <option value="trimestral">trimestral (1 de ene/abr/jul/oct)</option>
+                            <option value="anual">anual (1 de enero)</option>
+                        </select>
+                        <div class="form-text">Recomendada por el backtest: <span data-r="retiro-recomendada">{{ retiro_recomendada }}</span>. Los números de TWE 4 + rescate suponen retirar la ganancia: sin retiro, una caída profunda se lleva también la reserva.</div>
+                        <details class="bb-detalle">
+                            <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Cómo funciona el retiro</summary>
+                            <div class="form-text mt-1">Al comienzo de cada período (UTC) pasa a spot lo que la wallet de futuros (realizada, sin el uPnL) tenga por encima de la base, sin préstamo pendiente ni tope en confirmación, limitado por <code>maxWithdrawAmount</code> y por las guardas (el ratio queda en el umbral de devolución o arriba; no dispara el disparo por uPnL). El primer retiro es al comienzo del próximo período. Solo actúa si el servicio corre con <code>FUTURESBOARD_RESCATE_RETIRO_MODE</code> en <code>dry_run</code> (simula) o <code>real</code>.</div>
+                        </details>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label" for="rescateRetiroBase">Base de futuros (USDT)</label>
+                        <input class="form-control" type="number" inputmode="decimal" id="rescateRetiroBase" step="any" min="{{ limites['retiro_base_usdt'][0] }}" max="{{ limites['retiro_base_usdt'][1] }}">
+                        <div class="form-text">Lo que queda en futuros después de retirar ({{ limites['retiro_base_usdt'][0] }}–{{ limites['retiro_base_usdt'][1] }}). Default 10000.</div>
+                    </div>
+                    <div class="bb-form__pie">
+                        <button type="submit" class="btn btn-primary" id="rescateGuardar">Guardar</button>
+                        <span class="bb-form__respuesta" id="rescateRespuesta" role="status" aria-live="polite"></span>
+                    </div>
+                </form>
             </div>
         </div>
     </div>
 
-    <h4 class="mt-4 mb-3" id="c3"><i class="fas fa-redo-alt me-2"></i>Stop con reinicio (C3)</h4>
-    <div class="alert alert-warning" role="note">
-        <strong>Importante.</strong> {{ c3_aviso }}
-        El piso es sobre la cuenta de <strong>futuros</strong> (equity menos el préstamo del rescate), con la misma
-        confirmación que el tope: al primer cruce queda en confirmación y corta si una lectura posterior sigue debajo.
-    </div>
-    <div id="c3Errores" class="alert alert-danger d-none" role="alert"></div>
-    <div class="alert alert-warning d-none" id="c3Confirmacion" role="status" aria-live="polite">
-        <h5 class="alert-heading"><i class="fas fa-hourglass-half me-2"></i>Piso de C3 en confirmación</h5>
-        <p class="mb-0" data-c3="confirmacion-texto"></p>
-    </div>
-    <div class="alert alert-danger d-none" id="c3Corte" role="alert" aria-live="assertive">
-        <h5 class="alert-heading"><i class="fas fa-stop-circle me-2"></i>C3 parado</h5>
+    <h2 class="bb-seccion__titulo mt-2" id="c3"><i class="fas fa-redo-alt" aria-hidden="true"></i> Stop con reinicio (C3)</h2>
+    <div class="alert alert-danger d-none bb-alerta-accion" id="c3Corte" role="alert" aria-live="assertive">
+        <h2 class="alert-heading"><i class="fas fa-stop-circle me-2" aria-hidden="true"></i>C3 parado</h2>
         <p class="mb-1" data-c3="corte-texto"></p>
         <p class="mb-0" data-c3="corte-reinicio"></p>
     </div>
+    <div class="alert alert-warning d-none bb-alerta-accion" id="c3Confirmacion" role="status" aria-live="polite">
+        <h2 class="alert-heading"><i class="fas fa-hourglass-half me-2" aria-hidden="true"></i>Piso de C3 en confirmación</h2>
+        <p class="mb-0" data-c3="confirmacion-texto"></p>
+    </div>
+    <div id="c3Errores" class="alert alert-danger d-none" role="alert"></div>
+    <div class="bb-alerta bb-alerta--aviso" role="note">
+        <i class="fas fa-exclamation-triangle" aria-hidden="true"></i>
+        <div>
+            <p class="mb-0"><strong>Importante.</strong> {{ c3_aviso }}</p>
+            <details class="bb-detalle">
+                <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Sobre qué mide el piso</summary>
+                <p class="mb-0 mt-1">El piso es sobre la cuenta de <strong>futuros</strong> (equity menos el préstamo del rescate), con la misma
+                confirmación que el tope: al primer cruce queda en confirmación y corta si una lectura posterior sigue debajo.</p>
+            </details>
+        </div>
+    </div>
 
-    <div class="row g-3">
-        <div class="col-lg-6">
-            <div class="card h-100">
-                <div class="card-header"><strong>Estado de C3</strong> <span class="small ms-2" data-c3="servicio"></span></div>
-                <div class="card-body">
-                    <table class="table table-sm mb-0">
-                        <tbody>
-                            <tr><th scope="row">Estado</th><td data-c3="estado">-</td></tr>
-                            <tr><th scope="row">Base (capital de futuros)</th><td data-c3="base">-</td></tr>
-                            <tr><th scope="row">Piso</th><td data-c3="piso">-</td></tr>
-                            <tr><th scope="row">Capital de futuros actual</th><td data-c3="capital">-</td></tr>
-                            <tr><th scope="row">Distancia al piso</th><td data-c3="distancia">-</td></tr>
-                            <tr><th scope="row">Índice desde el corte</th><td data-c3="indice">-</td></tr>
-                            <tr><th scope="row">Próximo reinicio estimado</th><td data-c3="proximo">-</td></tr>
-                            <tr><th scope="row">Reinicios automáticos</th><td data-c3="reinicios">-</td></tr>
-                            <tr><th scope="row">Latido para passivbot</th><td data-c3="latido">-</td></tr>
-                        </tbody>
-                    </table>
-                    <p class="small text-danger mt-2 mb-0 d-none" data-c3="bloqueo"></p>
-                </div>
+    <div class="bb-dos-columnas">
+        <div class="card">
+            <div class="card-header"><h3 class="bb-card-titulo">Estado de C3</h3> <span class="bb-card-sub" data-c3="servicio"></span></div>
+            <div class="card-body">
+                <table class="table bb-tabla-dato mb-0">
+                    <tbody>
+                        <tr><th scope="row">Estado</th><td data-c3="estado">-</td></tr>
+                        <tr><th scope="row">Base (capital de futuros)</th><td data-c3="base">-</td></tr>
+                        <tr><th scope="row">Piso</th><td data-c3="piso">-</td></tr>
+                        <tr><th scope="row">Capital de futuros actual</th><td data-c3="capital">-</td></tr>
+                        <tr><th scope="row">Distancia al piso</th><td data-c3="distancia">-</td></tr>
+                        <tr><th scope="row">Índice desde el corte</th><td data-c3="indice">-</td></tr>
+                        <tr><th scope="row">Próximo reinicio estimado</th><td data-c3="proximo">-</td></tr>
+                        <tr><th scope="row">Reinicios automáticos</th><td data-c3="reinicios">-</td></tr>
+                        <tr><th scope="row">Latido para passivbot</th><td data-c3="latido">-</td></tr>
+                    </tbody>
+                </table>
+                <p class="bb-alerta bb-alerta--peligro mt-2 mb-0 d-none" data-c3="bloqueo"></p>
             </div>
         </div>
-        <div class="col-lg-6">
-            <div class="card h-100">
-                <div class="card-header"><strong>Configuración de C3</strong></div>
-                <div class="card-body">
-                    <form id="c3Form" novalidate>
-                        <div class="form-check form-switch mb-3">
-                            <input class="form-check-input" type="checkbox" role="switch" id="c3Habilitado">
-                            <label class="form-check-label" for="c3Habilitado">C3 habilitado</label>
+        <div class="card">
+            <div class="card-header"><h3 class="bb-card-titulo">Configuración de C3</h3></div>
+            <div class="card-body">
+                <form id="c3Form" novalidate>
+                    <div class="form-check form-switch mb-3">
+                        <input class="form-check-input" type="checkbox" role="switch" id="c3Habilitado">
+                        <label class="form-check-label" for="c3Habilitado">C3 habilitado</label>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label" for="c3Tope">Tope sobre futuros (%)</label>
+                        <input class="form-control" type="number" inputmode="decimal" id="c3Tope" step="any" min="{{ c3_limites['tope_pct'][0] }}" max="{{ c3_limites['tope_pct'][1] }}">
+                        <div class="form-text">Piso = base × (1 − tope%) ({{ c3_limites['tope_pct'][0] }}–{{ c3_limites['tope_pct'][1] }}). La base es el capital de futuros al habilitar o al reiniciar.</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label" for="c3Politica">Política de reinicio</label>
+                        <select class="form-select" id="c3Politica">
+                            <option value="rebote">Rebote del índice</option>
+                            <option value="cooldown">Cooldown (días)</option>
+                            <option value="ambos">Lo que ocurra primero</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label" for="c3Rebote">Rebote (%)</label>
+                        <input class="form-control" type="number" inputmode="decimal" id="c3Rebote" step="any" min="{{ c3_limites['rebote_pct'][0] }}" max="{{ c3_limites['rebote_pct'][1] }}">
+                        <div class="form-text">Reinicia si el índice equiponderado de los pares sube este % desde su mínimo posterior al corte (muestreado cada hora).</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label" for="c3Cooldown">Cooldown (días)</label>
+                        <input class="form-control" type="number" inputmode="decimal" id="c3Cooldown" step="any" min="{{ c3_limites['cooldown_dias'][0] }}" max="{{ c3_limites['cooldown_dias'][1] }}">
+                    </div>
+                    <div class="row g-2 mb-3">
+                        <div class="col-6">
+                            <label class="form-label" for="c3MaxReinicios">Máx. reinicios automáticos</label>
+                            <input class="form-control" type="number" inputmode="numeric" id="c3MaxReinicios" step="1" min="{{ c3_limites['max_reinicios'][0] }}" max="{{ c3_limites['max_reinicios'][1] }}">
                         </div>
-                        <div class="mb-2">
-                            <label class="form-label small" for="c3Tope">Tope sobre futuros (%)</label>
-                            <input class="form-control form-control-sm" type="number" id="c3Tope" step="any" min="{{ c3_limites['tope_pct'][0] }}" max="{{ c3_limites['tope_pct'][1] }}">
-                            <div class="form-text">Piso = base × (1 − tope%) ({{ c3_limites['tope_pct'][0] }}–{{ c3_limites['tope_pct'][1] }}). La base es el capital de futuros al habilitar o al reiniciar.</div>
+                        <div class="col-6">
+                            <label class="form-label" for="c3Ventana">en (días)</label>
+                            <input class="form-control" type="number" inputmode="numeric" id="c3Ventana" step="1" min="{{ c3_limites['ventana_dias'][0] }}" max="{{ c3_limites['ventana_dias'][1] }}">
                         </div>
-                        <div class="mb-2">
-                            <label class="form-label small" for="c3Politica">Política de reinicio</label>
-                            <select class="form-select form-select-sm" id="c3Politica">
-                                <option value="rebote">Rebote del índice</option>
-                                <option value="cooldown">Cooldown (días)</option>
-                                <option value="ambos">Lo que ocurra primero</option>
-                            </select>
-                        </div>
-                        <div class="mb-2">
-                            <label class="form-label small" for="c3Rebote">Rebote (%)</label>
-                            <input class="form-control form-control-sm" type="number" id="c3Rebote" step="any" min="{{ c3_limites['rebote_pct'][0] }}" max="{{ c3_limites['rebote_pct'][1] }}">
-                            <div class="form-text">Reinicia si el índice equiponderado de los pares sube este % desde su mínimo posterior al corte (muestreado cada hora).</div>
-                        </div>
-                        <div class="mb-2">
-                            <label class="form-label small" for="c3Cooldown">Cooldown (días)</label>
-                            <input class="form-control form-control-sm" type="number" id="c3Cooldown" step="any" min="{{ c3_limites['cooldown_dias'][0] }}" max="{{ c3_limites['cooldown_dias'][1] }}">
-                        </div>
-                        <div class="row g-2 mb-3">
-                            <div class="col-6">
-                                <label class="form-label small" for="c3MaxReinicios">Máx. reinicios automáticos</label>
-                                <input class="form-control form-control-sm" type="number" id="c3MaxReinicios" step="1" min="{{ c3_limites['max_reinicios'][0] }}" max="{{ c3_limites['max_reinicios'][1] }}">
-                            </div>
-                            <div class="col-6">
-                                <label class="form-label small" for="c3Ventana">en (días)</label>
-                                <input class="form-control form-control-sm" type="number" id="c3Ventana" step="1" min="{{ c3_limites['ventana_dias'][0] }}" max="{{ c3_limites['ventana_dias'][1] }}">
-                            </div>
-                            <div class="form-text">Superado el límite queda parado esperando un START a mano (que re-ancla la base). 0 = nunca reinicia solo.</div>
-                        </div>
-                        <button type="submit" class="btn btn-primary btn-sm" id="c3Guardar">Guardar</button>
-                        <span class="small ms-2" id="c3Respuesta" role="status" aria-live="polite"></span>
-                    </form>
-                </div>
+                        <div class="form-text">Superado el límite queda parado esperando un START a mano (que re-ancla la base). 0 = nunca reinicia solo.</div>
+                    </div>
+                    <div class="bb-form__pie">
+                        <button type="submit" class="btn btn-primary" id="c3Guardar">Guardar</button>
+                        <span class="bb-form__respuesta" id="c3Respuesta" role="status" aria-live="polite"></span>
+                    </div>
+                </form>
             </div>
         </div>
     </div>
 
-    <div class="card mt-3">
-        <div class="card-header"><strong>Historial de C3</strong> <span class="small text-muted">(cortes, reinicios y bases)</span></div>
-        <div class="card-body table-responsive">
-            <table class="table table-sm mb-0">
-                <thead><tr><th>Fecha (UTC)</th><th>Tipo</th><th>Modo</th><th>Detalle</th></tr></thead>
+    <div class="card">
+        <div class="card-header"><h3 class="bb-card-titulo">Historial de C3</h3> <span class="bb-card-sub">cortes, reinicios y bases</span></div>
+        <div class="bb-tabla-scroll">
+            <table class="table mb-0">
+                <thead><tr><th scope="col">Fecha (UTC)</th><th scope="col">Tipo</th><th scope="col">Modo</th><th scope="col">Detalle</th></tr></thead>
                 <tbody data-c3="historial"><tr><td colspan="4">Sin historial.</td></tr></tbody>
             </table>
         </div>
     </div>
 
-    <div class="card mt-3 mb-4">
-        <div class="card-header"><strong>Últimos eventos</strong></div>
-        <div class="card-body table-responsive">
-            <table class="table table-sm mb-0">
-                <thead><tr><th>Fecha (UTC)</th><th>Tipo</th><th>Modo</th><th>Detalle</th></tr></thead>
+    <div class="card">
+        <div class="card-header"><h2 class="bb-card-titulo">Últimos eventos</h2></div>
+        <div class="bb-tabla-scroll">
+            <table class="table mb-0">
+                <thead><tr><th scope="col">Fecha (UTC)</th><th scope="col">Tipo</th><th scope="col">Modo</th><th scope="col">Detalle</th></tr></thead>
                 <tbody data-r="eventos"><tr><td colspan="4">Sin eventos.</td></tr></tbody>
             </table>
         </div>
     </div>
-
     <script>
      (function () {
          const q = (k) => document.querySelector(`[data-r="${k}"]`);
@@ -268,7 +287,10 @@
              const m = document.querySelector('meta[name="csrf-token"]');
              return m ? m.getAttribute('content') : '';
          }
-         function usdt(v) { return (v === null || v === undefined) ? '-' : `${v} USDT`; }
+         // Números que se muestran: es-AR (solo el texto; lo que se manda y se compara sigue crudo).
+         const n = (v) => window.BB.fmt.num(v);
+         const pc = (v) => window.BB.fmt.pct(v);
+         function usdt(v) { return (v === null || v === undefined) ? '-' : `${n(v)} USDT`; }
          function set(k, t) { q(k).textContent = t; }
 
          const c3q = (k) => document.querySelector(`[data-c3="${k}"]`);
@@ -319,13 +341,13 @@
              c3set('servicio', c.servicio_vivo ? `modo ${c.modo || 'sin datos'}` : `servicio sin latido reciente (modo ${c.modo || 'sin datos'})`);
              c3set('estado', `${C3_ESTADOS[c.estado] || c.estado}${c.c3_parado ? sim : ''}`);
              c3set('base', c.base ? `${usdt(c.base.capital)} · ${c.base.fijada_en} (${c.base.motivo})` : '-');
-             c3set('piso', c.piso ? `${usdt(c.piso)} (tope ${cfg.tope_pct}%)` : '-');
+             c3set('piso', c.piso ? `${usdt(c.piso)} (tope ${pc(cfg.tope_pct)})` : '-');
              const u = c.ultimo || {};
-             c3set('capital', u.capital ? `${usdt(u.capital)} · ${u.ts || ''}${u.error ? ` · ${u.error}` : ''}${u.prestamo_real && u.prestamo_real !== '0.00' ? ` · descontado préstamo ${u.prestamo_real}` : ''}` : (u.error || '-'));
-             c3set('distancia', c.distancia_usdt ? `${usdt(c.distancia_usdt)} (${c.distancia_pct}%)` : '-');
+             c3set('capital', u.capital ? `${usdt(u.capital)} · ${u.ts || ''}${u.error ? ` · ${u.error}` : ''}${u.prestamo_real && u.prestamo_real !== '0.00' ? ` · descontado préstamo ${n(u.prestamo_real)}` : ''}` : (u.error || '-'));
+             c3set('distancia', c.distancia_usdt ? `${usdt(c.distancia_usdt)} (${pc(c.distancia_pct)})` : '-');
              const corte = c.corte;
              const idx = corte && corte.indice ? corte.indice : null;
-             c3set('indice', idx ? `${idx.actual || 'sin muestras'} (mínimo ${idx.min}, ${idx.muestras} muestras${idx.rebote_en ? `, rebote ${idx.rebote_en}` : ''})${idx.error ? ` · ${idx.error}` : ''}` : '-');
+             c3set('indice', idx ? `${idx.actual ? n(idx.actual) : 'sin muestras'} (mínimo ${n(idx.min)}, ${idx.muestras} muestras${idx.rebote_en ? `, rebote ${n(idx.rebote_en)}` : ''})${idx.error ? ` · ${idx.error}` : ''}` : '-');
              c3set('proximo', c.proximo_reinicio || '-');
              c3set('reinicios', `${c.reinicios_recientes} en los últimos ${cfg.ventana_dias} días (máximo ${cfg.max_reinicios})`);
              const lat = c.latido || {};
@@ -345,12 +367,12 @@
              const conf = c.confirmacion;
              document.getElementById('c3Confirmacion').classList.toggle('d-none', !conf);
              if (conf) {
-                 c3set('confirmacion-texto', `Primer cruce ${conf.desde_en}: capital de futuros ${conf.capital} USDT <= piso ${conf.piso} USDT (base ${conf.base}, tope ${conf.pct}%)${conf.modo === 'dry_run' ? ' · SIMULADO' : ''}. Última lectura ${conf.ultimo_en}: ${conf.ultimo_capital} USDT. Corta si una lectura desde ${conf.ejecuta_desde_en} sigue en o debajo; si vuelve arriba, se cancela.${c.servicio_vivo ? '' : ' El servicio no late: nadie la está evaluando.'}`);
+                 c3set('confirmacion-texto', `Primer cruce ${conf.desde_en}: capital de futuros ${n(conf.capital)} USDT ≤ piso ${n(conf.piso)} USDT (base ${n(conf.base)}, tope ${pc(conf.pct)})${conf.modo === 'dry_run' ? ' · SIMULADO' : ''}. Última lectura ${conf.ultimo_en}: ${n(conf.ultimo_capital)} USDT. Corta si una lectura desde ${conf.ejecuta_desde_en} sigue en o debajo; si vuelve arriba, se cancela.${c.servicio_vivo ? '' : ' El servicio no late: nadie la está evaluando.'}`);
              }
              document.getElementById('c3Corte').classList.toggle('d-none', !c.c3_parado);
              if (c.c3_parado && corte) {
                  const ap = corte.apagar || {};
-                 c3set('corte-texto', `${corte.en}${corte.modo === 'dry_run' ? ' · SIMULADO' : ''}: ${corte.origen === 'tope_rescate' ? 'por el tope del rescate' : `capital ${corte.capital} USDT <= piso ${corte.piso} USDT`}. Apagar: ${ap.resultado || '-'}${ap.intentos ? ` (intentos ${ap.intentos})` : ''}. ${ap.detalle || ''}`);
+                 c3set('corte-texto', `${corte.en}${corte.modo === 'dry_run' ? ' · SIMULADO' : ''}: ${corte.origen === 'tope_rescate' ? 'por el tope del rescate' : `capital ${n(corte.capital)} USDT ≤ piso ${n(corte.piso)} USDT`}. Apagar: ${ap.resultado || '-'}${ap.intentos ? ` (intentos ${ap.intentos})` : ''}. ${ap.detalle || ''}`);
                  const r = corte.reinicio || {};
                  c3set('corte-reinicio', `Reinicio: ${c.proximo_reinicio || '-'}${r.aviso ? ` · ${r.aviso}` : ''}${r.resultado === 'error' ? ` · último intento falló: ${r.detalle}` : ''}. Un START a mano desde el panel también lo reanuda (re-ancla la base).`);
              }
@@ -382,32 +404,32 @@
                  } else if (e.error) {
                      t = `${etiqueta} · ${e.error}`;
                  } else {
-                     t = `${etiqueta} · X ${e.x_pct}% · uPnL ${e.upnl} USDT · próximo paso con uPnL <= ${e.upnl_dispara} USDT (capital propio ${e.capital_propio}, préstamo ${e.prestamo})${e.dispara ? ' · CONDICIÓN CUMPLIDA' : ''}`;
+                     t = `${etiqueta} · X ${pc(e.x_pct)} · uPnL ${n(e.upnl)} USDT · próximo paso con uPnL ≤ ${n(e.upnl_dispara)} USDT (capital propio ${n(e.capital_propio)}, préstamo ${n(e.prestamo)})${e.dispara ? ' · CONDICIÓN CUMPLIDA' : ''}`;
                      if (e.devolucion_max_guarda !== null && e.devolucion_max_guarda !== undefined) {
-                         t += ` · la devolución parcial no pasa de ${e.devolucion_max_guarda} USDT (guarda)`;
+                         t += ` · la devolución parcial no pasa de ${n(e.devolucion_max_guarda)} USDT (guarda)`;
                      }
                      t += ` · ${e.ts}`;
                  }
                  if (!svc.vivo) t += ' · dato viejo: el servicio no late';
              }
              const ult = up.ultima_inyeccion;
-             if (ult) t += ` · última inyección uPnL ${ult.monto} USDT el ${ult.ts}${ult.modo === 'dry_run' ? ' (simulada)' : ''}`;
+             if (ult) t += ` · última inyección uPnL ${n(ult.monto)} USDT el ${ult.ts}${ult.modo === 'dry_run' ? ' (simulada)' : ''}`;
              return t;
          }
 
          function textoRetiro(r, svc) {
              if (!r || r.frecuencia === 'off') {
-                 return `apagado${r && r.acumulado && r.acumulado.real !== '0.00' ? ` · retirado acumulado ${r.acumulado.real} USDT` : ''}`;
+                 return `apagado${r && r.acumulado && r.acumulado.real !== '0.00' ? ` · retirado acumulado ${n(r.acumulado.real)} USDT` : ''}`;
              }
              let t;
              if (r.estado === 'off') {
                  t = `${r.frecuencia} en el panel, pero el servicio no lo ejecuta (FUTURESBOARD_RESCATE_RETIRO_MODE=${r.modo || 'off'})`;
              } else {
                  const e = r.eval;
-                 t = `${RETIRO_ESTADOS[r.estado] || r.estado} · ${r.frecuencia} · base ${r.base} USDT`;
+                 t = `${RETIRO_ESTADOS[r.estado] || r.estado} · ${r.frecuencia} · base ${n(r.base)} USDT`;
                  if (e) {
                      if (e.error) t += ` · ${e.error}`;
-                     if (e.excedente !== undefined) t += ` · excedente ${e.excedente} USDT (retirable ahora ${e.monto_posible}, lo limita: ${e.limite})`;
+                     if (e.excedente !== undefined) t += ` · excedente ${n(e.excedente)} USDT (retirable ahora ${n(e.monto_posible)}, lo limita: ${e.limite})`;
                      t += e.vencido ? ` · VENCIDO (período ${e.periodo})${e.motivo_espera ? ': espera, ' + e.motivo_espera : ''}` : ` · próximo retiro ${e.proximo_en}`;
                      t += ` · ${e.ts}`;
                  } else {
@@ -416,8 +438,8 @@
                  if (!svc.vivo) t += ' · dato viejo: el servicio no late';
              }
              const ac = r.acumulado || {};
-             t += ` · retirado acumulado ${ac.real || '0.00'} USDT${ac.dry_run && ac.dry_run !== '0.00' ? ` (simulado ${ac.dry_run})` : ''}`;
-             if (r.ultimo) t += ` · último ${r.ultimo.monto} USDT el ${r.ultimo.ts}${r.ultimo.modo === 'dry_run' ? ' (simulado)' : ''}`;
+             t += ` · retirado acumulado ${n(ac.real || '0.00')} USDT${ac.dry_run && ac.dry_run !== '0.00' ? ` (simulado ${n(ac.dry_run)})` : ''}`;
+             if (r.ultimo) t += ` · último ${n(r.ultimo.monto)} USDT el ${r.ultimo.ts}${r.ultimo.modo === 'dry_run' ? ' (simulado)' : ''}`;
              return t;
          }
 
@@ -434,7 +456,7 @@
                  set('ultimo', u.ts || '-');
              }
              const sim = u.simulado ? ' (simulado)' : '';
-             set('ratio', u.ratio ? `${u.ratio} (inyecta debajo de ${cfg.umbral_ratio}; devuelve parcial desde ${cfg.umbral_devolucion_ratio})${sim}` : (u.posiciones === 0 ? 'sin posiciones' : '-'));
+             set('ratio', u.ratio ? `${n(u.ratio)} (inyecta debajo de ${n(cfg.umbral_ratio)}; devuelve parcial desde ${n(cfg.umbral_devolucion_ratio)})${sim}` : (u.posiciones === 0 ? 'sin posiciones' : '-'));
              set('posiciones', (u.posiciones === undefined || u.posiciones === null) ? '-' : String(u.posiciones));
              set('upnl', textoUpnl(s.upnl || {}, svc));
              set('retiro', textoRetiro(s.retiro, svc));
@@ -442,12 +464,12 @@
              set('spot', `${usdt(u.spot_usdt)}${sim}`);
              set('capital', usdt(u.capital));
              if (s.base) {
-                 set('base', `base ${usdt(s.base.capital)} · límite ${usdt(s.limite_tope)} (tope ${s.tope_pct}%)${s.tope_por_prestamo ? ' · rescate deshabilitado: el tope sigue armado por el préstamo real pendiente' : ''}`);
+                 set('base', `base ${usdt(s.base.capital)} · límite ${usdt(s.limite_tope)} (tope ${pc(s.tope_pct)})${s.tope_por_prestamo ? ' · rescate deshabilitado: el tope sigue armado por el préstamo real pendiente' : ''}`);
              } else {
                  set('base', cfg.habilitado ? 'base pendiente: tope todavía no armado (el servicio la fija en el próximo ciclo)' : 'rescate deshabilitado');
              }
              const v = s.en_vuelo;
-             set('en-vuelo', v ? `${v.tipo} ${v.monto} USDT · ${v.estado}${v.tranId ? ` · tranId ${v.tranId}` : ''}` : 'ninguna');
+             set('en-vuelo', v ? `${v.tipo} ${n(v.monto)} USDT · ${v.estado}${v.tranId ? ` · tranId ${v.tranId}` : ''}` : 'ninguna');
              const bloqueo = q('bloqueo');
              bloqueo.textContent = s.bloqueo || '';
              bloqueo.classList.toggle('d-none', !s.bloqueo);
@@ -459,7 +481,7 @@
              const c = s.tope_confirmacion;
              confBox.classList.toggle('d-none', !c);
              if (c) {
-                 set('confirmacion-texto', `Primer cruce ${c.desde_en}: capital ${c.capital} USDT <= límite ${c.limite} USDT (base ${c.base}, tope ${c.pct}%)${c.modo === 'dry_run' ? ' · SIMULADO' : ''}. Última lectura ${c.ultimo_en}: ${c.ultimo_capital} USDT. Se ejecuta Apagar si una lectura desde ${c.ejecuta_desde_en} sigue en o debajo del límite; si vuelve arriba, se cancela. Si se corta la lectura de futuros, decide la próxima (tras un corte largo, la confirmación arranca de cero). Mientras tanto no se inyecta.${c.evaluandose ? '' : ' El servicio no la está evaluando (sin latido reciente o en off): no se ejecuta nada hasta que vuelva, y entonces decide la primera lectura.'}`);
+                 set('confirmacion-texto', `Primer cruce ${c.desde_en}: capital ${n(c.capital)} USDT ≤ límite ${n(c.limite)} USDT (base ${n(c.base)}, tope ${pc(c.pct)})${c.modo === 'dry_run' ? ' · SIMULADO' : ''}. Última lectura ${c.ultimo_en}: ${n(c.ultimo_capital)} USDT. Se ejecuta Apagar si una lectura desde ${c.ejecuta_desde_en} sigue en o debajo del límite; si vuelve arriba, se cancela. Si se corta la lectura de futuros, decide la próxima (tras un corte largo, la confirmación arranca de cero). Mientras tanto no se inyecta.${c.evaluandose ? '' : ' El servicio no la está evaluando (sin latido reciente o en off): no se ejecuta nada hasta que vuelva, y entonces decide la primera lectura.'}`);
              }
 
              const t = s.tope;
@@ -467,7 +489,7 @@
              if (t) {
                  if (topeId !== t.id) { topeCheck.checked = false; topeAck.disabled = true; }
                  topeId = t.id;
-                 set('tope-texto', `${t.disparado_en}: capital ${t.capital} USDT <= límite ${t.limite} USDT (base ${t.base}, tope ${t.pct}%)${t.modo === 'dry_run' ? ' · SIMULADO' : ''}. START está bloqueado.`);
+                 set('tope-texto', `${t.disparado_en}: capital ${n(t.capital)} USDT ≤ límite ${n(t.limite)} USDT (base ${n(t.base)}, tope ${pc(t.pct)})${t.modo === 'dry_run' ? ' · SIMULADO' : ''}. START está bloqueado.`);
                  const ap = t.apagar || {};
                  set('tope-apagar', `Apagar: ${ap.resultado || '-'}${ap.intentos ? ` (intentos ${ap.intentos})` : ''}. ${ap.detalle || ''}`);
              } else {
@@ -560,7 +582,7 @@
                  respuesta.textContent = 'Hay valores que no son números.';
                  return;
              }
-             respuesta.textContent = 'Guardando...';
+             respuesta.textContent = 'Guardando…';
              const enviar = (confirmar) => post('/api/rescate/config', confirmar ? { ...body, confirmar_inyeccion: true } : body).then(({ ok, d }) => {
                  // 409 requiere_confirmacion: con la config nueva el disparo por uPnL inyectaría ya (uno o varios pasos).
                  if (!ok && d.requiere_confirmacion && !confirmar) {
@@ -600,7 +622,7 @@
                  c3Respuesta.textContent = 'Hay valores que no son números (los reinicios y la ventana son enteros).';
                  return;
              }
-             c3Respuesta.textContent = 'Guardando...';
+             c3Respuesta.textContent = 'Guardando…';
              const enviar = (confirmar) => post('/api/c3/config', confirmar ? { ...body, confirmar_corte: true } : body).then(({ ok, d }) => {
                  // 409 requiere_confirmacion: con el tope nuevo C3 cortaría a mercado (Apagar) en cuanto se confirme.
                  if (!ok && d.requiere_confirmacion && !confirmar) {
