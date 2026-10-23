@@ -2,7 +2,10 @@
 <html lang="en" data-theme="auto" data-default-theme="{{ session.get('theme_default', 'auto') }}">
     <head>
         <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+        <meta name="theme-color" media="(prefers-color-scheme: light)" content="#FFFFFF">
+        <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#15181D">
+        <meta name="color-scheme" content="light dark">
         <meta name="csrf-token" content="{{ csrf_token() }}">
         {% block autoreload %}{% endblock %}
         <script>
@@ -25,8 +28,21 @@
                     }
                 }
 
+                // Barra del navegador del celu: en automático manda el media de cada <meta theme-color>;
+                // con un tema elegido, las dos toman la superficie de ese tema.
+                const THEME_COLOR = { light: '#FFFFFF', dark: '#15181D' };
+                function setThemeColor(theme) {
+                    document.querySelectorAll('meta[name="theme-color"]').forEach((m) => {
+                        const media = m.getAttribute('media') || '';
+                        const own = media.indexOf('dark') >= 0 ? THEME_COLOR.dark : THEME_COLOR.light;
+                        m.setAttribute('content', theme === 'auto' ? own : THEME_COLOR[theme]);
+                    });
+                }
+
                 function setThemeAttr(theme) {
-                    document.documentElement.setAttribute('data-theme', normalizeTheme(theme));
+                    const t = normalizeTheme(theme);
+                    document.documentElement.setAttribute('data-theme', t);
+                    setThemeColor(t);
                 }
 
                 function applyChartTheme() {
@@ -161,6 +177,7 @@
             }
             .wrapper {
                 min-height: 100vh;
+                min-height: 100dvh;
                 display: flex;
                 flex-direction: column;
             }

@@ -989,11 +989,6 @@ html[data-theme="auto"] .daterangepicker .calendar-table .next:hover {
     padding: 0.4rem 0.6rem;
   }
   
-  /* Ensure content doesn't overflow */
-  .container-fluid {
-    overflow-x: hidden;
-  }
-  
   .row {
     margin-left: 0;
     margin-right: 0;
