@@ -424,6 +424,60 @@ body.bb {
   .bb-graficos > .col-a, .bb-graficos > .col-b { grid-column: span 6; } .bb-graficos > .col-c { grid-column: span 12; }
 }
 
+/* ------------------------------------------------------------------ 10. Panel del bot (#menu_admin) y confirmaciones */
+.menu_admin { position: fixed; top: var(--bb-s4); right: var(--bb-s4); z-index: 1035; text-align: left; }
+.menu_admin .icono { width: var(--bb-tap); height: var(--bb-tap); border-radius: var(--bb-r); background: var(--bb-ink); color: var(--bb-on-ink); display: grid; place-items: center; cursor: pointer; margin-left: auto; box-shadow: var(--bb-shadow-hover); }
+.menu_admin .icono span { display: grid; place-items: center; }
+.menu_admin .icono svg { width: 22px; height: 22px; }
+.menu_admin .icono svg [fill="#fff"] { fill: var(--bb-on-ink); }
+.menu_admin ul { display: none; position: fixed; top: calc(var(--bb-s4) + var(--bb-tap) + 8px); right: var(--bb-s4); width: 360px; max-height: calc(100vh - 88px); max-height: calc(100dvh - 88px); overflow-y: auto; overscroll-behavior: contain;
+  margin: 0; padding: var(--bb-s4); list-style: none; background: var(--bb-surface); color: var(--bb-text); border: 1px solid var(--bb-border); border-radius: var(--bb-r-lg); box-shadow: var(--bb-shadow-float); }
+.menu_admin.open ul { display: grid; gap: var(--bb-s3); }
+.menu_admin ul li { margin: 0; padding: 0; }
+.bb-panel__grupo { display: grid; gap: var(--bb-s2); padding-top: var(--bb-s3); border-top: 1px solid var(--bb-border); }
+.bb-panel__grupo:first-child { border-top: 0; padding-top: 0; }
+.bb-panel__grupo.d-none { display: none !important; }
+.bb-panel__titulo { font-size: var(--bb-fs-14); font-weight: 600; margin: 0; }
+.bb-panel__titulo label { margin: 0; }
+.bb-panel__estado { margin: 0; font-size: var(--bb-fs-14); }
+.bb-panel__nota { font-size: var(--bb-fs-13); color: var(--bb-text-2); margin: 0; }
+.bb-panel__nota:empty { display: none; }
+.bb-panel__aviso { margin: 0; padding: var(--bb-s2) var(--bb-s3); border-radius: var(--bb-r); background: var(--bb-warn-bg); color: var(--bb-warn); font-size: var(--bb-fs-13); font-weight: 500; }
+.bb-panel__botones { display: flex; gap: var(--bb-s2); flex-wrap: wrap; }
+.menu_admin .form-control, .menu_admin .form-select { font-size: var(--bb-fs-16); min-height: var(--bb-tap); }
+.menu_admin .btn { min-height: var(--bb-tap); }
+/* La advertencia de TWE: el JS le pone text-warning / text-danger; acá se vuelve alerta con ícono (sin tocar el JS). */
+#botTweAdvertencia.text-warning, #botTweAdvertencia.text-danger { display: flex; gap: var(--bb-s2); align-items: flex-start; padding: var(--bb-s2) var(--bb-s3); border-radius: var(--bb-r); font-size: var(--bb-fs-14); font-style: normal; font-weight: 500; }
+#botTweAdvertencia.text-warning { background: var(--bb-warn-bg); }
+#botTweAdvertencia.text-danger { background: var(--bb-loss-bg); }
+#botTweAdvertencia::before { content: "\f071"; font-family: "Font Awesome 5 Free"; font-weight: 900; }
+#botTweAdvertencia.d-none { display: none !important; }
+/* Respuesta de las acciones: el JS pisa className con "bien" / "error" (o vacío). */
+[name=respuesta] p { margin: 0 0 var(--bb-s2); padding: var(--bb-s2) var(--bb-s3); border-radius: var(--bb-r); font-size: var(--bb-fs-14); background: var(--bb-surface); color: var(--bb-text); border: 1px solid var(--bb-border); box-shadow: var(--bb-shadow-float); max-width: 360px; margin-left: auto; cursor: pointer; }
+[name=respuesta].bien p { background: var(--bb-gain-bg); color: var(--bb-gain); border-color: color-mix(in srgb, var(--bb-gain) 30%, transparent); }
+[name=respuesta].error p { background: var(--bb-loss-bg); color: var(--bb-loss); border-color: color-mix(in srgb, var(--bb-loss) 30%, transparent); }
+.menu_admin [name=respuesta] { margin-top: var(--bb-s2); }
+
+.bb-confirmacion__pie { flex-direction: column; align-items: stretch; gap: var(--bb-s3); }
+.bb-confirmacion__pie > * { margin: 0; }
+.bb-confirmacion__riesgo { font-size: var(--bb-fs-14); }
+.bb-confirmacion__botones { display: flex; gap: var(--bb-s2); justify-content: flex-end; flex-wrap: wrap; }
+.bb .modal .form-check { display: flex; align-items: flex-start; gap: var(--bb-s3); padding-left: 0; min-height: var(--bb-tap); }
+.bb .modal .form-check-input { width: 22px; height: 22px; margin: 0; flex: 0 0 22px; float: none; }
+.bb .modal .form-check-label { font-size: var(--bb-fs-14); }
+
+/* Progreso de la acción (job) */
+#botJobModal .bot-job-pasos { list-style: none; padding: 0; margin: 0; }
+#botJobModal .bot-job-pasos li { display: flex; gap: var(--bb-s2); align-items: flex-start; padding: 6px 0; border-bottom: 1px solid var(--bb-border); }
+#botJobModal .bot-job-pasos li:last-child { border-bottom: 0; }
+#botJobModal .bot-job-icono { width: 20px; flex: 0 0 20px; text-align: center; font-weight: 700; }
+#botJobModal .bot-job-pasos li[data-estado="ok"] .bot-job-icono { color: var(--bb-gain); }
+#botJobModal .bot-job-pasos li[data-estado="error"] .bot-job-icono { color: var(--bb-loss); }
+#botJobModal .bot-job-pasos li[data-estado="pendiente"], #botJobModal .bot-job-pasos li[data-estado="omitido"] { color: var(--bb-text-3); }
+#botJobModal .bot-job-detalle { display: block; font-size: var(--bb-fs-13); color: var(--bb-text-2); word-break: break-word; }
+#botJobModal .bot-job-resumen ul { margin-bottom: var(--bb-s2); padding-left: 1.2rem; font-size: var(--bb-fs-13); }
+#botJobModal .bot-job-resumen p { margin-bottom: 6px; }
+
 /* ------------------------------------------------------------------ 12. Pie */
 .bb-pie { padding: var(--bb-s5); padding-right: calc(var(--bb-s5) + 56px); border-top: 1px solid var(--bb-border); color: var(--bb-text-2); font-size: var(--bb-fs-13); display: grid; gap: var(--bb-s2); }
 .bb-pie p { margin: 0; max-width: 72ch; }
@@ -441,6 +495,7 @@ body.bb {
   .bb-monedas td:first-child a:hover, .bb-inactivas li a:hover { color: var(--bb-link); }
   .bb .last-order-badge:hover { background: var(--bb-surface-hover); }
   .bb a.bb-kpi:hover { box-shadow: var(--bb-shadow-hover); border-color: var(--bb-border-strong); }
+  .menu_admin .icono:hover { opacity: .9; }
   .bb .bot-status-badge:hover { filter: brightness(.95); }
 }
 .bb .btn-outline-secondary:active, .bb .btn-light:active, .bb .btn-secondary:active, .bb-icono-btn:active, .bb-nav__item:active { background-color: var(--bb-surface-hover); color: var(--bb-text); }
@@ -505,6 +560,16 @@ body.bb {
   .bb-graficos > * { grid-column: auto !important; }
   .bb-grafico__lienzo { height: 220px; }
   .bb-tabla-chica td a { display: inline-flex; align-items: center; min-height: var(--bb-tap); }
+  .menu_admin { top: calc(6px + env(safe-area-inset-top, 0px)); right: var(--bb-s2); }
+  .menu_admin ul { top: calc(var(--bb-topbar-h) + env(safe-area-inset-top, 0px)); right: 0; left: 0; width: auto;
+    max-height: calc(100vh - var(--bb-topbar-h)); max-height: calc(100dvh - var(--bb-topbar-h) - env(safe-area-inset-top, 0px));
+    border-radius: 0 0 var(--bb-r-lg) var(--bb-r-lg); padding-bottom: calc(var(--bb-s4) + env(safe-area-inset-bottom, 0px)); }
+  .menu_admin .icono { box-shadow: none; }
+  [name=respuesta] p { max-width: none; margin-left: 0; }
+  .bb .btn { min-height: var(--bb-tap); }
+  .bb .btn-close { width: var(--bb-tap); height: var(--bb-tap); padding: 0; margin: -8px -8px -8px auto; background-size: 14px; }
+  .bb .form-control, .bb .form-select { font-size: var(--bb-fs-16); min-height: var(--bb-tap); }
+  .bb-confirmacion__botones .btn { flex: 1 1 0; }
 }
 
 /* ------------------------------------------------------------------ 16. Neutralizar lo viejo mientras queden reglas de

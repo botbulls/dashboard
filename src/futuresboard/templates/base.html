@@ -529,246 +529,112 @@
             })();
         </script>
 
-        <style>
-         .menu_admin {
-             position: fixed;
-             right: 3px;
-             top: 3px;
-             max-width: 280px;
-             z-index: 10000;
-             text-align: left;
-         }
-         nav#menu_admin * {
-             text-align: left;
-         }
-         .menu_admin .icono {
-             text-align: right;
-         }
-         .menu_admin .icono span {
-             background: var(--admin-menu-button-hover-bg);
-             color: var(--admin-menu-text);
-             padding: 7px;
-             border-radius: 5px;
-             display: inline-block;
-         }
-         .menu_admin ul {
-             display: none;
-             box-shadow: 0 5px 15px rgba(0,0,0,0.6);
-             position: fixed;
-             right: 3px;
-             top: 53px;
-             width: 280px;
-             max-height: calc(100vh - 60px);
-             overflow: auto;
-         }
-         .menu_admin.open ul {
-             display: block;
-         }
-         .menu_admin ul{
-             margin: 0;
-             padding: 10px;
-             background: var(--admin-menu-bg);
-             border-radius: 3px;
-         }
-         .menu_admin ul * {
-             color: var(--admin-menu-text);
-         }
-         .menu_admin ul li {
-             margin: 0;
-             padding: 0;
-             list-style: none;
-         }
-         .menu_admin ul li .titulo {
-             font-weight: bold;
-         }
-         .menu_admin ul li.grp {
-             margin-top: 20px;
-             padding: 3px;
-             color: var(--admin-menu-muted);
-         }
-         .menu_admin ul li.btn {
-             margin: 5px;
-             padding: 3px;
-             border-top: 1px solid var(--admin-menu-border);
-         }
-         .menu_admin ul li.btn button {
-             background: var(--admin-menu-button-bg);
-             color: var(--admin-menu-text);
-             border: none;
-             padding: 5px 10px;
-             border: 1px solid var(--admin-menu-button-border);
-             border-radius: 4px;
-             cursor: pointer;
-             font-weight: bold;
-         }
-         .menu_admin ul li.btn button:hover {
-             background: var(--admin-menu-button-hover-bg);
-         }
-
-         .menu_admin ul li.btn input {
-             background: var(--input-bg);
-             color: var(--input-text);
-             border: none;
-             padding: 3px;
-             border-radius: 4px;
-             cursor: pointer;
-         }
-         .menu_admin ul li.btn button:disabled {
-             opacity: 0.5;
-             cursor: not-allowed;
-         }
-         .menu_admin ul li.btn select {
-             background: var(--input-bg);
-             color: var(--input-text);
-         }
-
-         .menu_admin .nota {
-             font-style: italic;
-             font-size: 0.8em;
-             color: #fff59d;
-         }
-
-         [name=respuesta] p {
-             padding: 9px;
-             margin: 0;
-             border: 1px solid var(--admin-menu-border);
-             border-radius: 9px;
-             text-align: center;
-         }
-         [name=respuesta].bien p {
-             background: #2f3;
-         }
-         [name=respuesta].error p {
-             background: #f32;
-         }
-
-        </style>
         <nav class="menu_admin" id="menu_admin" aria-label="Control del bot">
-            <div class="icono" role="button" tabindex="0" aria-label="Abrir panel de control del bot" title="Control del bot"><span>
-                <svg height="30px" version="1.1" viewBox="0 0 10.583 10.583" xmlns="http://www.w3.org/2000/svg"><g transform="translate(30.033 -138.98)" fill="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width=".28328"><path d="m-25.311 140.27-0.18065 1.2039a2.898 2.898 0 0 0-0.6936 0.29015l-0.9817-0.72522-0.80515 0.80515 0.72552 0.9817a2.898 2.898 0 0 0-0.29044 0.6936l-1.2039 0.18065v1.1389l1.2039 0.18065a2.898 2.898 0 0 0 0.29044 0.6936l-0.72552 0.9817 0.80515 0.80515 0.9817-0.72522a2.898 2.898 0 0 0 0.6936 0.29015l0.18065 1.2039h1.1386l0.18065-1.2039a2.898 2.898 0 0 0 0.6939-0.29044l0.9817 0.72551 0.80515-0.80515-0.72552-0.9817a2.898 2.898 0 0 0 0.29044-0.6936l1.2039-0.18065v-1.1389l-1.2007-0.18006v-3e-4a2.898 2.898 0 0 0-0.28986-0.69887l0.72171-0.97672-0.80515-0.80515-0.97672 0.7217a2.898 2.898 0 0 0-0.69917-0.28985l-0.18035-1.2007zm0.56946 2.1411a1.8583 1.8583 0 0 1 1.8583 1.8583 1.8583 1.8583 0 0 1-1.8583 1.8583 1.8583 1.8583 0 0 1-1.8583-1.8583 1.8583 1.8583 0 0 1 1.8583-1.8583z" stop-color="#000000" style="-inkscape-stroke:none;font-variation-settings:normal;paint-order:fill markers stroke"/><circle cx="-24.742" cy="144.27" r=".74061" style="-inkscape-stroke:none;paint-order:fill markers stroke"/></g></svg>
+            <div class="icono" role="button" tabindex="0" aria-label="Abrir el panel de control del bot" aria-expanded="false" aria-controls="bbPanelBot" title="Control del bot"><span>
+                <svg version="1.1" aria-hidden="true" focusable="false" viewBox="0 0 10.583 10.583" xmlns="http://www.w3.org/2000/svg"><g transform="translate(30.033 -138.98)" fill="#fff" stroke-linecap="round" stroke-linejoin="round" stroke-width=".28328"><path d="m-25.311 140.27-0.18065 1.2039a2.898 2.898 0 0 0-0.6936 0.29015l-0.9817-0.72522-0.80515 0.80515 0.72552 0.9817a2.898 2.898 0 0 0-0.29044 0.6936l-1.2039 0.18065v1.1389l1.2039 0.18065a2.898 2.898 0 0 0 0.29044 0.6936l-0.72552 0.9817 0.80515 0.80515 0.9817-0.72522a2.898 2.898 0 0 0 0.6936 0.29015l0.18065 1.2039h1.1386l0.18065-1.2039a2.898 2.898 0 0 0 0.6939-0.29044l0.9817 0.72551 0.80515-0.80515-0.72552-0.9817a2.898 2.898 0 0 0 0.29044-0.6936l1.2039-0.18065v-1.1389l-1.2007-0.18006v-3e-4a2.898 2.898 0 0 0-0.28986-0.69887l0.72171-0.97672-0.80515-0.80515-0.97672 0.7217a2.898 2.898 0 0 0-0.69917-0.28985l-0.18035-1.2007zm0.56946 2.1411a1.8583 1.8583 0 0 1 1.8583 1.8583 1.8583 1.8583 0 0 1-1.8583 1.8583 1.8583 1.8583 0 0 1-1.8583-1.8583 1.8583 1.8583 0 0 1 1.8583-1.8583z" stop-color="#000000" style="-inkscape-stroke:none;font-variation-settings:normal;paint-order:fill markers stroke"/><circle cx="-24.742" cy="144.27" r=".74061" style="-inkscape-stroke:none;paint-order:fill markers stroke"/></g></svg>
             </span></div>
             <div name="respuesta" aria-live="polite"></div>
-            <ul>
-                <li class="grp">
-                    <span class="titulo">PASSIVBOT</span>
+            <ul id="bbPanelBot">
+                <li class="bb-panel__grupo">
+                    <h2 class="bb-panel__titulo">Estado</h2>
+                    <p class="bb-panel__estado" data-bot-panel="estado">Cargando estado…</p>
                 </li>
-                <li class="btn">
-                    <span data-bot-panel="estado">Cargando estado...</span>
-                </li>
-                <li class="btn d-none" data-bot-panel="deshabilitado">
-                    <span class="nota" data-bot-panel="deshabilitado-msg"></span>
+                <li class="bb-panel__grupo bb-panel__grupo--aviso d-none" data-bot-panel="deshabilitado">
+                    <p class="bb-panel__aviso" data-bot-panel="deshabilitado-msg"></p>
                 </li>
 
-                <li class="grp">
-                    <span class="titulo">START</span>
+                <li class="bb-panel__grupo">
+                    <h2 class="bb-panel__titulo"><label for="botPerfilSelect">Perfil de riesgo</label></h2>
+                    <select id="botPerfilSelect" name="perfil" class="form-select">
+                        <option value="conservador">Conservador (TWE 3, sin rescate)</option>
+                        <option value="con_rescate">Con rescate (TWE 4 + rescate + retiro)</option>
+                    </select>
+                    <p class="bb-panel__nota" data-bot-panel="perfil-vigente"></p>
+                    <details class="bb-detalle">
+                        <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Qué hace y números del backtest</summary>
+                        <p class="bb-panel__nota mt-1" data-bot-panel="perfil-desc"></p>
+                    </details>
+                    <div class="bb-panel__botones"><button type="button" class="btn btn-primary" data-bot-accion="perfil">Aplicar perfil</button></div>
+                    <p class="bb-panel__nota">TWE de forager + rescate, disparo por uPnL y retiro en una sola acción. Antes de aplicar se muestra qué cambia. Backtest, no promesa: herramienta, no asesor.</p>
                 </li>
-                <li class="btn">
-                    <label for="botRiesgoSelect"><small>RIESGO</small></label>
-                    <select id="botRiesgoSelect" name="riesgo" class="form-select form-select-sm mt-1 mb-2">
+
+                <li class="bb-panel__grupo">
+                    <h2 class="bb-panel__titulo"><label for="botTweInput">TWE manual</label></h2>
+                    <p class="bb-panel__nota" id="botTweAyuda">TWE long de 0,5 a 8, en pasos de 0,25.</p>
+                    <input id="botTweInput" name="twe_long" type="number" min="0.5" max="8" step="0.25" inputmode="decimal" class="form-control" aria-describedby="botTweAyuda botTweAdvertencia">
+                    <span class="d-none" id="botTweAdvertencia" data-bot-panel="twe-advertencia" role="alert"></span>
+                    <div class="bb-panel__botones"><button type="button" class="btn btn-outline-secondary" data-bot-accion="twe">Iniciar con esta TWE</button></div>
+                    <p class="bb-panel__nota">Escribe twe_long en la config de forager (modo normal) y reinicia passivbot, igual que Iniciar con un riesgo.</p>
+                </li>
+
+                <li class="bb-panel__grupo">
+                    <h2 class="bb-panel__titulo"><label for="botRiesgoSelect">Iniciar con un riesgo</label></h2>
+                    <select id="botRiesgoSelect" name="riesgo" class="form-select">
                         <option value="bajo">Bajo (TWE long 4 / short 1)</option>
                         <option value="medio" selected>Medio (TWE long 6 / short 2)</option>
                         <option value="alto">Alto (TWE long 8 / short 3)</option>
                     </select>
-                    <button type="button" data-bot-accion="start">Iniciar / aplicar riesgo</button>
-                    <span class="nota d-block mt-1">Escribe el riesgo en la config de forager y reinicia passivbot.</span>
+                    <div class="bb-panel__botones"><button type="button" class="btn btn-outline-secondary" data-bot-accion="start">Iniciar / aplicar riesgo</button></div>
+                    <p class="bb-panel__nota">Escribe el riesgo en la config de forager y reinicia passivbot.</p>
                 </li>
 
-                <li class="grp">
-                    <span class="titulo">PERFILES</span>
-                </li>
-                <li class="btn">
-                    <label for="botPerfilSelect"><small>PERFIL DE RIESGO</small></label>
-                    <select id="botPerfilSelect" name="perfil" class="form-select form-select-sm mt-1 mb-1">
-                        <option value="conservador">Conservador (TWE 3, sin rescate)</option>
-                        <option value="con_rescate">Con rescate (TWE 4 + rescate + retiro)</option>
-                    </select>
-                    <span class="nota d-block mb-1" data-bot-panel="perfil-desc"></span>
-                    <span class="nota d-block mb-1" data-bot-panel="perfil-vigente"></span>
-                    <button type="button" data-bot-accion="perfil">Aplicar perfil</button>
-                    <span class="nota d-block mt-1">TWE de forager + rescate, disparo por uPnL y retiro en una sola acción. Antes de aplicar se muestra qué cambia. Backtest, no promesa: herramienta, no asesor.</span>
-                </li>
-
-                <li class="grp">
-                    <span class="titulo">TWE MANUAL</span>
-                </li>
-                <li class="btn">
-                    <label for="botTweInput"><small>TWE LONG (0,5 a 8, paso 0,25)</small></label>
-                    <input id="botTweInput" name="twe_long" type="number" min="0.5" max="8" step="0.25" inputmode="decimal" class="form-control form-control-sm mt-1 mb-1" aria-describedby="botTweAdvertencia">
-                    <span class="nota d-block mb-1 d-none" id="botTweAdvertencia" data-bot-panel="twe-advertencia" role="alert"></span>
-                    <button type="button" data-bot-accion="twe">Iniciar con esta TWE</button>
-                    <span class="nota d-block mt-1">Escribe twe_long en la config de forager (modo normal) y reinicia passivbot, igual que START.</span>
-                </li>
-
-                <li class="grp">
-                    <span class="titulo">STOP</span>
-                </li>
-                <li class="btn">
-                    <button type="button" data-bot-accion="graceful">Graceful stop</button>
-                    <span class="nota d-block mt-1" data-bot-panel="graceful-nota">No abre nuevas posiciones; sigue gestionando las abiertas.</span>
-                </li>
-                <li class="btn">
-                    <button type="button" data-bot-accion="apagar">Apagar</button>
-                    <span class="nota d-block mt-1">Detiene passivbot, cancela TODAS las órdenes abiertas y cierra TODAS las posiciones a mercado. Irreversible.</span>
+                <li class="bb-panel__grupo">
+                    <h2 class="bb-panel__titulo">Detener</h2>
+                    <p class="bb-panel__nota" data-bot-panel="graceful-nota">No abre nuevas posiciones; sigue gestionando las abiertas.</p>
+                    <div class="bb-panel__botones">
+                        <button type="button" class="btn btn-outline-secondary" data-bot-accion="graceful">Parada gradual</button>
+                        <button type="button" class="btn btn-danger" data-bot-accion="apagar">Apagar</button>
+                    </div>
+                    <p class="bb-panel__nota">Apagar detiene passivbot, cancela TODAS las órdenes abiertas y cierra TODAS las posiciones a mercado. Irreversible.</p>
                 </li>
             </ul>
         </nav>
 
-        <!-- Confirmación de acciones del bot -->
-        <div class="modal fade" id="botActionConfirmModal" tabindex="-1" aria-labelledby="botActionConfirmLabel" aria-hidden="true" style="z-index: 10050;">
-            <div class="modal-dialog modal-dialog-centered">
+        <!-- Confirmación de acciones del bot: título y pie fijos (casilla y Confirmar a la vista), el texto scrollea -->
+        <div class="modal fade" id="botActionConfirmModal" tabindex="-1" aria-labelledby="botActionConfirmLabel" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-fullscreen-sm-down">
                 <div class="modal-content">
-                    <div class="modal-header border-warning">
-                        <h5 class="modal-title text-warning" id="botActionConfirmLabel"><i class="fas fa-exclamation-triangle me-2"></i><span data-bot-confirm="titulo"></span></h5>
+                    <div class="modal-header">
+                        <h2 class="modal-title" id="botActionConfirmLabel"><i class="fas fa-exclamation-triangle text-warning me-2" aria-hidden="true"></i><span data-bot-confirm="titulo"></span></h2>
                         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
                     </div>
                     <div class="modal-body">
-                        <p class="mb-2" data-bot-confirm="texto" style="white-space: pre-line;"></p>
-                        <p class="mb-2"><strong>Usted opera bajo su propio riesgo.</strong></p>
+                        <p class="mb-0" data-bot-confirm="texto" style="white-space: pre-line;"></p>
+                    </div>
+                    <div class="modal-footer bb-confirmacion__pie">
+                        <p class="bb-confirmacion__riesgo"><strong>Operás bajo tu propio riesgo.</strong> Herramienta, no asesor.</p>
                         <div class="form-check d-none" data-bot-confirm="check-wrap">
                             <input class="form-check-input" type="checkbox" id="botActionConfirmCheck">
-                            <label class="form-check-label small" for="botActionConfirmCheck" data-bot-confirm="check-label">Entiendo que se cierran TODAS las posiciones a mercado y se cancelan TODAS las órdenes abiertas en Binance Futures, y que no se puede deshacer.</label>
+                            <label class="form-check-label" for="botActionConfirmCheck" data-bot-confirm="check-label">Entiendo que se cierran TODAS las posiciones a mercado y se cancelan TODAS las órdenes abiertas en Binance Futures, y que no se puede deshacer.</label>
                         </div>
-                    </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancelar</button>
-                        <button type="button" class="btn btn-warning btn-sm" id="botActionConfirmAccept">Confirmar</button>
+                        <div class="bb-confirmacion__botones">
+                            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+                            <button type="button" class="btn btn-warning" id="botActionConfirmAccept">Confirmar</button>
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
 
         <!-- Progreso de la acción del bot (paso a paso) -->
-        <style>
-         #botJobModal .bot-job-pasos { list-style: none; padding: 0; margin: 0; }
-         #botJobModal .bot-job-pasos li { display: flex; gap: .6rem; align-items: flex-start; padding: .35rem 0; border-bottom: 1px solid rgba(127, 127, 127, .2); }
-         #botJobModal .bot-job-pasos li:last-child { border-bottom: 0; }
-         #botJobModal .bot-job-icono { width: 1.25rem; flex: 0 0 1.25rem; text-align: center; font-weight: bold; }
-         #botJobModal .bot-job-pasos li[data-estado="ok"] .bot-job-icono { color: #198754; }
-         #botJobModal .bot-job-pasos li[data-estado="error"] .bot-job-icono { color: #dc3545; }
-         #botJobModal .bot-job-pasos li[data-estado="pendiente"],
-         #botJobModal .bot-job-pasos li[data-estado="omitido"] { opacity: .6; }
-         #botJobModal .bot-job-detalle { display: block; font-size: .8rem; opacity: .85; word-break: break-word; }
-         #botJobModal .bot-job-resumen ul { margin-bottom: .5rem; padding-left: 1.2rem; font-size: .85rem; }
-         #botJobModal .bot-job-resumen p { margin-bottom: .4rem; }
-        </style>
-        <div class="modal fade" id="botJobModal" tabindex="-1" aria-labelledby="botJobLabel" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false" style="z-index: 10050;">
+        <div class="modal fade" id="botJobModal" tabindex="-1" aria-labelledby="botJobLabel" aria-hidden="true" data-bs-backdrop="static" data-bs-keyboard="false">
             <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
                 <div class="modal-content">
                     <div class="modal-header">
-                        <h5 class="modal-title" id="botJobLabel"><span data-bot-job="titulo">Acción en curso</span></h5>
+                        <h2 class="modal-title" id="botJobLabel"><span data-bot-job="titulo">Acción en curso</span></h2>
                     </div>
                     <div class="modal-body">
                         <div class="progress mb-2" style="height: 1.25rem;">
                             <div class="progress-bar progress-bar-striped progress-bar-animated" data-bot-job="barra" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-labelledby="botJobLabel">0%</div>
                         </div>
-                        <p class="small mb-2" data-bot-job="estado" role="status" aria-live="polite">Iniciando...</p>
+                        <p class="small mb-2" data-bot-job="estado" role="status" aria-live="polite">Iniciando…</p>
                         <ol class="bot-job-pasos" data-bot-job="pasos" aria-label="Pasos de la acción"></ol>
                         <div class="bot-job-resumen mt-3 d-none" data-bot-job="resumen" aria-live="polite"></div>
                     </div>
                     <div class="modal-footer">
                         <span class="small me-auto" data-bot-job="nota">No cierres esta página si podés; si la recargás, el progreso se retoma.</span>
-                        <button type="button" class="btn btn-danger btn-sm d-none" data-bot-job="apagar" disabled>Apagar</button>
-                        <button type="button" class="btn btn-secondary btn-sm" data-bot-job="cerrar" disabled>Cerrar</button>
+                        <button type="button" class="btn btn-danger d-none" data-bot-job="apagar" disabled>Apagar</button>
+                        <button type="button" class="btn btn-outline-secondary" data-bot-job="cerrar" disabled>Cerrar</button>
                     </div>
                 </div>
             </div>
@@ -800,9 +666,11 @@
              const jobEl = document.getElementById('botJobModal');
              const jobQ = (k) => jobEl.querySelector(`[data-bot-job="${k}"]`);
              const JOB_KEY = 'fbBotJobId';
-             const TITULOS = { start: 'START', graceful: 'Graceful stop', apagar: 'Apagar', perfil: 'Perfil' };
+             const TITULOS = { start: 'Iniciar', graceful: 'Parada gradual', apagar: 'Apagar', perfil: 'Perfil' };
+             // Números que se muestran (no los que se mandan): es-AR.
+             const n = (v) => (window.BB && window.BB.fmt ? window.BB.fmt.num(v) : String(v));
              const CHECK_APAGAR = 'Entiendo que se cierran TODAS las posiciones a mercado y se cancelan TODAS las órdenes abiertas en Binance Futures, y que no se puede deshacer.';
-             const AVISO_TWE_ALTA = (t) => `TWE ${t} está por encima de 4: en el backtest 2021–2026 aparecen liquidaciones desde TWE 6, y los perfiles medidos son TWE 3 y TWE 4.`;
+             const AVISO_TWE_ALTA = (t) => `TWE ${n(t)} está por encima de 4: en el backtest 2021–2026 aparecen liquidaciones desde TWE 6, y los perfiles medidos son TWE 3 y TWE 4.`;
              const ICONOS = { ok: '✓', error: '✗', omitido: '–', pendiente: '·' };
              const ESTADOS_PASO = { ok: 'listo', error: 'error', omitido: 'omitido', pendiente: 'pendiente', en_curso: 'en curso' };
              let jobId = null;       // job que muestra el modal
@@ -898,8 +766,8 @@
              function tweValida(v) {
                  const l = tweLimites();
                  if (!Number.isFinite(v)) return 'Ingresá un número.';
-                 if (v < l.min || v > l.max) return `Tiene que estar entre ${l.min} y ${l.max}.`;
-                 if (Math.abs(v / l.paso - Math.round(v / l.paso)) > 1e-9) return `Va en pasos de ${l.paso}.`;
+                 if (v < l.min || v > l.max) return `Tiene que estar entre ${n(l.min)} y ${n(l.max)}.`;
+                 if (Math.abs(v / l.paso - Math.round(v / l.paso)) > 1e-9) return `Va en pasos de ${n(l.paso)}.`;
                  return null;
              }
              function actualizarTwe() {
@@ -1025,17 +893,17 @@
                      return {
                          url: '/api/bot/start',
                          body,
-                         titulo: `Confirmar TWE long ${v}`,
-                         texto: `Se escribirá twe_long ${v} en la config de forager (modo normal; twe_short 1 si n_shorts es 0) y passivbot se ${corriendo ? 'REINICIARÁ' : 'INICIARÁ'}: forager tarda ~90 s en volver a operar los pares.` + (alta ? '\n\n' + AVISO_TWE_ALTA(v) + ' Herramienta, no asesor.' : ''),
+                         titulo: `Confirmar TWE long ${n(v)}`,
+                         texto: `Se escribirá twe_long ${n(v)} en la config de forager (modo normal; twe_short 1 si n_shorts es 0) y passivbot se ${corriendo ? 'REINICIARÁ' : 'INICIARÁ'}: forager tarda ~90 s en volver a operar los pares.` + (alta ? '\n\n' + AVISO_TWE_ALTA(v) + ' Herramienta, no asesor.' : ''),
                          check: alta,
-                         checkLabel: `Entiendo que TWE ${v} está por encima de lo medido en el backtest y que puede liquidar la cuenta.`,
+                         checkLabel: `Entiendo que TWE ${n(v)} está por encima de lo medido en el backtest y que puede liquidar la cuenta.`,
                      };
                  },
                  graceful: () => ({
                      url: '/api/bot/stop',
                      body: { modo: 'graceful' },
-                     titulo: 'Confirmar graceful stop',
-                     texto: 'passivbot se reiniciará en graceful stop: no abrirá nuevas posiciones y seguirá gestionando las abiertas hasta cerrarlas.',
+                     titulo: 'Confirmar parada gradual',
+                     texto: 'passivbot se reiniciará en parada gradual (graceful stop): no abrirá nuevas posiciones y seguirá gestionando las abiertas hasta cerrarlas.',
                      check: false,
                  }),
                  apagar: () => ({
@@ -1086,7 +954,7 @@
              function renderJob(job) {
                  const terminado = job.estado !== 'en_curso';
                  const pr = job.params || {};
-                 const detalle = pr.riesgo ? ` (riesgo ${pr.riesgo})` : (pr.twe_long !== undefined && pr.twe_long !== null ? ` (TWE ${pr.twe_long})` : (pr.perfil ? ` ${(lastStatus && lastStatus.perfiles && lastStatus.perfiles[pr.perfil] && lastStatus.perfiles[pr.perfil].nombre) || pr.perfil}` : ''));
+                 const detalle = pr.riesgo ? ` (riesgo ${pr.riesgo})` : (pr.twe_long !== undefined && pr.twe_long !== null ? ` (TWE ${n(pr.twe_long)})` : (pr.perfil ? ` ${(lastStatus && lastStatus.perfiles && lastStatus.perfiles[pr.perfil] && lastStatus.perfiles[pr.perfil].nombre) || pr.perfil}` : ''));
                  jobQ('titulo').textContent = `${TITULOS[job.accion] || job.accion}${detalle}`;
                  const pct = Math.max(0, Math.min(100, job.porcentaje || 0));
                  const barra = jobQ('barra');
@@ -1138,7 +1006,7 @@
                  const actual = (job.pasos || []).find((p) => p.estado === 'en_curso');
                  const anuncio = terminado
                      ? (job.estado === 'ok' ? 'Acción terminada.' : (job.estado === 'interrumpido' ? 'Acción interrumpida.' : 'La acción terminó con error.'))
-                     : (actual ? `En curso: ${actual.titulo}` : 'En curso...');
+                     : (actual ? `En curso: ${actual.titulo}` : 'En curso…');
                  if (anuncio !== ultimoEstadoAnunciado) {
                      jobQ('estado').textContent = anuncio;
                      ultimoEstadoAnunciado = anuncio;
@@ -1228,7 +1096,7 @@
                              return;
                          }
                          // Un error de red no corta el seguimiento: se reintenta.
-                         jobQ('estado').textContent = 'Sin conexión con el dashboard: reintentando...';
+                         jobQ('estado').textContent = 'Sin conexión con el dashboard: reintentando…';
                          pollTimer = setTimeout(poll, 2000);
                      });
              }
@@ -1299,7 +1167,7 @@
              function ejecutar(p) {
                  jobActivo = true;
                  setButtonsDisabled(true);
-                 aviso('', 'Procesando...');
+                 aviso('', 'Procesando…');
                  fetch(p.url, {
                      method: 'POST',
                      credentials: 'same-origin',
@@ -1426,10 +1294,19 @@
              const toggle = (e) => {
                  e.preventDefault();
                  panel.classList.toggle('open');
-                 if (panel.classList.contains('open')) cargarEstado();
+                 const abierto = panel.classList.contains('open');
+                 icon.setAttribute('aria-expanded', abierto ? 'true' : 'false');
+                 icon.setAttribute('aria-label', abierto ? 'Cerrar el panel de control del bot' : 'Abrir el panel de control del bot');
+                 if (abierto) cargarEstado();
              };
              icon.addEventListener('click', toggle);
              icon.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') toggle(e); });
+             // Esc cierra el panel (salvo con un modal abierto, que se cierra primero) y devuelve el foco a la rueda.
+             document.addEventListener('keydown', (e) => {
+                 if (e.key !== 'Escape' || !panel.classList.contains('open') || document.querySelector('.modal.show')) return;
+                 toggle(e);
+                 icon.focus({ preventScroll: true });
+             });
 
              setButtonsDisabled(true);
              retomarJob();
