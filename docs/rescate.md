@@ -359,10 +359,18 @@ se midieron todas con este disparo (X 70 %, paso 1.000) como rescate de referenc
   el historial y con la variación del saldo spot (`+monto` en spot, como una devolución), rechazo claro = 5 min de
   espera. Va al ledger con `"tipo": "retiro"` y **no** toca el préstamo ni `loan_state.json`: passivbot ve el retiro
   solo en su wallet ([contratos.md](contratos.md#el-retiro-periodico-no-cambia-este-contrato)).
-- Cuenta en el **retirado acumulado** recién confirmado. Un retiro real confirmado **baja la base de C3** en el monto
-  (el retiro no es una pérdida: sin esto C3 lo vería como una caída y podría cortar; ver [c3.md](c3.md)). El tope de
-  pérdida total no cambia: mira futuros + spot y el retiro no mueve ese total. Con la lectura de spot caída, el
-  estimado del tope suma lo retirado después del último saldo leído (y un retiro en vuelo), igual que una devolución.
+- Cuenta en el **retirado acumulado** recién confirmado. Un retiro real confirmado **baja la base de C3 en
+  proporción** al capital de futuros (el retiro no es una pérdida ni acerca el corte: sin esto C3 lo vería como una
+  caída y podría cortar; ver [c3.md](c3.md)). El tope de pérdida total no cambia: mira futuros + spot y el retiro no
+  mueve ese total. Con la lectura de spot caída, el estimado del tope suma lo retirado después del último saldo leído
+  (y un retiro en vuelo), igual que una devolución.
+- **Con los años el tope de pérdida total se vuelve inerte.** Lo retirado queda en spot y cuenta en el capital sobre el
+  que se mide el tope (el backtest hace lo mismo, así que los números son consistentes), pero la base del tope no
+  cambia. Con base 20.000 y tope 60 % el piso es 8.000: cuando lo retirado acumulado pasa de 8.000, el capital total ya
+  no puede bajar del piso aunque se pierdan futuros y la reserva enteros, y el tope no se dispara nunca más (volver a
+  habilitar no lo arregla: la base nueva incluye lo retirado). La pérdida máxima igual queda acotada a los 10.000 de
+  futuros más la reserva prestada (lo retirado no se presta), pero ya no la corta el tope. El stop que no cuenta el
+  spot es [C3](c3.md), sobre la cuenta de futuros.
 - No hace falta otro permiso de la API key: usa el mismo tipo de transferencia que la devolución.
 
 ### Modos (`FUTURESBOARD_RESCATE_RETIRO_MODE`)
@@ -402,6 +410,9 @@ guardas ni por `maxWithdrawAmount` (anual sin guardas da idéntico).
 - Ninguna frecuencia se liquida ni dispara el tope en ningún escenario; sin retiro, `mark985` se liquida.
 - Elegida por la regla (mayor capital final en `mark985` entre las que sobreviven): **anual**. Retirar más seguido
   corta más la composición y termina con menos.
+- La regla no mira el drawdown: anual es la que más expone, porque deja componer la ganancia del año (peor DD del total
+  63,3 % contra 36,7-43,9 % de las demás). Las ventanas OOS de 12 meses de los perfiles arrancan cada una en 10.000, que
+  es lo mismo que un retiro anual; no se corrieron ventanas escalonadas con las otras frecuencias.
 - Es un solo camino: la elección depende de dónde caen las caídas respecto del 1 de enero. TWE 3 sin rescate ni
   retiro, en el mismo camino continuo, compone y termina en 295.896 (sin liquidarse ni en base ni en `mark985`): el retiro
   protege la ganancia ya hecha, no mejora el retorno.

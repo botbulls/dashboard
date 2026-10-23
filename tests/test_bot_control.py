@@ -594,6 +594,21 @@ def test_backups_pruned(forager_cfg, monkeypatch):
     assert len(list(forager_cfg.parent.glob("new.json.bak-*"))) == 3
 
 
+def test_falla_al_listar_backups_viejos_no_es_un_error_del_cambio(forager_cfg, monkeypatch):
+    """La config ya quedó escrita: un error al listar los backups viejos (limpieza) no sale como error de la escritura
+    (si saliera, quien llama no restauraría lo que acompaña al cambio)."""
+    glob = pathlib.Path.glob
+
+    def glob_falla(self, pattern, *a, **kw):
+        if ".bak-" in pattern:
+            raise OSError(5, "Input/output error")
+        return glob(self, pattern, *a, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "glob", glob_falla)
+    backup = bot_control.write_forager_config(forager_cfg, {"twe_long": 4})
+    assert hjson.loads(forager_cfg.read_text())["twe_long"] == 4 and backup.exists()
+
+
 # ---------------------------------------------------------------- cliente docker
 
 

@@ -14,14 +14,16 @@ Perfiles (ver ``docs/perfiles.md``):
 
 Orden y vuelta atrás: se valida todo antes de escribir nada (contenedor, modos de forager, ``n_shorts``, tope sin
 reconocer, cuerpo del rescate). Después se guarda el rescate (con copia del archivo) y se ejecuta el START con la TWE
-del perfil. Si el START falla y la config de forager quedó como estaba (error de Docker con respuesta, contenedor
-inexistente, error de escritura), se restaura también el rescate. Con un resultado incierto de Docker (sin respuesta)
-quedan las dos escritas, igual que en ``bot_control._apply_and_restart``.
+del perfil. Si el START falla, la vuelta atrás del rescate la decide lo que quedó en forager (se relee el archivo), no
+el tipo de error: si forager quedó como estaba (no se llegó a escribir, o se restauró) se restaura también el rescate,
+salvo que alguien lo haya guardado mientras tanto; si forager cambió (resultado incierto de Docker, o no se pudo
+restaurar) quedan las dos escritas, las dos del perfil (ver ``_volver_atras``).
 
 Los números son de backtest (OOS, ventanas de 12 meses desde 2023-11-10): no son una promesa. Herramienta, no asesor.
 """
 from __future__ import annotations
 
+import logging
 import pathlib
 from decimal import Decimal
 from typing import Any
@@ -32,6 +34,8 @@ from typing import Optional
 from futuresboard import bot_control
 from futuresboard import c3
 from futuresboard import rescate
+
+log = logging.getLogger("futuresboard.perfiles")
 
 CONSERVADOR = "conservador"
 CON_RESCATE = "con_rescate"
@@ -333,6 +337,7 @@ def aplicar(settings: bot_control.Settings, store: bot_control.Store, nombre: st
 
     rep.step("rescate", bot_control.PASO_EN_CURSO)
     cruda = rescate.leer_config_cruda(data_dir)
+    forager_antes = _leer_bytes(path)
     marca = {"nombre": nombre, "aplicado_en": rescate.now_iso(), "aplicado_por": usuario}
     try:
         cfg = rescate.save_config(data_dir, parsed, usuario, perfil=marca)
@@ -347,25 +352,62 @@ def aplicar(settings: bot_control.Settings, store: bot_control.Store, nombre: st
     try:
         out = bot_control.start_bot(settings, store, None, docker=docker, reporter=_SinValidar(rep),
                                     twe_long=perfil["twe_long"])
-    except bot_control.BotControlError as exc:
+    except Exception as exc:  # noqa: BLE001 - cualquier falla decide la vuelta atrás del rescate y se re-lanza
         incierto = isinstance(exc, bot_control.DockerError) and (
             exc.uncertain or bool(getattr(exc.__cause__, "uncertain", False)))
-        if incierto:
-            nota = " La config del rescate del perfil quedó guardada, igual que la de forager."
-        else:
-            try:
-                rescate.restaurar_config(data_dir, cruda)
-                nota = " Se restauró también la config del rescate: no se aplicó el perfil."
-            except (OSError, ValueError) as restore_exc:
-                nota = (f" ATENCIÓN: no se pudo restaurar la config del rescate ({restore_exc.__class__.__name__}): "
-                        "revisala en la sección Rescate.")
+        nota = _volver_atras(data_dir, path, forager_antes, cruda, cfg, incierto)
         if isinstance(exc, bot_control.DockerError):
-            err: bot_control.BotControlError = bot_control.DockerError(f"{exc}{nota}", exc.payload)
+            err: Exception = bot_control.DockerError(f"{exc}{nota}", exc.payload)
             err.uncertain = incierto
-        else:
+            err.status_code = exc.status_code
+        elif isinstance(exc, bot_control.BotControlError):
             err = bot_control.BotControlError(f"{exc}{nota}", exc.payload)
-        err.status_code = exc.status_code
+            err.status_code = exc.status_code
+        elif isinstance(exc, ValueError):
+            err = ValueError(f"{exc}{nota}")
+        else:
+            log.exception("Error al aplicar el perfil %s", nombre)
+            err = bot_control.BotControlError(f"Error interno ({exc.__class__.__name__}).{nota}")
+            err.status_code = 500
         raise err from exc
     out["perfil"] = nombre
     out["rescate"] = resumen_rescate
     return out
+
+
+def _leer_bytes(path: pathlib.Path) -> Optional[bytes]:
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _volver_atras(data_dir: pathlib.Path, path: pathlib.Path, forager_antes: Optional[bytes], cruda: Optional[str],
+                  escrita: Dict[str, Any], incierto: bool) -> str:
+    """El START falló con el rescate del perfil ya guardado: se decide por lo que quedó en forager, no por el error.
+
+    * forager igual que antes (no se llegó a escribir, o se restauró): se restaura el rescate, salvo que alguien lo
+      haya cambiado mientras tanto (``restaurar_config`` con ``si_sigue``): no se pisa ese guardado.
+    * forager cambió (resultado incierto de Docker, o no se pudo restaurar): el rescate del perfil queda, así forager y
+      rescate son del mismo perfil (si no, la TWE del perfil se cargaría en el próximo reinicio con el rescate viejo).
+    * no se puede releer forager: no se toca nada y se avisa.
+
+    Devuelve la nota para el mensaje de error."""
+    forager_ahora = _leer_bytes(path)
+    if forager_antes is None or forager_ahora is None:
+        return (" ATENCIÓN: no se pudo releer la config de forager para saber si cambió: la config del rescate del "
+                "perfil quedó guardada. Revisá forager y la sección Rescate antes de reintentar.")
+    if forager_ahora != forager_antes:
+        if incierto:
+            return " La config del rescate del perfil quedó guardada, igual que la de forager."
+        return (" La config de forager quedó con la TWE del perfil sin reiniciar passivbot (se carga en el próximo "
+                "reinicio): la config del rescate del perfil también quedó guardada, así las dos son del perfil.")
+    try:
+        restaurada = rescate.restaurar_config(data_dir, cruda, si_sigue=escrita)
+    except (OSError, ValueError) as restore_exc:
+        return (f" ATENCIÓN: no se pudo restaurar la config del rescate ({restore_exc.__class__.__name__}): "
+                "revisala en la sección Rescate.")
+    if not restaurada:
+        return (" La config del rescate cambió mientras se aplicaba el perfil (otro guardado): no se restauró, quedó "
+                "la de ese guardado. La de forager no cambió: no se aplicó el perfil.")
+    return " Se restauró también la config del rescate: no se aplicó el perfil."

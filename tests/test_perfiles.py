@@ -282,6 +282,110 @@ def test_docker_sin_respuesta_deja_las_dos_escritas(client, app, solo_long, dock
     assert _rescate_cfg(app)["habilitado"] is True
 
 
+def _despues_de_guardar_el_rescate(monkeypatch, accion):
+    """Corre ``accion()`` justo después de que el perfil guarda el rescate (antes del START)."""
+    save = rescate.save_config
+
+    def save_config(*a, **kw):
+        out = save(*a, **kw)
+        accion()
+        return out
+
+    monkeypatch.setattr(rescate, "save_config", save_config)
+
+
+def test_timeout_del_inspect_previo_a_escribir_forager_restaura_el_rescate(client, app, solo_long, docker,  # noqa: F811
+                                                                          monkeypatch):
+    """El START vuelve a consultar el contenedor antes de escribir forager. Un timeout ahí es "incierto" para Docker,
+    pero forager no se tocó: el rescate tiene que volver atrás (quedaba el del perfil con la TWE vieja)."""
+    import requests
+
+    request = docker.request
+    corte = {"activo": False}
+
+    def request_con_timeout(method, url, **kw):
+        if corte["activo"] and method == "GET" and url.endswith("/json"):
+            raise requests.ReadTimeout("timeout")
+        return request(method, url, **kw)
+
+    monkeypatch.setattr(docker, "request", request_con_timeout)
+    _despues_de_guardar_el_rescate(monkeypatch, lambda: corte.update(activo=True))
+    resp = _aplicar(client, "con_rescate")
+    assert resp.status_code == 502
+    err = resp.get_json()["error"]
+    assert "Se restauró también la config del rescate" in err and "igual que la de forager" not in err
+    assert solo_long.read_text() == SOLO_LONG and docker.actions() == []
+    r = _rescate_cfg(app)
+    assert r["habilitado"] is False and r["upnl_habilitado"] is False and r["retiro_frecuencia"] == "off"
+
+
+def test_docker_rechaza_y_forager_no_se_restaura_deja_el_rescate_del_perfil(client, app, solo_long,  # noqa: F811
+                                                                            docker,  # noqa: F811
+                                                                            monkeypatch):
+    """Docker rechaza el restart y falla la vuelta atrás de forager: forager quedó con la TWE del perfil (se carga en el
+    próximo reinicio). Restaurar el rescate viejo dejaba TWE 4 sin rescate; queda el del perfil y el mensaje lo dice."""
+    docker.fail_action = 500
+
+    def restore(*a, **kw):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(bot_control, "restore_forager_config", restore)
+    resp = _aplicar(client, "con_rescate")
+    assert resp.status_code == 502
+    err = resp.get_json()["error"]
+    assert "no se pudo restaurar" in err and "no se aplicó el perfil" not in err
+    assert "TWE del perfil" in err and "también quedó guardada" in err
+    assert hjson.loads(solo_long.read_text())["twe_long"] == 4
+    r = _rescate_cfg(app)
+    assert r["habilitado"] is True and r["retiro_frecuencia"] == rescate.FRECUENCIA_RECOMENDADA
+
+
+def test_falla_al_guardar_el_estado_restaura_forager_y_rescate(client, app, solo_long, docker,  # noqa: F811
+                                                               monkeypatch):
+    """Un error de disco al guardar el estado local, con forager ya escrito y antes de Docker: se vuelve atrás forager
+    (y con él el rescate) en vez de dejar las dos escritas sin reiniciar."""
+    save_state = bot_control.Store.save_state
+    fallas = {"n": 1}
+
+    def save_state_falla(self, state):
+        if fallas["n"]:
+            fallas["n"] -= 1
+            raise OSError(28, "No space left on device")
+        return save_state(self, state)
+
+    monkeypatch.setattr(bot_control.Store, "save_state", save_state_falla)
+    resp = _aplicar(client, "con_rescate")
+    assert resp.status_code == 500
+    err = resp.get_json()["error"]
+    assert "Se restauró también la config del rescate" in err
+    assert solo_long.read_text() == SOLO_LONG and docker.actions() == []
+    assert _rescate_cfg(app)["habilitado"] is False
+
+
+def test_no_pisa_un_guardado_del_rescate_hecho_durante_el_reinicio(client, app, solo_long, docker,  # noqa: F811
+                                                                  monkeypatch):
+    """Alguien guarda el rescate desde otra pestaña mientras Docker reinicia y el reinicio falla: ese guardado no se
+    pierde (la vuelta atrás solo restaura si la config sigue siendo la que escribió el perfil)."""
+    request = docker.request
+    otro = {"habilitado": True, "reserva_max_usdt": 5000, "paso_usdt": 500, "umbral_ratio": 6,
+            "umbral_devolucion_ratio": 24, "tope_perdida_pct": 40}
+
+    def request_con_guardado(method, url, **kw):
+        if method == "POST" and url.endswith("/restart"):
+            rescate.save_config(_data_dir(app), rescate.validate_config_body(otro), "otra-pestaña")
+        return request(method, url, **kw)
+
+    monkeypatch.setattr(docker, "request", request_con_guardado)
+    docker.fail_action = 500
+    resp = _aplicar(client, "con_rescate")
+    assert resp.status_code == 502
+    err = resp.get_json()["error"]
+    assert "cambió mientras se aplicaba el perfil" in err
+    assert solo_long.read_text() == SOLO_LONG
+    r = _rescate_cfg(app)
+    assert r["actualizado_por"] == "otra-pestaña" and r["reserva_max_usdt"] == "5000" and r["perfil"] is None
+
+
 def test_un_job_a_la_vez(client, app, solo_long, docker):  # noqa: F811
     gate = Gate(docker, "restart")
     try:
@@ -329,9 +433,13 @@ def test_job_de_perfil_interrumpido_se_audita_como_perfil(client, app, solo_long
     path.write_text(snapshot)
     notificaciones.clear()
     app2 = _app_on(_data_dir(app))
-    assert registry(app2).get(job_id)["estado"] == "interrumpido"
+    job = registry(app2).get(job_id)
+    assert job["estado"] == "interrumpido"
+    # Sin vuelta atrás automática: el mensaje dice que el perfil puede haber quedado a medias y qué revisar.
+    assert "a medias" in job["resultado"]["error"] and "Rescate" in job["resultado"]["error"]
     entry = audit_lines(app2)[-1]
     assert (entry["action"], entry["result"], entry["params"]) == ("perfil", "interrumpido", {"perfil": "con_rescate"})
+    assert "a medias" in entry["detail"]
     assert notificaciones[0][0] == "perfil"
 
 

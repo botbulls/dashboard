@@ -597,17 +597,29 @@ def leer_config_cruda(data_dir: pathlib.Path) -> Optional[str]:
         return None
 
 
-def restaurar_config(data_dir: pathlib.Path, cruda: Optional[str]) -> None:
+def restaurar_config(data_dir: pathlib.Path, cruda: Optional[str],
+                     si_sigue: Optional[Dict[str, Any]] = None) -> bool:
     """Vuelve ``rescate_config.json`` al contenido ``cruda`` (de ``leer_config_cruda``) sin bajar la generación.
 
     Si el servicio llegó a fijar una base con la generación nueva mientras tanto, volver a la vieja haría que la
-    próxima habilitación (vieja + 1 = la nueva) tomara esa base como propia: la generación queda en la mayor."""
+    próxima habilitación (vieja + 1 = la nueva) tomara esa base como propia: la generación queda en la mayor.
+
+    ``si_sigue`` (la config que escribió quien restaura, la que devolvió ``save_config``): solo se restaura si el
+    archivo sigue siendo exactamente ese, comparado bajo el lock de la config. Un guardado del panel (u otro cambio)
+    en el medio no se pisa: devuelve False sin escribir. True si restauró (o no había nada que restaurar)."""
     path = pathlib.Path(data_dir) / CONFIG_FILE_NAME
     with file_lock(pathlib.Path(data_dir) / CONFIG_LOCK_NAME):
+        if si_sigue is not None:
+            try:
+                vigente = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                vigente = None
+            if vigente != si_sigue:
+                return False
         actual, _err = load_config(data_dir)
         if cruda is None:
             if not path.exists():
-                return
+                return True
             restaurada = default_config()
         else:
             restaurada = json.loads(cruda)
@@ -617,6 +629,7 @@ def restaurar_config(data_dir: pathlib.Path, cruda: Optional[str]) -> None:
         gen_vieja = restaurada.get("generacion") if isinstance(restaurada.get("generacion"), int) else 0
         restaurada["generacion"] = max(gen_actual, gen_vieja)
         write_json_atomic(path, restaurada, mode=0o600)
+        return True
 
 
 def reconocer_tope(data_dir: pathlib.Path, tope_id: Any, user: str) -> Dict[str, Any]:
@@ -2129,7 +2142,9 @@ class RescateService:
         if mode == MODE_REAL:
             from futuresboard import c3 as c3_mod  # c3 importa este módulo: import diferido
 
-            texto = c3_mod.ajustar_base_por_retiro(state, monto, self.clock())
+            # capital_c3: el capital de futuros de C3 cuando se decidió el retiro (ver _retiro): la base baja en
+            # proporción, así el retiro solo nunca acerca el corte.
+            texto = c3_mod.ajustar_base_por_retiro(state, monto, self.clock(), entry.get("capital_c3"))
             if texto:
                 self._event(state, "c3", texto)
 
@@ -2237,7 +2252,10 @@ class RescateService:
         if simulado:
             self._retiro_simulado(state, calc["monto"], motivo)
         else:
-            self._transferir(state, TIPO_RETIRO, calc["monto"], snap, now_ms, motivo)
+            # Capital de futuros que ve C3 ahora (margen - préstamo real; acá no hay préstamo ni transferencia en
+            # vuelo): con él se baja la base de C3 en proporción al confirmarse (c3.ajustar_base_por_retiro).
+            capital_c3 = snap["margin_balance"] - get_loan(state, MODE_REAL)
+            self._transferir(state, TIPO_RETIRO, calc["monto"], snap, now_ms, motivo, capital_c3=capital_c3)
 
     def _retiro_simulado(self, state: Dict[str, Any], monto: Decimal, motivo: str) -> None:
         """Retiro en estado simulado: no llama a /sapi. Registra lo que HARÍA; suma al acumulado simulado, que el retiro
@@ -2254,7 +2272,7 @@ class RescateService:
         self._notify(f"💸 <b>Rescate</b>: {esc(texto)}", True)
 
     def _transferir(self, state: Dict[str, Any], tipo: str, amount: Decimal, snap: Dict[str, Any], now_ms: int,
-                    motivo: str, disparo: Optional[str] = None) -> None:
+                    motivo: str, disparo: Optional[str] = None, capital_c3: Optional[Decimal] = None) -> None:
         self._transferencias += 1
         entry: Dict[str, Any] = {
             "id": secrets.token_hex(8),
@@ -2273,6 +2291,8 @@ class RescateService:
         }
         if disparo is not None:
             entry["disparo"] = disparo  # solo el disparo U lo marca (las inyecciones sin marca son de margen)
+        if capital_c3 is not None:
+            entry["capital_c3"] = money(capital_c3)  # solo el retiro: ver _sumar_retirado
         if self.mode == MODE_DRY_RUN:
             # No se llama a /sapi: se registra lo que HARÍA y se actualiza el préstamo simulado.
             self._finalizar(state, entry, "simulada", None, f"Simulación ({motivo}).")

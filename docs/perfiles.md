@@ -84,11 +84,21 @@ Al confirmar corre como cualquier acción del panel: un job con progreso (`Valid
    reconocer (`409`, igual que START) y el cuerpo del rescate (la validación de siempre).
 2. Se guarda la config del rescate (`rescate_config.json`), con una copia del archivo anterior.
 3. START con la TWE del perfil: backup y escritura atómica del HJSON, `start` o `restart`, verificación y espera.
-4. Si el START falla y la config de forager quedó como estaba (Docker respondió con error y se restauró, contenedor
-   inexistente, error de escritura), **se restaura también el rescate**: no se aplica nada. La generación del rescate
-   no baja (si el servicio llegó a fijar una base con la generación nueva, la próxima habilitación abre otra).
-5. Si Docker no respondió (resultado incierto), quedan las dos configs escritas, igual que con START: el error lo dice
-   y `/api/bot/status` muestra "pendiente de reinicio".
+4. Si el START falla, la vuelta atrás del rescate la decide **lo que quedó en forager** (se relee el archivo y se
+   compara con el de antes), no el tipo de error:
+   - forager quedó como estaba (no se llegó a escribir, por ejemplo un timeout al consultar el contenedor antes de
+     escribir, o Docker respondió con error y se restauró, o falló guardar el estado local y se restauró): **se
+     restaura también el rescate**, no se aplica nada. La generación del rescate no baja (si el servicio llegó a fijar
+     una base con la generación nueva, la próxima habilitación abre otra). Si alguien guardó el rescate mientras tanto
+     (otra pestaña), ese guardado no se pisa: se restaura solo si la config sigue siendo la que escribió el perfil, y
+     el error lo dice.
+   - forager cambió (Docker no respondió al reinicio, o no se pudo restaurar forager): quedan las dos configs escritas,
+     las dos del perfil (la TWE nueva se carga en el próximo reinicio con el rescate que le corresponde). El error lo
+     dice y `/api/bot/status` muestra "pendiente de reinicio".
+   - no se puede releer forager: no se toca nada más y el error pide revisar forager y la sección Rescate.
+5. Si el dashboard se reinicia en el medio del job no hay vuelta atrás automática: el job queda `interrumpido` y el
+   mensaje avisa que el perfil puede haber quedado a medias (el panel muestra "Vigente: ninguno" si no coincide con
+   ninguno). Se revisa y se aplica el perfil de nuevo.
 
 Con `n_longs` distinto de 4 el perfil se aplica, pero el plan avisa que los números se midieron con 4 pares.
 

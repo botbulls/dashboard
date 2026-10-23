@@ -748,7 +748,11 @@ def _is_strict_json(text: str) -> bool:
 
 
 def _prune_backups(path: pathlib.Path) -> None:
-    backups = sorted(path.parent.glob(f"{path.name}.bak-*"))
+    """Limpieza de backups viejos: best effort (la config ya quedó escrita; un error acá no es un error del cambio)."""
+    try:
+        backups = sorted(path.parent.glob(f"{path.name}.bak-*"))
+    except OSError:
+        return
     for old in backups[:-MAX_BACKUPS]:
         with contextlib.suppress(OSError):
             old.unlink()
@@ -1100,7 +1104,19 @@ def _apply_and_restart(settings: Settings, store: Store, docker: DockerClient, i
     rep = reporter or NULL_REPORTER
     rep.step("validar", PASO_OK, f"Contenedor {settings.container}: {info.get('status')}")
     backup = write_forager_config(path, updates, rep)
-    store.save_state(new_state)
+    try:
+        store.save_state(new_state)
+    except OSError as exc:
+        # Antes de Docker: sin vuelta atrás quedaría la config de forager escrita sin reiniciar (y sin el estado local).
+        try:
+            restore_forager_config(path, backup)
+        except (BotControlError, OSError) as restore_exc:
+            raise ConfigError(
+                f"No se pudo guardar el estado del panel ({exc.__class__.__name__}). ATENCION: la config de forager "
+                f"quedo modificada y no se pudo restaurar ({restore_exc}); backup: {backup.name}."
+            ) from exc
+        raise ConfigError(f"No se pudo guardar el estado del panel ({exc.__class__.__name__}): se restauro la config "
+                          "de forager; no se aplico ningun cambio.") from exc
     try:
         rep.step("docker", PASO_EN_CURSO,
                  f"{'Reiniciando' if info.get('running') else 'Iniciando'} {settings.container}")

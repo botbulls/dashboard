@@ -341,11 +341,14 @@ class JobRegistry:
         data["estado"] = ESTADO_INTERRUMPIDO
         data["porcentaje"] = 100
         data["fin"] = _now_iso()
-        data["resultado"] = {
-            "ok": False,
-            "error": (f"{motivo} Revisar el estado de passivbot"
-                      f"{' y de Binance' if data.get('accion') == 'apagar' else ''} antes de reintentar."),
-        }
+        error = (f"{motivo} Revisar el estado de passivbot"
+                 f"{' y de Binance' if data.get('accion') == 'apagar' else ''} antes de reintentar.")
+        if data.get("accion") == "perfil":
+            # Sin vuelta atrás automática: el rescate se guarda antes de escribir forager.
+            error += (" El perfil puede haber quedado a medias (el rescate del perfil guardado con la TWE de antes en "
+                      "forager, o forager escrito sin reiniciar): revisar la TWE de forager y la sección Rescate, y "
+                      "aplicar el perfil de nuevo (o el otro).")
+        data["resultado"] = {"ok": False, "error": error}
         data["http_status"] = 500
         with self._persist_lock:
             tmp = self.path.with_name(f".{self.path.name}.recover.tmp")
