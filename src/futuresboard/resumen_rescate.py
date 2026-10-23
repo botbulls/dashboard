@@ -211,11 +211,13 @@ def _upnl(status: Dict[str, Any], cfg: Dict[str, Any], now: float, vieja: Any) -
     up = status.get("upnl") if isinstance(status.get("upnl"), dict) else {}
     if not up.get("habilitado"):
         return None
-    ev = up.get("eval") if isinstance(up.get("eval"), dict) else {}
+    # En off no se muestra una evaluación que haya quedado de antes (p. ej. de antes de deshabilitar el rescate).
+    ev = up.get("eval") if isinstance(up.get("eval"), dict) and up.get("estado") != rescate.UPNL_OFF else {}
     ok = bool(ev) and not ev.get("error")
     ultima = up.get("ultima_inyeccion") if isinstance(up.get("ultima_inyeccion"), dict) else None
     return {
         "estado": up.get("estado"),
+        "rescate_habilitado": bool(up.get("rescate_habilitado")),
         "modo": up.get("modo"),
         "x_pct": cfg.get("upnl_x_pct"),
         "paso": cfg.get("upnl_paso_usdt"),

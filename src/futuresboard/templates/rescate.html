@@ -98,7 +98,7 @@
                             <input class="form-check-input" type="checkbox" role="switch" id="rescateUpnlHabilitado">
                             <label class="form-check-label" for="rescateUpnlHabilitado">Disparo anticipado por uPnL</label>
                         </div>
-                        <div class="form-text mb-2">Además del disparo de margen (que tiene prioridad): inyecta un paso cuando <code>uPnL + préstamo ≤ -X % × (wallet - préstamo)</code>; el paso siguiente, recién cuando la pérdida vuelve a cruzar la línea. Con el disparo prendido, la devolución parcial no devuelve lo que volvería a pedir. Solo actúa si el servicio corre con <code>FUTURESBOARD_RESCATE_UPNL_MODE</code> en <code>dry_run</code> (solo registra) o <code>real</code>. En el backtest no salvó ninguna ventana más que el disparo de margen ni cambió el capital final: solo decide cuánta reserva ya está en futuros cuando llega la mecha. Validado con TWE 4; con TWE 2 no inyectó nunca.</div>
+                        <div class="form-text mb-2">Además del disparo de margen (que tiene prioridad): inyecta un paso cuando <code>uPnL + préstamo ≤ -X % × (wallet - préstamo)</code>; el paso siguiente, recién cuando la pérdida vuelve a cruzar la línea. Con el disparo prendido, la devolución parcial no devuelve lo que volvería a pedir. Solo actúa si el servicio corre con <code>FUTURESBOARD_RESCATE_UPNL_MODE</code> en <code>dry_run</code> (solo registra y avisa: no presta, ni simulado) o <code>real</code> (transfiere con el servicio en <code>real</code>; con el servicio en <code>dry_run</code> simula, y el préstamo simulado achica el balance con el que dimensiona passivbot). Con la cuenta ya en pérdida, bajar X o prenderlo pide confirmación si inyectaría ya (uno o varios pasos seguidos). En el backtest no salvó ninguna ventana más que el disparo de margen ni cambió el capital final: solo decide cuánta reserva ya está en futuros cuando llega la mecha. Validado con TWE 4; con TWE 2 no inyectó nunca.</div>
                         <div class="mb-2">
                             <label class="form-label small" for="rescateUpnlX">X: pérdida no cubierta (% del capital propio de futuros)</label>
                             <input class="form-control form-control-sm" type="number" id="rescateUpnlX" step="any" min="{{ limites['upnl_x_pct'][0] }}" max="{{ limites['upnl_x_pct'][1] }}">
@@ -357,6 +357,8 @@
              let t;
              if (!up.habilitado) {
                  t = 'deshabilitado';
+             } else if (up.estado === 'off' && up.rescate_habilitado === false) {
+                 t = 'habilitado en el panel, pero el rescate está deshabilitado: no se evalúa';
              } else if (up.estado === 'off') {
                  t = `habilitado en el panel, pero el servicio no lo evalúa (FUTURESBOARD_RESCATE_UPNL_MODE=${up.modo || 'off'})`;
              } else {
@@ -514,10 +516,18 @@
                  return;
              }
              respuesta.textContent = 'Guardando...';
-             post('/api/rescate/config', body).then(({ ok, d }) => {
+             const enviar = (confirmar) => post('/api/rescate/config', confirmar ? { ...body, confirmar_inyeccion: true } : body).then(({ ok, d }) => {
+                 // 409 requiere_confirmacion: con la config nueva el disparo por uPnL inyectaría ya (uno o varios pasos).
+                 if (!ok && d.requiere_confirmacion && !confirmar) {
+                     if (window.confirm(d.error)) return enviar(true);
+                     respuesta.textContent = 'No se guardó.';
+                     return undefined;
+                 }
                  respuesta.textContent = ok ? 'Guardado.' : (d.error || 'No se pudo guardar.');
                  if (ok) { editando = false; render(d.status); }
-             }).catch(() => { respuesta.textContent = 'No se pudo guardar.'; });
+                 return undefined;
+             });
+             enviar(false).catch(() => { respuesta.textContent = 'No se pudo guardar.'; });
          });
 
          Object.values(c3Inputs).forEach((el) => el.addEventListener('input', () => { c3Editando = true; }));

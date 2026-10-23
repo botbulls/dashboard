@@ -69,6 +69,17 @@ El disparo anticipado por uPnL ([rescate.md](rescate.md#disparo-anticipado-por-u
 **cuándo** inyectar. Lo que inyecta es préstamo como cualquier otro: suma a `loan_outstanding_usdt` y passivbot
 sigue dimensionando sobre `wallet - préstamo`. No hay campo nuevo ni PR de passivbot.
 
+- Con `FUTURESBOARD_RESCATE_UPNL_MODE=dry_run` (estado `registra`, con el servicio en `dry_run` o `real`) no presta
+  ni simulado: este archivo no cambia por el disparo U.
+- Con el servicio en `dry_run` y U en `real` (estado `simulado`) las inyecciones U suman al préstamo simulado, que
+  se publica con `"mode": "dry_run"` como el resto del `dry_run`. El lector no mira `mode`: passivbot dimensiona
+  igual sobre `wallet - préstamo` aunque no se haya movido plata.
+- **Supone la misma wallet que passivbot.** La regla usa `totalWalletBalance` de `GET /fapi/v2/account`; passivbot
+  dimensiona con el `balance` del activo USDT de `GET /fapi/v2/balance`. Son lo mismo en una cuenta USDT-M de un
+  solo activo (single-asset). En modo multi-asset, o con otro colateral en futuros, `totalWalletBalance` suma todos
+  los activos valuados en USD y el "capital propio" de la regla deja de ser el de passivbot. El servicio no lo
+  detecta.
+
 ## `watcher_heartbeat.json` (versión 1, vigente)
 
 - **Escribe:** C3, dentro del mismo servicio (`c3.write_heartbeat`).

@@ -131,7 +131,8 @@
                         {% if u.upnl is not none %}${{ u.upnl }}{% else %}-{% endif %}
                     </h5>
                     <p class="card-text mb-0">
-                        {% if u.estado == 'off' %}habilitado en el panel; el servicio no lo evalúa (FUTURESBOARD_RESCATE_UPNL_MODE={{ u.modo or 'off' }})
+                        {% if u.estado == 'off' and not u.rescate_habilitado %}habilitado en el panel, pero el rescate está deshabilitado: no se evalúa
+                        {% elif u.estado == 'off' %}habilitado en el panel; el servicio no lo evalúa (FUTURESBOARD_RESCATE_UPNL_MODE={{ u.modo or 'off' }})
                         {% else %}{% if u.estado == 'registra' %}solo registra (dry_run){% elif u.estado == 'simulado' %}simulado{% else %}real{% endif %} · X {{ u.x_pct }}% · paso ${{ u.paso }}{% endif %}
                         {% if u.upnl_dispara is not none %}<br>próximo paso con uPnL ≤ ${{ u.upnl_dispara }}{% endif %}
                         {% if u.dispara %}<br><strong>condición cumplida</strong>{% endif %}

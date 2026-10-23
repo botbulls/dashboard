@@ -83,7 +83,7 @@ def _arrancar(h, modo="real", upnl_mode="real", upnl=U_ON, **kw):  # noqa: F811
     ("real", None, rescate.UPNL_OFF),
     ("real", "dry_run", rescate.UPNL_REGISTRA),
     ("real", "real", rescate.UPNL_REAL),
-    ("dry_run", "dry_run", rescate.UPNL_SIMULADO),
+    ("dry_run", "dry_run", rescate.UPNL_REGISTRA),
     ("dry_run", "real", rescate.UPNL_SIMULADO),
 ])
 def test_upnl_estado_efectivo(servicio, upnl, esperado):
@@ -301,7 +301,8 @@ def test_upnl_respeta_el_cooldown_de_rechazo(h):  # noqa: F811
 
 
 def test_upnl_simulado_con_el_servicio_en_dry_run(h):  # noqa: F811
-    svc = _arrancar(h, modo="dry_run", upnl_mode="dry_run")
+    """Servicio en dry_run y U en real: inyecciones simuladas que se publican como préstamo simulado."""
+    svc = _arrancar(h, modo="dry_run", upnl_mode="real")
     _upnl_a(h.fake, "-7000")
     h.avanzar(15)
     svc.tick()
@@ -343,7 +344,7 @@ def test_upnl_registra_no_transfiere_y_avisa_una_vez_por_escalon(h):  # noqa: F8
     svc.tick()
     avisos = [t for t in h.sent if "HARÍA inyección por uPnL" in t]
     assert len(avisos) == 2 and "escalón 2" in avisos[1]
-    _upnl_a(h.fake, "-5000")  # sale de la condición: el próximo cruce vuelve a avisar
+    _upnl_a(h.fake, "-5000")  # se recupera más de un paso arriba de la línea: el próximo cruce vuelve a avisar
     h.avanzar(15)
     svc.tick()
     _upnl_a(h.fake, "-7000")
@@ -562,3 +563,162 @@ def test_tarjeta_upnl_habilitado_sin_modo_en_el_servicio(client, hd):  # noqa: F
     assert r["upnl"]["estado"] == "off" and r["upnl"]["modo"] == "off" and r["upnl"]["upnl"] is None
     html = client.get("/").get_data(as_text=True)
     assert "el servicio no lo evalúa (FUTURESBOARD_RESCATE_UPNL_MODE=off)" in html
+
+
+# ---------------------------------------------------------------- revisión adversarial de efb7e8e
+
+
+def _ciclo(h, valor, segundos=15):  # noqa: F811
+    _upnl_a(h.fake, valor)
+    h.avanzar(segundos)
+    h.svc.tick()
+
+
+def _avisos_registra(h):  # noqa: F811
+    return [t for t in h.sent if "HARÍA inyección por uPnL" in t]
+
+
+def test_upnl_registra_oscilando_sobre_la_linea_avisa_una_vez(h):  # noqa: F811
+    """Hallazgo 1: un uPnL que oscila sobre la línea (-7.010 / -6.990 con la línea en -7.000) mandaba un aviso y un
+    evento por cada cruce (20 en 10 min) y la historia de `eventos` (últimos 100) se perdía."""
+    h.svc = _arrancar(h, modo="real", upnl_mode="dry_run")
+    eventos_antes = len(h.state()["eventos"])
+    for i in range(40):
+        _ciclo(h, "-7010" if i % 2 == 0 else "-6990")
+    assert len(_avisos_registra(h)) == 1
+    eventos = h.state()["eventos"]
+    assert len([e for e in eventos if e["tipo"] == "upnl"]) == 1
+    assert len(eventos) == eventos_antes + 1
+    assert h.fake.posts() == []
+
+
+def test_upnl_registra_histeresis_de_un_paso(h):  # noqa: F811
+    """Un aviso por escalón en cada episodio: el episodio termina recién cuando la pérdida se recupera al menos un paso
+    arriba de la línea (el mismo margen que deja la guarda de la devolución parcial)."""
+    h.svc = _arrancar(h, modo="real", upnl_mode="dry_run")
+    _ciclo(h, "-8000")  # déficit 1.000 sobre la línea de -7.000: escalón 2
+    assert len(_avisos_registra(h)) == 1 and "escalón 2" in _avisos_registra(h)[-1]
+    for valor in ("-7990", "-8010") * 5:  # borde entre el escalón 1 y el 2
+        _ciclo(h, valor)
+    _ciclo(h, "-6500")  # 500 arriba de la línea: menos de un paso, el episodio sigue
+    _ciclo(h, "-8000")
+    assert len(_avisos_registra(h)) == 1
+    _ciclo(h, "-9000")  # escalón 3: nuevo
+    assert len(_avisos_registra(h)) == 2 and "escalón 3" in _avisos_registra(h)[-1]
+    _ciclo(h, "-5990")  # 1.010 arriba de la línea: más de un paso, se rearma
+    _ciclo(h, "-7000")
+    assert len(_avisos_registra(h)) == 3 and "escalón 1" in _avisos_registra(h)[-1]
+    assert h.fake.posts() == []  # el ratio nunca baja de 8: el de margen no se mete
+
+
+def test_upnl_en_dry_run_solo_registra_tambien_con_el_servicio_en_dry_run(h):  # noqa: F811
+    """Hallazgo 2: con el servicio y U en dry_run, U generaba préstamo simulado que se publicaba en loan_state.json
+    y achicaba a passivbot de verdad (dimensionaba sobre 7.000 en vez de 10.000) aunque los textos decían "solo
+    registra". U en dry_run es siempre "registra": nada cambia en la cuenta ni en loan_state.json."""
+    h.svc = _arrancar(h, modo="dry_run", upnl_mode="dry_run")
+    for valor in ("-7000", "-8000", "-9000"):
+        _ciclo(h, valor, segundos=61)
+    st = h.state()
+    assert st["upnl"]["eval"]["estado"] == "registra"
+    assert st["prestamo"] == {"real": "0.00", "dry_run": "0.00"} and st["ledger"] == []
+    assert h.loan_file()["loan_outstanding_usdt"] == 0.0
+    assert h.fake.posts() == []
+    assert [a.split("(")[1].split(",")[0] for a in _avisos_registra(h)] == ["escalón 1", "escalón 2", "escalón 3"]
+    assert "ultima_inyeccion" not in st["upnl"]
+
+
+def test_upnl_con_el_rescate_deshabilitado_queda_off(client, hd):  # noqa: F811
+    """Hallazgo 3: con el rescate deshabilitado el panel y la tarjeta mostraban el disparo U "real · condición
+    cumplida" (no transfería nada) y una lectura sin wallet/uPnL avisaba igual por Telegram."""
+    hd.configurar(reserva=10000, paso=1000, umbral=8, devolucion=32, tope=50, upnl=U_ON)
+    _cuenta(hd.fake)
+    svc = hd.service("real", env={rescate.ENV_UPNL_MODE: "real"})
+    svc.tick()
+    hd.configurar(habilitado=False, reserva=10000, paso=1000, umbral=8, devolucion=32, tope=50, upnl=U_ON)
+    _upnl_a(hd.fake, "-9000")
+    hd.avanzar(15)
+    svc.tick()
+    assert hd.fake.posts() == []
+    up = client.get("/api/rescate/status").get_json()["upnl"]
+    assert up["habilitado"] is True and up["rescate_habilitado"] is False
+    assert up["estado"] == "off" and up["eval"] is None
+    html = client.get("/").get_data(as_text=True)
+    m = re.search(r'data-tarjeta="upnl".*?</div>\s*<div class="card-footer', html, re.S)
+    assert m, "falta la tarjeta upnl"
+    tarjeta = m.group(0)
+    assert 'data-upnl-estado="off"' in tarjeta and "el rescate está deshabilitado" in tarjeta
+    assert "condición cumplida" not in tarjeta and "FUTURESBOARD_RESCATE_UPNL_MODE" not in tarjeta
+    assert "rescate_habilitado" in client.get("/rescate").get_data(as_text=True)  # el JS del panel distingue el motivo
+    hd.fake.omitir_upnl = True
+    hd.avanzar(15)
+    svc.tick()
+    assert not [t for t in hd.sent if "totalUnrealizedProfit" in t]
+
+
+def _body_panel(**upnl):  # noqa: F811
+    return {**_cfg_body(reserva_max_usdt=10000, umbral_devolucion_ratio=32, tope_perdida_pct=50), **U_ON, **upnl}
+
+
+def _servicio_en_perdida(hd, upnl_cfg=U_ON, upnl_mode="real", modo="real", upnl="-5000"):  # noqa: F811
+    """Servicio con la config del panel y una lectura con uPnL -5.000 (capital propio 10.000): con X 70 no dispara."""
+    hd.configurar(reserva=10000, paso=1000, umbral=8, devolucion=32, tope=50, upnl=upnl_cfg)
+    _cuenta(hd.fake, upnl=upnl)
+    svc = hd.service(modo, env={rescate.ENV_UPNL_MODE: upnl_mode})
+    svc.tick()
+    assert hd.fake.posts() == []
+    return svc
+
+
+@pytest.mark.parametrize("upnl_cfg", [U_ON, U_OFF])
+def test_panel_bajar_x_con_la_perdida_cumplida_pide_confirmacion(app, client, hd, upnl_cfg):  # noqa: F811
+    """Hallazgo 5: bajar X (o prender el disparo) con la cuenta ya en pérdida inyectaba varios pasos seguidos sin
+    confirmación (X 70 -> 30 con uPnL -5.000: 3 pasos de 1.000 en ~2 min)."""
+    _servicio_en_perdida(hd, upnl_cfg=upnl_cfg)
+    body = _body_panel(upnl_x_pct=30)
+    resp = _post_raw(client, "/api/rescate/config", json.dumps(body))
+    assert resp.status_code == 409, resp.get_data(as_text=True)
+    d = resp.get_json()
+    assert d["ok"] is False and d["requiere_confirmacion"] is True
+    assert "3 pasos" in d["error"] and "3000.00 USDT" in d["error"] and "¿Guardar igual?" in d["error"]
+    cfg, _err = rescate.load_config(hd.data_dir)
+    assert cfg["upnl_x_pct"] == str(upnl_cfg["upnl_x_pct"]) and cfg["upnl_habilitado"] is upnl_cfg["upnl_habilitado"]
+    assert audit_lines(app)[-1]["result"] == "requiere_confirmacion"
+    resp = _post_raw(client, "/api/rescate/config", json.dumps({**body, "confirmar_inyeccion": True}))
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    cfg = resp.get_json()["status"]["config"]
+    assert cfg["upnl_x_pct"] == "30" and cfg["upnl_habilitado"] is True
+    assert audit_lines(app)[-1]["result"] == "ok"
+
+
+@pytest.mark.parametrize("caso", ["no_dispara", "registra", "sin_campos_upnl", "upnl_apagado", "sin_posiciones"])
+def test_panel_sin_inyeccion_inmediata_no_pide_confirmacion(client, hd, caso):  # noqa: F811
+    _servicio_en_perdida(hd, upnl_mode="dry_run" if caso == "registra" else "real",
+                         upnl="0" if caso == "sin_posiciones" else "-5000")
+    if caso == "sin_posiciones":
+        hd.fake.positions = {}
+        _upnl_a(hd.fake, "-5000")
+        hd.avanzar(15)
+        hd.service("real", env={rescate.ENV_UPNL_MODE: "real"}).tick()
+    body = {"no_dispara": _body_panel(upnl_x_pct=60),  # línea -6.000: con -5.000 no dispara
+            "registra": _body_panel(upnl_x_pct=30),
+            "sin_campos_upnl": _cfg_body(reserva_max_usdt=10000, umbral_devolucion_ratio=32, tope_perdida_pct=50),
+            "upnl_apagado": _body_panel(upnl_habilitado=False, upnl_x_pct=30),
+            "sin_posiciones": _body_panel(upnl_x_pct=30)}[caso]
+    resp = _post_raw(client, "/api/rescate/config", json.dumps(body))
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+
+def test_panel_confirmar_inyeccion_tiene_que_ser_booleano(client, hd):  # noqa: F811
+    _servicio_en_perdida(hd)
+    body = {**_body_panel(upnl_x_pct=30), "confirmar_inyeccion": 1}
+    resp = _post_raw(client, "/api/rescate/config", json.dumps(body))
+    assert resp.status_code == 400 and "confirmar_inyeccion tiene que ser true o false" in resp.get_json()["error"]
+
+
+def test_upnl_ultima_lectura_guarda_wallet_y_upnl(h):  # noqa: F811
+    """La confirmación del panel calcula con la última lectura: wallet efectiva y uPnL quedan en `ultimo` aunque el
+    disparo U esté apagado."""
+    h.svc = _arrancar(h, upnl=U_OFF)
+    _ciclo(h, "-5000")
+    ultimo = h.state()["ultimo"]
+    assert ultimo["wallet_balance"] == "10000.00" and ultimo["upnl"] == "-5000.00"
