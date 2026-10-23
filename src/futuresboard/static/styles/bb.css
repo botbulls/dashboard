@@ -193,7 +193,7 @@ body.bb {
 .bb .bg-white { background-color: var(--bb-surface) !important; }
 .bb .link-dark { color: var(--bb-text) !important; }
 .bb code { color: var(--bb-text); background: var(--bb-surface-2); border-radius: var(--bb-r-sm); padding: 0 4px; }
-.bb hr { border-color: var(--bb-border); opacity: 1; }
+.bb hr { border: 0; height: 1px; background-color: var(--bb-border); opacity: 1; }
 /* Utilidades de color: significado fijo (las usa el JS de los modales) */
 .bb .text-success { color: var(--bb-gain) !important; }
 .bb .text-danger { color: var(--bb-loss) !important; }
@@ -223,6 +223,7 @@ body.bb {
   --bs-table-striped-color: var(--bb-text); --bs-table-hover-color: var(--bb-text); --bs-table-active-color: var(--bb-text);
   color: var(--bb-text); border-color: var(--bb-border); font-size: var(--bb-fs-14); margin-bottom: 0; }
 .bb .table > :not(caption) > * > * { border-bottom-color: var(--bb-border); padding: var(--bb-s2) var(--bb-s3); }
+.bb .table > :not(:first-child) { border-top: 1px solid var(--bb-border); }  /* Bootstrap pone 2px currentColor */
 .bb .table thead th, .bb .table thead td { background: var(--bb-surface-2); color: var(--bb-text-2); font-weight: 600; font-size: var(--bb-fs-13); text-transform: none; letter-spacing: 0; white-space: nowrap; }
 .bb .table .table-success, .bb .table .table-danger, .bb .table .table-secondary, .bb .table .table-primary,
 .bb .table-success, .bb .table-danger, .bb .table-secondary, .bb .table-primary { --bs-table-bg: transparent; --bs-table-accent-bg: transparent; color: var(--bb-text); }
@@ -345,7 +346,7 @@ body.bb {
 /* ------------------------------------------------------------------ 7. Secciones y KPIs */
 .bb-seccion { display: grid; gap: var(--bb-s3); min-width: 0; }
 .bb-seccion__titulo { display: flex; align-items: center; gap: var(--bb-s2); flex-wrap: wrap; margin: 0; font-size: var(--bb-fs-20); }
-.bb-seccion__titulo a { color: var(--bb-text); }
+.bb-seccion__titulo a { color: var(--bb-text); display: inline-flex; align-items: center; gap: var(--bb-s2); }
 .bb-seccion__titulo .bb-seccion__mas { margin-left: auto; font-size: var(--bb-fs-14); font-weight: 500; color: var(--bb-link); }
 .bb-kpis { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--bb-s4); }
 .bb-kpis > * { min-width: 0; }
