@@ -435,6 +435,27 @@
                     });
                 }
 
+                // Con el menú del celu abierto, Tab y Shift+Tab dan la vuelta adentro del menú (la página de atrás
+                // queda tapada por el overlay); Esc lo cierra y devuelve el foco a la hamburguesa.
+                function enfocablesDelMenu() {
+                    return [...sidebar.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), summary, [tabindex]:not([tabindex="-1"])')]
+                        .filter((el) => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden');
+                }
+                document.addEventListener('keydown', (e) => {
+                    if (e.key !== 'Tab' || !sidebar.classList.contains('mobile-open')) return;
+                    const items = enfocablesDelMenu();
+                    if (!items.length) return;
+                    const primero = items[0], ultimo = items[items.length - 1];
+                    const adentro = sidebar.contains(document.activeElement);
+                    if (e.shiftKey && (!adentro || document.activeElement === primero)) {
+                        e.preventDefault();
+                        ultimo.focus();
+                    } else if (!e.shiftKey && (!adentro || document.activeElement === ultimo)) {
+                        e.preventDefault();
+                        primero.focus();
+                    }
+                });
+
                 document.addEventListener('keydown', (e) => {
                     if (e.key !== 'Escape') return;
                     if (sidebar.classList.contains('mobile-open')) setMobileMenu(false, true);

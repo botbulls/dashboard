@@ -175,6 +175,16 @@ def test_hooks_del_shell_en_todas_las_paginas(client, con_datos, url):  # noqa: 
     assert '<html lang="es-AR"' in html
 
 
+def test_menu_del_celu_retiene_el_foco(client):  # noqa: F811
+    # Tab / Shift+Tab dan la vuelta adentro de #sidebar mientras está abierto; Esc lo cierra (verificado con
+    # teclas reales por CDP en la evidencia del deploy). Acá se cuida que el manejador siga en base.html.
+    html = _get(client, "/")
+    js = html.split("function enfocablesDelMenu()", 1)[1].split("const alCambiarAncho", 1)[0]
+    assert "e.key !== 'Tab' || !sidebar.classList.contains('mobile-open')" in js
+    assert "ultimo.focus()" in js and "primero.focus()" in js
+    assert "if (e.key !== 'Escape') return;" in js
+
+
 @pytest.mark.parametrize("url,seccion", [("/", "Inicio"), ("/positions", "Posiciones"), ("/history", "Historial"),
                                          ("/rescate", "Rescate (colchón)"), ("/projection", "Proyección"),
                                          ("/settings", "Ajustes de la cuenta")])
