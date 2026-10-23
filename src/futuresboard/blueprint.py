@@ -26,6 +26,7 @@ from typing_extensions import TypedDict
 from futuresboard import bot_control
 from futuresboard import c3
 from futuresboard import jobs
+from futuresboard import perfiles
 from futuresboard import rescate
 from futuresboard import resumen_rescate
 from futuresboard import telegram_notify
@@ -1576,7 +1577,16 @@ def bot_status():
         out = bot_control.get_status(settings)
     except bot_control.BotControlError as exc:
         return _json_response({"enabled": settings.enabled, "error": str(exc)}, exc.status_code)
-    out["rescate_start_bloqueado"] = rescate.start_bloqueado(_bot_store().data_dir)
+    data_dir = _bot_store().data_dir
+    out["rescate_start_bloqueado"] = rescate.start_bloqueado(data_dir)
+    # Perfiles de riesgo y TWE manual (docs/perfiles.md): definiciones y el perfil vigente según los valores.
+    out.update(perfiles.catalogo())
+    rescate_cfg, _err = rescate.load_config(data_dir)
+    out["perfil_vigente"] = (perfiles.detectar({k: out.get(k) for k in ("twe_long", "n_longs", "n_shorts")}, rescate_cfg)
+                             if out.get("config_available") else None)
+    out["perfil_ultimo"] = rescate_cfg.get("perfil")
+    out["twe_manual"] = {"min": str(bot_control.TWE_MANUAL_MIN), "max": str(bot_control.TWE_MANUAL_MAX),
+                         "paso": str(bot_control.TWE_MANUAL_PASO), "advertencia": str(bot_control.TWE_ADVERTENCIA)}
     return _json_response(out)
 
 
@@ -1592,11 +1602,37 @@ def _check_rescate_start(data_dir: pathlib.Path) -> None:
 @app.route("/api/bot/start", methods=["POST"])
 @csrf_protect
 def bot_start():
-    body = request.get_json(silent=True) or {}
-    riesgo = body.get("riesgo") if isinstance(body, dict) else None
+    """START con un preset (``{"riesgo": ...}``) o con la TWE manual (``{"twe_long": n}``, ver docs/perfiles.md).
+
+    TWE manual: número entre 0,5 y 8 en pasos de 0,25; por encima de 4 hay que mandar ``"confirmar_twe_alta": true``
+    (si no, 409 con ``requiere_confirmacion``)."""
+    body = request.get_json(silent=True)
+    body = body if isinstance(body, dict) else {}
+    manual = "twe_long" in body
+    riesgo = body.get("riesgo")
+    params = {"twe_long": body.get("twe_long")} if manual else {"riesgo": riesgo}
+    twe = None
+    if manual:
+        try:
+            if "riesgo" in body:
+                raise ValueError("Mandar riesgo (preset) o twe_long (TWE manual), no los dos.")
+            confirmar = body.get("confirmar_twe_alta", False)
+            if not isinstance(confirmar, bool):
+                raise ValueError("confirmar_twe_alta tiene que ser true o false.")
+            twe = bot_control.validate_twe_manual(body["twe_long"])
+        except ValueError as exc:
+            _rescate_audit("start", params, "rechazado", str(exc))
+            return _json_response({"ok": False, "error": str(exc)}, 400)
+        if twe > bot_control.TWE_ADVERTENCIA and not confirmar:
+            aviso = (f"TWE {bot_control.twe_valor(twe)} está por encima de {bot_control.twe_valor(bot_control.TWE_ADVERTENCIA)}: "
+                     "en el backtest multianual 2021-2026 aparecen liquidaciones desde TWE 6, y los perfiles medidos son "
+                     "TWE 3 y TWE 4. Herramienta, no asesor. ¿Aplicar igual?")
+            _rescate_audit("start", params, "requiere_confirmacion", aviso)
+            return _json_response({"ok": False, "requiere_confirmacion": True, "error": aviso}, 409)
 
     def validate():
-        bot_control.validate_riesgo(riesgo)
+        if not manual:
+            bot_control.validate_riesgo(riesgo)
         _check_rescate_start(_bot_store().data_dir)
         settings = bot_control.Settings()
         settings.require_enabled()
@@ -1605,9 +1641,51 @@ def bot_start():
     def work(store, settings, _extra, rep):
         # Se vuelve a chequear dentro del job, ya con el lock de acciones tomado.
         _check_rescate_start(store.data_dir)
-        return bot_control.start_bot(settings, store, riesgo, reporter=rep)
+        return bot_control.start_bot(settings, store, riesgo, reporter=rep, twe_long=twe)
 
-    return _run_bot_action("start", {"riesgo": riesgo}, validate, work)
+    return _run_bot_action("start", params, validate, work)
+
+
+@app.route("/api/bot/perfil", methods=["POST"])
+@csrf_protect
+def bot_perfil():
+    """Aplica un perfil de riesgo (TWE de forager + rescate + disparo por uPnL + retiro) en una sola acción.
+
+    ``{"perfil": "conservador" | "con_rescate"}`` responde 409 con ``requiere_confirmacion`` y el plan (qué cambia, si
+    passivbot se reinicia, los modos del servicio y los números del backtest). Con ``"confirmar": true`` lanza el job
+    (202), con el mismo lock que START. Ver docs/perfiles.md."""
+    body = request.get_json(silent=True)
+    params = {"perfil": body.get("perfil") if isinstance(body, dict) else None}
+    try:
+        parsed = perfiles.validate_body(body)
+    except ValueError as exc:
+        _rescate_audit("perfil", params, "rechazado", str(exc))
+        return _json_response({"ok": False, "error": str(exc)}, 400)
+    nombre = parsed["perfil"]
+    data_dir = _bot_store().data_dir
+    if not parsed["confirmar"]:
+        try:
+            plan = perfiles.plan(bot_control.Settings(), data_dir, nombre)
+        except ValueError as exc:
+            _rescate_audit("perfil", params, "rechazado", str(exc))
+            return _json_response({"ok": False, "error": str(exc)}, 400)
+        except bot_control.BotControlError as exc:
+            _rescate_audit("perfil", params, "rechazado", str(exc))
+            return _json_response({**exc.payload, "ok": False, "error": str(exc)}, exc.status_code)
+        _rescate_audit("perfil", params, "requiere_confirmacion", plan["texto"])
+        return _json_response({"ok": False, "requiere_confirmacion": True, "error": plan["texto"], "plan": plan}, 409)
+    usuario = session.get("username") or "?"
+
+    def validate():
+        settings = bot_control.Settings()
+        settings.require_enabled()
+        _check_rescate_start(data_dir)
+        return settings, usuario
+
+    def work(store, settings, user, rep):
+        return perfiles.aplicar(settings, store, nombre, user, reporter=rep)
+
+    return _run_bot_action("perfil", params, validate, work)
 
 
 @app.route("/api/bot/stop", methods=["POST"])
@@ -1688,6 +1766,7 @@ def rescate_page():
         custom=current_app.config["CUSTOM"],
         limites={k: [str(lo), str(hi)] for k, (lo, hi) in rescate.LIMITES.items()},
         aviso=rescate.AVISO,
+        retiro_recomendada=rescate.FRECUENCIA_RECOMENDADA,
         c3_limites={**{k: [str(lo), str(hi)] for k, (lo, hi) in c3.LIMITES.items()},
                     **{k: [str(lo), str(hi)] for k, (lo, hi) in c3.LIMITES_ENTEROS.items()}},
         c3_aviso=c3.AVISO,

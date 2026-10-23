@@ -19,7 +19,7 @@ Forma del job:
 ```json
 {
   "id": "3f2a9c0d1e4b5a67",
-  "accion": "start | graceful | apagar",
+  "accion": "start | graceful | apagar | perfil",
   "params": {"riesgo": "medio"},
   "estado": "en_curso | ok | error | interrumpido",
   "porcentaje": 66,
@@ -48,6 +48,10 @@ Forma del job:
 **START / Graceful stop**: validar configuración (contenedor existe, HJSON legible) → backup de la
 config → escribir config → iniciar/reiniciar passivbot → verificar que el contenedor quedó
 corriendo → esperando a forager.
+
+**Perfil** (`POST /api/bot/perfil`, acción `perfil`, ver [perfiles.md](perfiles.md)): validar perfil, forager y
+rescate → guardar rescate, disparo por uPnL y retiro → los mismos pasos de START desde el backup (con la espera a
+forager, que también se puede cortar con Apagar).
 
 "Esperando a forager" es informativo: forager tarda ~60-90 s en abrir los pares después del
 reinicio. Es una cuenta regresiva de `FUTURESBOARD_FORAGER_WARMUP_SECONDS` (default 90, entre 0 y

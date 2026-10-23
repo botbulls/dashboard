@@ -1349,3 +1349,74 @@ def test_config_invalida_no_se_tapa_con_la_ultima_valida_ante_un_oserror(h, monk
     h.avanzar(15)
     svc.tick()
     assert h.c3()["confirmacion"] is None and "deshabilitado" in h.c3()["latido"]["suspendido"]
+
+
+# ---------------------------------------------------------------- retiro periódico de ganancias y base de C3
+
+
+def _retiro_bajo_el_agua(h, retiro):
+    """C3 real con tope 30 % anclado en 20.000 con la cuenta plana; después posiciones bajo el agua (wallet realizada
+    20.000, uPnL -5.000: capital de futuros 15.000, arriba del piso 14.000) y vence un retiro diario."""
+    h.configurar(tope=30)
+    body = {"habilitado": True, "reserva_max_usdt": 10000, "paso_usdt": 1000, "umbral_ratio": 8,
+            "umbral_devolucion_ratio": 32, "tope_perdida_pct": 80}
+    if retiro:
+        body.update({"retiro_frecuencia": "diaria", "retiro_base_usdt": 10000})
+    rescate.save_config(h.data_dir, rescate.validate_config_body(body), "cliente17")
+    f = h.r.fake
+    f.upnl, f.margin, f.maint, f.max_withdraw, f.spot = (Decimal(0), Decimal(20000), Decimal(100), Decimal(18000),
+                                                          Decimal(10000))
+    svc = h.r.service("real", env={rescate.ENV_RETIRO_MODE: "real"})
+    svc.c3 = h.watcher("real")
+    svc.tick()
+    assert h.c3()["base"]["capital"] == "20000.00"
+    f.upnl, f.margin, f.maint, f.max_withdraw = Decimal(-5000), Decimal(15000), Decimal(300), Decimal(9000)
+    h.avanzar(60)
+    svc.tick()
+    assert h.c3()["confirmacion"] is None and h.apagados == []
+    t_dia = 1_700_006_400  # 2023-11-15 00:00:00 UTC: vence el retiro diario
+    h.avanzar(t_dia - h.clock.t + 5)
+    svc.tick()
+    retiros = [p["amount"] for p in f.posts() if p["type"] == "UMFUTURE_MAIN"]
+    for _ in range(3):
+        h.avanzar(c3.DEFAULT_CONFIRM_S + 1)
+        svc.tick()
+    return retiros, h.c3()
+
+
+def test_un_retiro_con_la_cuenta_en_drawdown_no_dispara_el_corte(h):
+    """El retiro mide la wallet realizada (excedente 10.000, la guarda de margen lo limita a 5.400) mientras C3 ve un
+    drawdown de 25 %. Bajar la base en el monto (20.000 -> 14.600, piso 10.220, capital 9.600) cortaba con Apagar: la
+    base baja en proporción al capital (20.000 × 9.600 / 15.000 = 12.800, piso 8.960) y el drawdown sigue en 25 %."""
+    retiros, st = _retiro_bajo_el_agua(h, retiro=True)
+    assert retiros == ["5400.00"]
+    assert st["base"]["capital"] == "12800.00" and st["base"]["retirado"] == "5400.00"
+    assert st["historial"][-1]["tipo"] == "base_retiro" and st["historial"][-1]["capital_previo"] == "15000.00"
+    assert not st.get("c3_parado") and st["confirmacion"] is None and h.apagados == []
+
+
+def test_control_la_misma_caida_sin_retiro_no_corta(h):
+    retiros, st = _retiro_bajo_el_agua(h, retiro=False)
+    assert retiros == [] and st["base"]["capital"] == "20000.00"
+    assert not st.get("c3_parado") and h.apagados == []
+
+
+@pytest.mark.parametrize("base,capital,monto,esperada", [
+    ("20000", "20000", "10000", "10000.00"),  # cuenta plana: igual que restar el monto
+    ("20000", "15000", "5400", "12800.00"),   # en drawdown: el drawdown % no cambia
+    ("10000", "18600", "8600", "5376.34"),    # con ganancia: restar dejaba 1.400 (piso 980 con tope 30 %)
+    ("10000", "15000", "5000", "6666.66"),    # en centavos hacia abajo
+])
+def test_ajustar_base_por_retiro_es_proporcional(base, capital, monto, esperada):
+    state = {"c3": {"base": {"capital": base, "modo": "real"}, "historial": []}}
+    texto = c3.ajustar_base_por_retiro(state, Decimal(monto), 1_700_000_000, Decimal(capital))
+    assert state["c3"]["base"]["capital"] == esperada and "proporcional" in texto
+    nueva = Decimal(esperada)
+    assert nueva / (Decimal(capital) - Decimal(monto)) <= Decimal(base) / Decimal(capital)  # nunca acerca el corte
+
+
+def test_ajustar_base_sin_capital_previo_resta_el_monto():
+    """Una transferencia en vuelo de antes de este cambio no trae el capital: se resta el monto (lo de antes)."""
+    state = {"c3": {"base": {"capital": "12000.00", "modo": "real"}, "historial": []}}
+    c3.ajustar_base_por_retiro(state, Decimal("2000"), 1_700_000_000, None)
+    assert state["c3"]["base"]["capital"] == "10000.00"

@@ -202,8 +202,37 @@ def _tarjetas(data_dir: pathlib.Path, now: float) -> Dict[str, Any]:
                    "start_bloqueado": status.get("start_bloqueado")}
     out["sin_datos"] = spot["usdt"] is None and not lectura_ok
     out["upnl"] = _upnl(status, cfg, now, _vieja)
+    out["retiro"] = _retiro(status, now, _vieja)
     out["c3"] = _c3(data_dir, now)
     return out
+
+
+def _retiro(status: Dict[str, Any], now: float, vieja: Any) -> Optional[Dict[str, Any]]:
+    """Tarjeta del retiro periódico de ganancias: si tiene frecuencia o ya retiró algo."""
+    r = status.get("retiro") if isinstance(status.get("retiro"), dict) else {}
+    acum = r.get("acumulado") if isinstance(r.get("acumulado"), dict) else {}
+    real, sim = acum.get(rescate.MODE_REAL) or "0.00", acum.get(rescate.MODE_DRY_RUN) or "0.00"
+    if r.get("frecuencia") in (None, rescate.FRECUENCIA_OFF) and real == "0.00" and sim == "0.00":
+        return None
+    ev = r.get("eval") if isinstance(r.get("eval"), dict) and r.get("estado") != rescate.RETIRO_OFF else {}
+    ultimo = r.get("ultimo") if isinstance(r.get("ultimo"), dict) else None
+    return {
+        "frecuencia": r.get("frecuencia"),
+        "estado": r.get("estado"),
+        "modo": r.get("modo"),
+        "base": r.get("base"),
+        "acumulado": real,
+        "acumulado_simulado": sim,
+        "vencido": bool(ev.get("vencido")) if ev else False,
+        "motivo_espera": ev.get("motivo_espera") if ev else None,
+        "proximo": ev.get("proximo_en") if ev else None,
+        "excedente": ev.get("excedente") if ev else None,
+        "error": ev.get("error") if ev else None,
+        "hace": antiguedad(ev.get("ts"), now) if ev else None,
+        "vieja": bool(ev) and vieja(ev.get("ts")),
+        "ultimo": None if ultimo is None else {"monto": ultimo.get("monto"), "hace": antiguedad(ultimo.get("ts"), now),
+                                               "simulado": ultimo.get("modo") == rescate.MODE_DRY_RUN},
+    }
 
 
 def _upnl(status: Dict[str, Any], cfg: Dict[str, Any], now: float, vieja: Any) -> Optional[Dict[str, Any]]:

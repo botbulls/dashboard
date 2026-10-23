@@ -18,6 +18,7 @@ import fcntl
 import hashlib
 import hmac
 import json
+import math
 import os
 import pathlib
 import re
@@ -49,6 +50,18 @@ RISK_PRESETS: Dict[str, tuple] = {
     "alto": (8, 3),
 }
 STOP_MODES = ("graceful", "apagar")
+
+# TWE manual (además de los presets y los perfiles): rango y paso validados en el servidor. Arriba de
+# TWE_ADVERTENCIA el panel muestra una advertencia y pide confirmarlo: en el backtest multianual 2021-2026 (botbulls-lab
+# multianual) aparecen liquidaciones desde TWE 6 y sin rescate se midió hasta TWE 4.
+TWE_MANUAL_MIN = decimal.Decimal("0.5")
+TWE_MANUAL_MAX = decimal.Decimal("8")
+TWE_MANUAL_PASO = decimal.Decimal("0.25")
+TWE_ADVERTENCIA = decimal.Decimal("4")
+# twe_short que se escribe con n_shorts 0 (TWE manual y perfiles): forager no lo usa (sw = 0.1 sin shorts), y no se
+# usa 0 porque cambia el WE limit de un short que hubiera quedado abierto (ver "Bloqueante conocido" en
+# docs/panel-passivbot.md). Es el del preset bajo: el perfil "Con rescate" (TWE 4) queda igual a ese preset.
+TWE_SHORT_SOLO_LONG = 1
 
 MODE_NORMAL = "normal"
 MODE_GRACEFUL_STOP = "graceful_stop"
@@ -735,7 +748,11 @@ def _is_strict_json(text: str) -> bool:
 
 
 def _prune_backups(path: pathlib.Path) -> None:
-    backups = sorted(path.parent.glob(f"{path.name}.bak-*"))
+    """Limpieza de backups viejos: best effort (la config ya quedó escrita; un error acá no es un error del cambio)."""
+    try:
+        backups = sorted(path.parent.glob(f"{path.name}.bak-*"))
+    except OSError:
+        return
     for old in backups[:-MAX_BACKUPS]:
         with contextlib.suppress(OSError):
             old.unlink()
@@ -1013,6 +1030,8 @@ def get_status(settings: Settings, docker: Optional[DockerClient] = None) -> Dic
         "riesgo": "desconocido",
         "twe_long": None,
         "twe_short": None,
+        "n_longs": None,
+        "n_shorts": None,
         "long_mode": None,
         "short_mode": None,
         "config_available": False,
@@ -1035,6 +1054,7 @@ def get_status(settings: Settings, docker: Optional[DockerClient] = None) -> Dic
             twe_long=cfg.get("twe_long"),
             twe_short=cfg.get("twe_short"),
         )
+        out["n_longs"], out["n_shorts"] = n_pares(cfg)
         # Un modo invalido no rompe el status: se muestra el valor crudo y el motivo.
         for side in ("long", "short"):
             key = f"{side}_mode"
@@ -1084,7 +1104,19 @@ def _apply_and_restart(settings: Settings, store: Store, docker: DockerClient, i
     rep = reporter or NULL_REPORTER
     rep.step("validar", PASO_OK, f"Contenedor {settings.container}: {info.get('status')}")
     backup = write_forager_config(path, updates, rep)
-    store.save_state(new_state)
+    try:
+        store.save_state(new_state)
+    except OSError as exc:
+        # Antes de Docker: sin vuelta atrás quedaría la config de forager escrita sin reiniciar (y sin el estado local).
+        try:
+            restore_forager_config(path, backup)
+        except (BotControlError, OSError) as restore_exc:
+            raise ConfigError(
+                f"No se pudo guardar el estado del panel ({exc.__class__.__name__}). ATENCION: la config de forager "
+                f"quedo modificada y no se pudo restaurar ({restore_exc}); backup: {backup.name}."
+            ) from exc
+        raise ConfigError(f"No se pudo guardar el estado del panel ({exc.__class__.__name__}): se restauro la config "
+                          "de forager; no se aplico ningun cambio.") from exc
     try:
         rep.step("docker", PASO_EN_CURSO,
                  f"{'Reiniciando' if info.get('running') else 'Iniciando'} {settings.container}")
@@ -1097,6 +1129,7 @@ def _apply_and_restart(settings: Settings, store: Store, docker: DockerClient, i
                 f"{exc} Resultado incierto: la config de forager quedo escrita (backup {backup.name}); "
                 "revisar el estado del bot antes de reintentar."
             )
+            err.uncertain = True  # sigue siendo incierto (lo mira la aplicación de un perfil)
             raise err from exc
         try:
             restore_forager_config(path, backup)
@@ -1108,6 +1141,48 @@ def _apply_and_restart(settings: Settings, store: Store, docker: DockerClient, i
             )
             raise err from exc
         raise DockerError(f"{exc} Se restauro la config de forager; no se aplico ningun cambio.") from exc
+
+
+def validate_twe_manual(value: Any) -> decimal.Decimal:
+    """TWE long a mano: número JSON finito (no bool ni texto) entre 0,5 y 8, en pasos de 0,25. ValueError si no.
+
+    Acepta también un ``Decimal`` (los perfiles)."""
+    if isinstance(value, decimal.Decimal):
+        if not value.is_finite():
+            raise ValueError("twe_long tiene que ser un número finito.")
+        twe = value
+    else:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("twe_long tiene que ser un número.")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("twe_long tiene que ser un número finito.")
+        twe = decimal.Decimal(str(value))
+    if twe < TWE_MANUAL_MIN or twe > TWE_MANUAL_MAX:
+        raise ValueError(f"twe_long fuera de rango: tiene que estar entre {TWE_MANUAL_MIN} y {TWE_MANUAL_MAX}.")
+    if twe % TWE_MANUAL_PASO != 0:
+        raise ValueError(f"twe_long va en pasos de {TWE_MANUAL_PASO} (por ejemplo 3, 3.25, 3.5).")
+    return twe
+
+
+def twe_valor(twe: decimal.Decimal) -> Any:
+    """Valor para el HJSON: entero si no tiene decimales (3, no 3.0), si no float (3.25)."""
+    return int(twe) if twe == twe.to_integral_value() else float(twe)
+
+
+def n_pares(cfg: Dict[str, Any]) -> tuple:
+    """(n_longs, n_shorts) de la config de forager como enteros, o None si falta o no es un entero >= 0."""
+    out = []
+    for key in ("n_longs", "n_shorts"):
+        value = cfg.get(key)
+        if isinstance(value, bool):
+            out.append(None)
+        elif isinstance(value, int) and value >= 0:
+            out.append(value)
+        elif isinstance(value, float) and value.is_integer() and value >= 0:
+            out.append(int(value))
+        else:
+            out.append(None)
+    return tuple(out)
 
 
 def validate_riesgo(riesgo: Any) -> str:
@@ -1133,13 +1208,18 @@ def validate_stop(settings: Settings, modo: Any) -> str:
 
 def start_bot(settings: Settings, store: Store, riesgo: Any,
               docker: Optional[DockerClient] = None, reporter: Optional[Reporter] = None,
-              mantener_twe: bool = False) -> Dict[str, Any]:
+              mantener_twe: bool = False, twe_long: Optional[decimal.Decimal] = None) -> Dict[str, Any]:
     """START del panel: aplica el preset ``riesgo`` (twe_long/twe_short), modos normales y reinicia passivbot.
 
     ``mantener_twe=True`` (solo lo usa el reinicio automático de C3 con una config "personalizado") no toca
     twe_long/twe_short: ``riesgo`` se ignora y el resto es idéntico (modos, backup, escritura, reinicio).
+
+    ``twe_long`` (TWE manual o un perfil, ver ``futuresboard.perfiles``): escribe ese ``twe_long`` en vez del preset
+    (``riesgo`` se ignora). ``twe_short``: ``TWE_SHORT_SOLO_LONG`` con ``n_shorts`` 0 (forager no lo usa); con shorts
+    se deja el que está. El resto es idéntico al START con preset.
     """
-    if not mantener_twe:
+    twe_manual = validate_twe_manual(twe_long) if twe_long is not None else None
+    if twe_manual is None and not mantener_twe:
         validate_riesgo(riesgo)
     (reporter or NULL_REPORTER).step("validar", PASO_EN_CURSO)
     settings.require_enabled()
@@ -1165,6 +1245,12 @@ def start_bot(settings: Settings, store: Store, riesgo: Any,
     if mantener_twe:
         riesgo = detect_preset(cfg)
         updates = {"long_mode": MODE_NORMAL, "short_mode": new_short}
+    elif twe_manual is not None:
+        updates = {"twe_long": twe_valor(twe_manual)}
+        if n_pares(cfg)[1] == 0:
+            updates["twe_short"] = TWE_SHORT_SOLO_LONG
+        updates.update(long_mode=MODE_NORMAL, short_mode=new_short)
+        riesgo = detect_preset({**cfg, **updates})
     else:
         twe_long, twe_short = RISK_PRESETS[riesgo]
         updates = {
@@ -1176,8 +1262,11 @@ def start_bot(settings: Settings, store: Store, riesgo: Any,
     state.pop("short_mode_before_stop", None)
     action, backup = _apply_and_restart(settings, store, docker, info, path, updates, prev_state, state,
                                         reporter)
-    return {"ok": True, "riesgo": riesgo, "docker_action": action, "config": updates,
-            "backup": backup.name}
+    out = {"ok": True, "riesgo": riesgo, "docker_action": action, "config": updates, "backup": backup.name}
+    if twe_manual is not None and twe_manual > TWE_ADVERTENCIA:
+        out["warning"] = (f"TWE {twe_valor(twe_manual)} por encima de {twe_valor(TWE_ADVERTENCIA)}: en el backtest 2021-2026 "
+                          "aparecen liquidaciones desde TWE 6. Herramienta, no asesor.")
+    return out
 
 
 def stop_bot(settings: Settings, store: Store, modo: Any,

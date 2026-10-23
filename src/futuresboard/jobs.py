@@ -229,10 +229,14 @@ class Job(bot_control.Reporter):
 
 
 def accion_de(action: str, params: Dict[str, Any]) -> str:
-    """Nombre corto de la acción para la UI: start, graceful o apagar."""
+    """Nombre corto de la acción para la UI: start, graceful, apagar o perfil."""
     if action == "stop":
         return str(params.get("modo") or "stop")
     return action
+
+
+# Acciones que dejan passivbot corriendo: después se verifica el contenedor y se espera a forager.
+ACCIONES_CON_ARRANQUE = ("start", "graceful", "perfil")
 
 
 def catalogo_de(accion: str) -> List[tuple]:
@@ -240,6 +244,10 @@ def catalogo_de(accion: str) -> List[tuple]:
         return bot_control.APAGAR_STEPS
     if accion == "graceful":
         return bot_control.GRACEFUL_STEPS
+    if accion == "perfil":
+        from futuresboard import perfiles  # perfiles importa rescate y c3: import diferido
+
+        return perfiles.PERFIL_STEPS
     return bot_control.START_STEPS
 
 
@@ -333,11 +341,14 @@ class JobRegistry:
         data["estado"] = ESTADO_INTERRUMPIDO
         data["porcentaje"] = 100
         data["fin"] = _now_iso()
-        data["resultado"] = {
-            "ok": False,
-            "error": (f"{motivo} Revisar el estado de passivbot"
-                      f"{' y de Binance' if data.get('accion') == 'apagar' else ''} antes de reintentar."),
-        }
+        error = (f"{motivo} Revisar el estado de passivbot"
+                 f"{' y de Binance' if data.get('accion') == 'apagar' else ''} antes de reintentar.")
+        if data.get("accion") == "perfil":
+            # Sin vuelta atrás automática: el rescate se guarda antes de escribir forager.
+            error += (" El perfil puede haber quedado a medias (el rescate del perfil guardado con la TWE de antes en "
+                      "forager, o forager escrito sin reiniciar): revisar la TWE de forager y la sección Rescate, y "
+                      "aplicar el perfil de nuevo (o el otro).")
+        data["resultado"] = {"ok": False, "error": error}
         data["http_status"] = 500
         with self._persist_lock:
             tmp = self.path.with_name(f".{self.path.name}.recover.tmp")
@@ -469,7 +480,7 @@ def _run(job: Job, action: str, params: Dict[str, Any], ctx: JobContext,
     try:
         try:
             status, payload, outcome = _execute(job, ctx, work)
-            if outcome == "ok" and job.accion in ("start", "graceful"):
+            if outcome == "ok" and job.accion in ACCIONES_CON_ARRANQUE:
                 try:
                     bot_control.verify_running(ctx.settings, reporter=job)
                 except bot_control.BotControlError as exc:
@@ -477,11 +488,11 @@ def _run(job: Job, action: str, params: Dict[str, Any], ctx: JobContext,
                     status, outcome = exc.status_code, "error"
                     payload = {**payload, "ok": False, "error": str(exc)}
         finally:
-            if outcome == "ok" and job.accion in ("start", "graceful"):
+            if outcome == "ok" and job.accion in ACCIONES_CON_ARRANQUE:
                 # Cancelable ANTES de soltar el lock: un Apagar que llegue en el medio no recibe 409.
                 job.set_cancelable(True)
             handle.release()
-        if outcome == "ok" and job.accion in ("start", "graceful"):
+        if outcome == "ok" and job.accion in ACCIONES_CON_ARRANQUE:
             # Paso informativo, sin lock: otra acción lo puede cortar.
             try:
                 bot_control.wait_for_forager(ctx.settings, bot_control.forager_warmup_seconds(),
@@ -547,7 +558,7 @@ def recover_interrupted(registry: JobRegistry, logger: Any) -> Optional[Dict[str
     if not data:
         return None
     params = data.get("params") if isinstance(data.get("params"), dict) else {}
-    action = "start" if data.get("accion") == "start" else "stop"
+    action = data.get("accion") if data.get("accion") in ("start", "perfil") else "stop"
     user = str(data.get("usuario") or "?")
     logger.warning("Acción del panel %s interrumpida por un reinicio (job %s).", data.get("accion"), data.get("id"))
     try:

@@ -792,6 +792,32 @@
                 </li>
 
                 <li class="grp">
+                    <span class="titulo">PERFILES</span>
+                </li>
+                <li class="btn">
+                    <label for="botPerfilSelect"><small>PERFIL DE RIESGO</small></label>
+                    <select id="botPerfilSelect" name="perfil" class="form-select form-select-sm mt-1 mb-1">
+                        <option value="conservador">Conservador (TWE 3, sin rescate)</option>
+                        <option value="con_rescate">Con rescate (TWE 4 + rescate + retiro)</option>
+                    </select>
+                    <span class="nota d-block mb-1" data-bot-panel="perfil-desc"></span>
+                    <span class="nota d-block mb-1" data-bot-panel="perfil-vigente"></span>
+                    <button type="button" data-bot-accion="perfil">Aplicar perfil</button>
+                    <span class="nota d-block mt-1">TWE de forager + rescate, disparo por uPnL y retiro en una sola acción. Antes de aplicar se muestra qué cambia. Backtest, no promesa: herramienta, no asesor.</span>
+                </li>
+
+                <li class="grp">
+                    <span class="titulo">TWE MANUAL</span>
+                </li>
+                <li class="btn">
+                    <label for="botTweInput"><small>TWE LONG (0,5 a 8, paso 0,25)</small></label>
+                    <input id="botTweInput" name="twe_long" type="number" min="0.5" max="8" step="0.25" inputmode="decimal" class="form-control form-control-sm mt-1 mb-1" aria-describedby="botTweAdvertencia">
+                    <span class="nota d-block mb-1 d-none" id="botTweAdvertencia" data-bot-panel="twe-advertencia" role="alert"></span>
+                    <button type="button" data-bot-accion="twe">Iniciar con esta TWE</button>
+                    <span class="nota d-block mt-1">Escribe twe_long en la config de forager (modo normal) y reinicia passivbot, igual que START.</span>
+                </li>
+
+                <li class="grp">
                     <span class="titulo">STOP</span>
                 </li>
                 <li class="btn">
@@ -814,11 +840,11 @@
                         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
                     </div>
                     <div class="modal-body">
-                        <p class="mb-2" data-bot-confirm="texto"></p>
+                        <p class="mb-2" data-bot-confirm="texto" style="white-space: pre-line;"></p>
                         <p class="mb-2"><strong>Usted opera bajo su propio riesgo.</strong></p>
                         <div class="form-check d-none" data-bot-confirm="check-wrap">
                             <input class="form-check-input" type="checkbox" id="botActionConfirmCheck">
-                            <label class="form-check-label small" for="botActionConfirmCheck">Entiendo que se cierran TODAS las posiciones a mercado y se cancelan TODAS las órdenes abiertas en Binance Futures, y que no se puede deshacer.</label>
+                            <label class="form-check-label small" for="botActionConfirmCheck" data-bot-confirm="check-label">Entiendo que se cierran TODAS las posiciones a mercado y se cancelan TODAS las órdenes abiertas en Binance Futures, y que no se puede deshacer.</label>
                         </div>
                     </div>
                     <div class="modal-footer">
@@ -876,6 +902,12 @@
              const disabledMsg = panel.querySelector('[data-bot-panel="deshabilitado-msg"]');
              const gracefulNota = panel.querySelector('[data-bot-panel="graceful-nota"]');
              const riesgoSelect = document.getElementById('botRiesgoSelect');
+             const perfilSelect = document.getElementById('botPerfilSelect');
+             const perfilDesc = panel.querySelector('[data-bot-panel="perfil-desc"]');
+             const perfilVigente = panel.querySelector('[data-bot-panel="perfil-vigente"]');
+             const tweInput = document.getElementById('botTweInput');
+             const tweAdvertencia = document.getElementById('botTweAdvertencia');
+             let tweEditado = false;
              const buttons = panel.querySelectorAll('[data-bot-accion]');
              const confirmEl = document.getElementById('botActionConfirmModal');
              const confirmCheck = document.getElementById('botActionConfirmCheck');
@@ -886,7 +918,9 @@
              const jobEl = document.getElementById('botJobModal');
              const jobQ = (k) => jobEl.querySelector(`[data-bot-job="${k}"]`);
              const JOB_KEY = 'fbBotJobId';
-             const TITULOS = { start: 'START', graceful: 'Graceful stop', apagar: 'Apagar' };
+             const TITULOS = { start: 'START', graceful: 'Graceful stop', apagar: 'Apagar', perfil: 'Perfil' };
+             const CHECK_APAGAR = 'Entiendo que se cierran TODAS las posiciones a mercado y se cancelan TODAS las órdenes abiertas en Binance Futures, y que no se puede deshacer.';
+             const AVISO_TWE_ALTA = (t) => `TWE ${t} está por encima de 4: en el backtest 2021–2026 aparecen liquidaciones desde TWE 6, y los perfiles medidos son TWE 3 y TWE 4.`;
              const ICONOS = { ok: '✓', error: '✗', omitido: '–', pendiente: '·' };
              const ESTADOS_PASO = { ok: 'listo', error: 'error', omitido: 'omitido', pendiente: 'pendiente', en_curso: 'en curso' };
              let jobId = null;       // job que muestra el modal
@@ -970,7 +1004,41 @@
                      b.disabled = bloquear && !apagarPermitido;
                  });
                  riesgoSelect.disabled = bloquear;
+                 perfilSelect.disabled = bloquear;
+                 tweInput.disabled = bloquear;
              }
+
+             // ---- Perfiles y TWE manual (docs/perfiles.md) ----
+             function tweLimites() {
+                 const t = (lastStatus && lastStatus.twe_manual) || { min: '0.5', max: '8', paso: '0.25', advertencia: '4' };
+                 return { min: Number(t.min), max: Number(t.max), paso: Number(t.paso), adv: Number(t.advertencia) };
+             }
+             function tweValida(v) {
+                 const l = tweLimites();
+                 if (!Number.isFinite(v)) return 'Ingresá un número.';
+                 if (v < l.min || v > l.max) return `Tiene que estar entre ${l.min} y ${l.max}.`;
+                 if (Math.abs(v / l.paso - Math.round(v / l.paso)) > 1e-9) return `Va en pasos de ${l.paso}.`;
+                 return null;
+             }
+             function actualizarTwe() {
+                 const v = tweInput.value === '' ? NaN : Number(tweInput.value);
+                 const error = tweInput.value === '' ? null : tweValida(v);
+                 const alta = !error && v > tweLimites().adv;
+                 tweAdvertencia.textContent = error ? error : (alta ? AVISO_TWE_ALTA(v) + ' Se pide confirmación.' : '');
+                 tweAdvertencia.classList.toggle('d-none', !error && !alta);
+                 tweAdvertencia.classList.toggle('text-danger', !!error);
+                 tweAdvertencia.classList.toggle('text-warning', !error && alta);
+                 tweInput.classList.toggle('is-invalid', !!error);
+             }
+             tweInput.addEventListener('input', () => { tweEditado = true; actualizarTwe(); });
+             function renderPerfil() {
+                 const st = lastStatus || {};
+                 const p = (st.perfiles || {})[perfilSelect.value];
+                 if (!p) { perfilDesc.textContent = ''; return; }
+                 const n = p.numeros || {};
+                 perfilDesc.textContent = `${p.resumen} ${p.riesgo} Backtest OOS (ventanas de 12 meses, sobre los 10.000 de futuros): mediana ${n.mediana_pct} %, peor ${n.peor_pct} %; peor drawdown ${n.peor_dd_pct} %; capital en riesgo ${n.capital_en_riesgo}. No es una promesa.`;
+             }
+             perfilSelect.addEventListener('change', renderPerfil);
              function actualizarBotones() {
                  setButtonsDisabled(!lastStatus || !lastStatus.enabled);
              }
@@ -998,12 +1066,33 @@
                  if (status.presets && status.presets[riesgo]) {
                      riesgoSelect.value = riesgo;
                  }
+                 const vigente = status.perfil_vigente;
+                 if (vigente && status.perfiles && status.perfiles[vigente]) {
+                     perfilSelect.value = vigente;
+                     perfilVigente.textContent = `Vigente: ${status.perfiles[vigente].nombre}.`;
+                 } else {
+                     perfilVigente.textContent = 'Vigente: ninguno (la config no coincide con un perfil).';
+                 }
+                 renderPerfil();
+                 if (!tweEditado && status.twe_long !== null && status.twe_long !== undefined) {
+                     tweInput.value = status.twe_long;
+                 }
+                 actualizarTwe();
+                 const perfilBtn = panel.querySelector('[data-bot-accion="perfil"]');
+                 if (status.n_shorts !== 0 && status.config_available) {
+                     perfilBtn.disabled = true;
+                     perfilVigente.textContent = `Perfiles no disponibles: se midieron solo con longs y la config de forager tiene n_shorts ${status.n_shorts}.`;
+                 }
                  if (!status.config_available) {
                      panel.querySelector('[data-bot-accion="start"]').disabled = true;
+                     perfilBtn.disabled = true;
+                     panel.querySelector('[data-bot-accion="twe"]').disabled = true;
                  }
                  if (status.rescate_start_bloqueado) {
-                     // Tope de pérdida del rescate sin reconocer: el backend responde 409 a START.
+                     // Tope de pérdida del rescate sin reconocer: el backend responde 409 a START (y a los perfiles).
                      panel.querySelector('[data-bot-accion="start"]').disabled = true;
+                     perfilBtn.disabled = true;
+                     panel.querySelector('[data-bot-accion="twe"]').disabled = true;
                      disabledLi.classList.remove('d-none');
                      disabledMsg.textContent = status.rescate_start_bloqueado;
                  }
@@ -1034,13 +1123,32 @@
              }
 
              const ACCIONES = {
-                 start: () => ({
-                     url: '/api/bot/start',
-                     body: { riesgo: riesgoSelect.value },
-                     titulo: 'Confirmar inicio de passivbot',
-                     texto: `Se aplicará el riesgo "${riesgoSelect.value}" en la config de forager (modo normal) y se reiniciará passivbot. Los bots vuelven a operar en ~1 minuto.`,
-                     check: false,
-                 }),
+                 start: () => {
+                     const preset = (lastStatus && lastStatus.presets && lastStatus.presets[riesgoSelect.value]) || {};
+                     const alta = Number(preset.twe_long) > tweLimites().adv;
+                     return {
+                         url: '/api/bot/start',
+                         body: { riesgo: riesgoSelect.value },
+                         titulo: 'Confirmar inicio de passivbot',
+                         texto: `Se aplicará el riesgo "${riesgoSelect.value}" en la config de forager (modo normal) y se reiniciará passivbot. Los bots vuelven a operar en ~1 minuto.` + (alta ? '\n\n' + AVISO_TWE_ALTA(preset.twe_long) : ''),
+                         check: false,
+                     };
+                 },
+                 twe: () => {
+                     const v = Number(tweInput.value);
+                     const alta = v > tweLimites().adv;
+                     const corriendo = !!(lastStatus && lastStatus.container && lastStatus.container.running);
+                     const body = { twe_long: v };
+                     if (alta) body.confirmar_twe_alta = true;
+                     return {
+                         url: '/api/bot/start',
+                         body,
+                         titulo: `Confirmar TWE long ${v}`,
+                         texto: `Se escribirá twe_long ${v} en la config de forager (modo normal; twe_short 1 si n_shorts es 0) y passivbot se ${corriendo ? 'REINICIARÁ' : 'INICIARÁ'}: forager tarda ~90 s en volver a operar los pares.` + (alta ? '\n\n' + AVISO_TWE_ALTA(v) + ' Herramienta, no asesor.' : ''),
+                         check: alta,
+                         checkLabel: `Entiendo que TWE ${v} está por encima de lo medido en el backtest y que puede liquidar la cuenta.`,
+                     };
+                 },
                  graceful: () => ({
                      url: '/api/bot/stop',
                      body: { modo: 'graceful' },
@@ -1058,9 +1166,10 @@
              };
 
              function pedirConfirmacion(accion) {
-                 pending = ACCIONES[accion]();
+                 pending = typeof accion === 'string' ? ACCIONES[accion]() : accion;
                  confirmEl.querySelector('[data-bot-confirm="titulo"]').textContent = pending.titulo;
                  confirmEl.querySelector('[data-bot-confirm="texto"]').textContent = pending.texto;
+                 confirmEl.querySelector('[data-bot-confirm="check-label"]').textContent = pending.checkLabel || CHECK_APAGAR;
                  confirmEl.querySelector('[data-bot-confirm="check-wrap"]').classList.toggle('d-none', !pending.check);
                  confirmCheck.checked = false;
                  confirmAccept.disabled = pending.check;
@@ -1094,7 +1203,9 @@
 
              function renderJob(job) {
                  const terminado = job.estado !== 'en_curso';
-                 jobQ('titulo').textContent = `${TITULOS[job.accion] || job.accion}${job.params && job.params.riesgo ? ' (riesgo ' + job.params.riesgo + ')' : ''}`;
+                 const pr = job.params || {};
+                 const detalle = pr.riesgo ? ` (riesgo ${pr.riesgo})` : (pr.twe_long !== undefined && pr.twe_long !== null ? ` (TWE ${pr.twe_long})` : (pr.perfil ? ` ${(lastStatus && lastStatus.perfiles && lastStatus.perfiles[pr.perfil] && lastStatus.perfiles[pr.perfil].nombre) || pr.perfil}` : ''));
+                 jobQ('titulo').textContent = `${TITULOS[job.accion] || job.accion}${detalle}`;
                  const pct = Math.max(0, Math.min(100, job.porcentaje || 0));
                  const barra = jobQ('barra');
                  barra.style.width = pct + '%';
@@ -1379,9 +1490,54 @@
                          ocultarJobEnCurso();
                          return;
                      }
+                     if (accion === 'twe') {
+                         const error = tweValida(tweInput.value === '' ? NaN : Number(tweInput.value));
+                         if (error) { aviso('error', `TWE manual: ${error}`); actualizarTwe(); return; }
+                     }
+                     if (accion === 'perfil') {
+                         pedirPlanPerfil();
+                         return;
+                     }
                      pedirConfirmacion(accion);
                  });
              });
+
+             // El plan del perfil lo arma el servidor (forager, contenedor, modos del servicio, números): sin "confirmar"
+             // responde 409 con el texto, que va a la confirmación; al aceptar se manda con confirmar: true.
+             function pedirPlanPerfil() {
+                 const perfil = perfilSelect.value;
+                 setButtonsDisabled(true);
+                 fetch('/api/bot/perfil', {
+                     method: 'POST',
+                     credentials: 'same-origin',
+                     headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken() },
+                     body: JSON.stringify({ perfil }),
+                 })
+                     .then((r) => {
+                         if (r.redirected) throw new Error('Sesión expirada: volvé a iniciar sesión.');
+                         return r.json().then((d) => ({ status: r.status, d }));
+                     })
+                     .then(({ status, d }) => {
+                         actualizarBotones();
+                         if (status === 409 && d.requiere_confirmacion) {
+                             const nombre = (d.plan && d.plan.nombre) || perfil;
+                             pedirConfirmacion({
+                                 url: '/api/bot/perfil',
+                                 body: { perfil, confirmar: true },
+                                 titulo: `Aplicar perfil ${nombre}`,
+                                 texto: d.error,
+                                 check: true,
+                                 checkLabel: 'Entiendo qué cambia, que passivbot se reinicia y que los números son de un backtest, no una promesa.',
+                             });
+                             return;
+                         }
+                         throw new Error((d && d.error) || 'No se pudo preparar el perfil.');
+                     })
+                     .catch((e) => {
+                         aviso('error', e.message || 'No se pudo preparar el perfil.');
+                         cargarEstado();
+                     });
+             }
 
              const icon = panel.querySelector('.icono');
              icon.style.cursor = 'pointer';

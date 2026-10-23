@@ -80,6 +80,17 @@ sigue dimensionando sobre `wallet - préstamo`. No hay campo nuevo ni PR de pass
   los activos valuados en USD y el "capital propio" de la regla deja de ser el de passivbot. El servicio no lo
   detecta.
 
+### El retiro periódico no cambia este contrato
+
+El [retiro periódico de ganancias](rescate.md#retiro-periodico-de-ganancias) mueve plata de futuros a spot sin
+préstamo: no suma ni resta a `loan_outstanding_usdt` y no reescribe este archivo. Solo retira con el préstamo en 0, así
+que passivbot ve el retiro únicamente como una baja de su wallet (`ACCOUNT_UPDATE` / `GET /fapi/v2/balance`) y, como
+dimensiona sobre `wallet - préstamo`, después de retirar dimensiona sobre la base de futuros. No hay campo nuevo ni PR
+de passivbot. En estado simulado no pasa nada del lado de passivbot (ni la wallet ni este archivo).
+
+Los perfiles de riesgo ([perfiles.md](perfiles.md)) tampoco agregan contratos: escriben `twe_long`/`twe_short` en el
+HJSON de forager con la rutina de START y la config del rescate (`rescate_config.json`, que passivbot no lee).
+
 ## `watcher_heartbeat.json` (versión 1, vigente)
 
 - **Escribe:** C3, dentro del mismo servicio (`c3.write_heartbeat`).

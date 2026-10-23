@@ -411,6 +411,57 @@ def piso_de(base_capital: Decimal, pct: Decimal) -> Decimal:
     return base_capital * (1 - pct / 100)
 
 
+def ajustar_base_por_retiro(state: Dict[str, Any], monto: Decimal, ts: float,
+                            capital_previo: Optional[Decimal] = None) -> Optional[str]:
+    """Un retiro periódico REAL confirmado (futuros -> spot, ver ``rescate._retiro``) baja la base de C3 en proporción.
+
+    C3 mira ``totalMarginBalance - préstamo``: el retiro baja el margen para siempre sin ser una pérdida. Sin bajar la
+    base, C3 lo vería como una caída igual al retiro y podría cortar (por ejemplo, base 20.000 con tope 30 % y un
+    retiro de 10.000 dejaría el capital en 10.000, debajo del piso 14.000).
+
+    ``base' = base × (capital_previo - monto) / capital_previo`` (en centavos hacia abajo), con ``capital_previo`` el
+    capital de futuros de C3 cuando se decidió el retiro: capital / base no cambia, así que el retiro solo nunca acerca
+    el corte (el drawdown % sigue igual) ni abre una confirmación. Restar el monto no alcanza: el piso es un % de la
+    base y baja menos que el capital (con tope 30 %, cada retiro se come el 30 % de lo retirado del margen sobre el
+    piso), así que un retiro con la cuenta en drawdown podía cortar. Con la cuenta plana (capital = base) da lo mismo
+    que restar. Sin ``capital_previo`` válido (una transferencia en vuelo de una versión anterior) se resta el monto.
+
+    Lo llama el servicio rescate dentro de su ciclo (mismo lock de estado). Devuelve el texto del ajuste, o None si C3
+    no tiene base."""
+    c3 = state.get("c3")
+    if not isinstance(c3, dict):
+        return None
+    base = c3.get("base")
+    if not isinstance(base, dict) or base.get("capital") is None:
+        return None
+    try:
+        capital = dec(base["capital"])
+        previo = dec(base.get("retirado") or "0")
+    except ValueError:
+        return None
+    try:
+        cap_previo = None if capital_previo is None else dec(capital_previo)
+    except ValueError:
+        cap_previo = None
+    if cap_previo is not None and cap_previo > monto:
+        nueva = rescate.floor_cent(capital * (cap_previo - monto) / cap_previo)
+        regla = (f"proporcional al capital de futuros {money(cap_previo)} -> {money(cap_previo - monto)} USDT: el "
+                 "retiro no es una pérdida ni acerca el corte")
+    else:
+        nueva = max(Decimal(0), capital - monto)
+        regla = "el retiro no es una pérdida"
+    base["capital"] = money(nueva)
+    base["retirado"] = money(previo + monto)
+    texto = (f"Base de C3 ajustada por un retiro de ganancias de {money(monto)} USDT: {money(capital)} -> "
+             f"{money(nueva)} USDT ({regla}).")
+    historial = c3.get("historial") if isinstance(c3.get("historial"), list) else []
+    historial.append({"ts": now_iso(ts), "tipo": "base_retiro", "modo": base.get("modo") or MODE_REAL, "texto": texto,
+                      "capital": money(nueva), "retiro": money(monto),
+                      "capital_previo": None if cap_previo is None else money(cap_previo)})
+    c3["historial"] = historial[-MAX_HISTORIAL:]
+    return texto
+
+
 def _pct_txt(value: Decimal) -> str:
     return format(value.normalize(), "f")
 

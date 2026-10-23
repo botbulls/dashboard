@@ -91,6 +91,7 @@ ENV_DEVOLUCION_MIN = "FUTURESBOARD_RESCATE_DEVOLUCION_MIN_USDT"
 ENV_DEVOLUCION_COOLDOWN = "FUTURESBOARD_RESCATE_DEVOLUCION_COOLDOWN_SECONDS"
 ENV_UPNL_MODE = "FUTURESBOARD_RESCATE_UPNL_MODE"
 ENV_UPNL_COOLDOWN = "FUTURESBOARD_RESCATE_UPNL_COOLDOWN_SECONDS"
+ENV_RETIRO_MODE = "FUTURESBOARD_RESCATE_RETIRO_MODE"
 
 MODE_OFF = "off"
 MODE_DRY_RUN = "dry_run"
@@ -139,6 +140,21 @@ UPNL_SIMULADO = "simulado"  # servicio en dry_run y U en real: inyecciones simul
 UPNL_REAL = "real"          # servicio y U en real: transfiere de verdad (con guarda)
 DISPARO_UPNL = "upnl"       # marca del ledger; las inyecciones sin marca son del disparo de margen
 
+# Retiro periódico de ganancias (futuros -> spot, UMFUTURE_MAIN) de lo que exceda la base de futuros. Apagado por
+# default en dos lugares: FUTURESBOARD_RESCATE_RETIRO_MODE=off y retiro_frecuencia "off" en el panel.
+RETIRO_OFF = "off"            # no se evalúa
+RETIRO_SIMULADO = "simulado"  # servicio en dry_run o FUTURESBOARD_RESCATE_RETIRO_MODE=dry_run: registra lo que HARÍA
+RETIRO_REAL = "real"          # servicio y retiro en real: transfiere de verdad
+FRECUENCIA_OFF = "off"
+FRECUENCIAS = (FRECUENCIA_OFF, "diaria", "semanal", "mensual", "trimestral", "anual")
+# Frecuencia que pone el perfil "Con rescate" (el panel del rescate la muestra como recomendada, pero no la preselecciona:
+# con el retiro apagado muestra off, si no el próximo guardado lo prendería). Sale del backtest de retiro del lab
+# (botbulls-lab multianual/retiro, preregistro_retiro.json): ver docs/rescate.md ("Retiro periódico").
+FRECUENCIA_RECOMENDADA = "anual"
+DEFAULT_RETIRO_BASE = Decimal("10000")
+MIN_RETIRO = Decimal("10")       # no se retiran montos menores (y un excedente menor cierra el período)
+RETIRO_COOLDOWN_MS = 600_000     # entre retiros del mismo período (lo limitan las guardas o maxWithdrawAmount)
+
 SPOT_MAINNET_URL = "https://api.binance.com"
 # Binance Demo Trading (spot). /sapi no existe en Demo: el modo real queda bloqueado ahí.
 SPOT_DEMO_URL = "https://demo-api.binance.com"
@@ -175,16 +191,21 @@ LIMITES: Dict[str, Tuple[Decimal, Decimal]] = {
     # Disparo U: X en % del capital propio de futuros (wallet - préstamo) y paso propio de las inyecciones U.
     "upnl_x_pct": (Decimal("10"), Decimal("95")),
     "upnl_paso_usdt": (Decimal("10"), Decimal("1000000")),
+    # Retiro periódico: base de futuros (lo que queda en futuros después de retirar).
+    "retiro_base_usdt": (Decimal("10"), Decimal("1000000")),
 }
 # Campos obligatorios del POST del panel (los del disparo U van juntos y son opcionales: ver validate_config_body).
 CAMPOS_NUMERICOS = ("reserva_max_usdt", "paso_usdt", "umbral_ratio", "umbral_devolucion_ratio", "tope_perdida_pct")
 CAMPOS_UPNL_NUMERICOS = ("upnl_x_pct", "upnl_paso_usdt")
 CAMPOS_UPNL = ("upnl_habilitado", *CAMPOS_UPNL_NUMERICOS)
+CAMPOS_RETIRO = ("retiro_frecuencia", "retiro_base_usdt")
 
 TRANSFER_ASSET = "USDT"
 TIPO_INYECCION = "inyeccion"
 TIPO_DEVOLUCION = "devolucion"
-TIPO_API = {TIPO_INYECCION: "MAIN_UMFUTURE", TIPO_DEVOLUCION: "UMFUTURE_MAIN"}
+TIPO_RETIRO = "retiro"
+# El retiro usa el mismo tipo de Binance que la devolución (futuros -> spot): no hace falta otro permiso de la key.
+TIPO_API = {TIPO_INYECCION: "MAIN_UMFUTURE", TIPO_DEVOLUCION: "UMFUTURE_MAIN", TIPO_RETIRO: "UMFUTURE_MAIN"}
 COOLDOWN_PARCIAL = "devolucion_parcial"  # clave en cooldown_ms (entre devoluciones parciales)
 COOLDOWN_UPNL = "inyeccion_upnl"         # clave en cooldown_ms (entre inyecciones del disparo U)
 
@@ -363,6 +384,14 @@ def default_config() -> Dict[str, Any]:
         "upnl_habilitado": False,
         "upnl_x_pct": str(DEFAULT_UPNL_X_PCT),
         "upnl_paso_usdt": money(DEFAULT_UPNL_PASO),
+        # Retiro periódico de ganancias: apagado por default. Una config guardada antes de que existiera lo toma
+        # apagado (no se mueve plata por un deploy). retiro_desde lo fija save_config cada vez que cambia la
+        # frecuencia: con eso el servicio sabe que se activó (el primer retiro es al comienzo del período siguiente).
+        "retiro_frecuencia": FRECUENCIA_OFF,
+        "retiro_base_usdt": money(DEFAULT_RETIRO_BASE),
+        "retiro_desde": None,
+        # Último perfil aplicado desde el panel (informativo; el vigente se deduce de los valores, ver perfiles.py).
+        "perfil": None,
         "tope_reconocido": None,
         "actualizado_en": None,
         "actualizado_por": None,
@@ -408,6 +437,15 @@ def load_config(data_dir: pathlib.Path) -> Tuple[Dict[str, Any], Optional[str]]:
             if cfg[name] is None:
                 raise ValueError(f"falta {name}")
             _check_range(name, dec(cfg[name]))
+        if cfg["retiro_frecuencia"] not in FRECUENCIAS:
+            raise ValueError("retiro_frecuencia inválida")
+        if cfg["retiro_base_usdt"] is None:
+            raise ValueError("falta retiro_base_usdt")
+        _check_range("retiro_base_usdt", dec(cfg["retiro_base_usdt"]))
+        if cfg["retiro_desde"] is not None and not isinstance(cfg["retiro_desde"], str):
+            raise ValueError("retiro_desde inválido")
+        if cfg["perfil"] is not None and not isinstance(cfg["perfil"], dict):
+            raise ValueError("perfil inválido")
     except ValueError as exc:
         return default_config(), f"{CONFIG_FILE_NAME} inválido ({exc}): rescate deshabilitado."
     return cfg, None
@@ -440,11 +478,14 @@ def validate_config_body(body: Any) -> Dict[str, Any]:
     Disparo por uPnL: ``upnl_habilitado`` (bool), ``upnl_x_pct`` y ``upnl_paso_usdt`` van **los tres o ninguno**.
     Sin ellos se conservan los guardados (una pestaña del panel abierta antes del deploy no puede prender ni
     apagar el disparo). ``out["upnl"]`` es None si no vinieron.
+
+    Retiro periódico: ``retiro_frecuencia`` (texto de ``FRECUENCIAS``) y ``retiro_base_usdt`` van **los dos o
+    ninguno** (sin ellos se conservan los guardados). ``out["retiro"]`` es None si no vinieron.
     """
     if not isinstance(body, dict):
         raise ValueError("Body inválido: se esperaba un objeto JSON.")
     required = {"habilitado", *CAMPOS_NUMERICOS}
-    unknown = sorted(set(body) - required - set(CAMPOS_UPNL))
+    unknown = sorted(set(body) - required - set(CAMPOS_UPNL) - set(CAMPOS_RETIRO))
     if unknown:
         raise ValueError(f"Campos desconocidos: {', '.join(unknown)}.")
     missing = sorted(required - set(body))
@@ -478,6 +519,19 @@ def validate_config_body(body: Any) -> Dict[str, Any]:
         if out["reserva_max_usdt"] is not None and upnl["upnl_paso_usdt"] > out["reserva_max_usdt"]:
             raise ValueError("El paso del disparo por uPnL no puede ser mayor que la reserva máxima.")
         out["upnl"] = upnl
+    out["retiro"] = None
+    presentes = [name for name in CAMPOS_RETIRO if name in body]
+    if presentes:
+        faltan = [name for name in CAMPOS_RETIRO if name not in body]
+        if faltan:
+            raise ValueError(f"Los campos del retiro periódico van juntos: faltan {', '.join(faltan)}.")
+        frecuencia = body["retiro_frecuencia"]
+        if not isinstance(frecuencia, str) or frecuencia not in FRECUENCIAS:
+            raise ValueError(f"retiro_frecuencia tiene que ser una de: {', '.join(FRECUENCIAS)}.")
+        if body["retiro_base_usdt"] is None:
+            raise ValueError("retiro_base_usdt es obligatorio.")
+        out["retiro"] = {"retiro_frecuencia": frecuencia,
+                         "retiro_base_usdt": _numero_body("retiro_base_usdt", body["retiro_base_usdt"])}
     if habilitado and out["reserva_max_usdt"] is None:
         raise ValueError("Para habilitar el rescate hay que fijar la reserva máxima.")
     if habilitado and out["tope_perdida_pct"] is None:
@@ -494,8 +548,12 @@ def _num_to_cfg(value: Optional[Decimal]) -> Optional[str]:
     return None if value is None else format(value.normalize(), "f")
 
 
-def save_config(data_dir: pathlib.Path, parsed: Dict[str, Any], user: str) -> Dict[str, Any]:
-    """Guarda la config del panel. Habilitar (false -> true) abre una generación nueva => base nueva."""
+def save_config(data_dir: pathlib.Path, parsed: Dict[str, Any], user: str,
+                perfil: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Guarda la config del panel. Habilitar (false -> true) abre una generación nueva => base nueva.
+
+    ``perfil`` (solo lo pasa la aplicación de un perfil, ``futuresboard.perfiles``) queda como último perfil aplicado;
+    un guardado del panel lo borra (la config ya no es la del perfil, aunque coincida: eso lo deduce el panel)."""
     with file_lock(data_dir / CONFIG_LOCK_NAME):
         prev, _err = load_config(data_dir)
         if parsed["habilitado"]:
@@ -517,10 +575,61 @@ def save_config(data_dir: pathlib.Path, parsed: Dict[str, Any], user: str) -> Di
         if (cfg.get("upnl_habilitado") and cfg.get("reserva_max_usdt") is not None
                 and dec(cfg["upnl_paso_usdt"]) > dec(cfg["reserva_max_usdt"])):
             raise ValueError("El paso del disparo por uPnL no puede ser mayor que la reserva máxima.")
+        retiro = parsed.get("retiro")
+        if retiro is not None:
+            if retiro["retiro_frecuencia"] != prev.get("retiro_frecuencia"):
+                # Activar o cambiar la frecuencia re-ancla el retiro: el primero es al comienzo del período siguiente.
+                cfg["retiro_desde"] = now_iso() if retiro["retiro_frecuencia"] != FRECUENCIA_OFF else None
+            cfg["retiro_frecuencia"] = retiro["retiro_frecuencia"]
+            cfg["retiro_base_usdt"] = money(retiro["retiro_base_usdt"])
+        cfg["perfil"] = perfil
         cfg["actualizado_en"] = now_iso()
         cfg["actualizado_por"] = user
         write_json_atomic(data_dir / CONFIG_FILE_NAME, cfg, mode=0o600)
         return cfg
+
+
+def leer_config_cruda(data_dir: pathlib.Path) -> Optional[str]:
+    """Contenido de ``rescate_config.json`` tal cual (None si no existe). Lo usa el perfil para poder volver atrás."""
+    try:
+        return (pathlib.Path(data_dir) / CONFIG_FILE_NAME).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+
+
+def restaurar_config(data_dir: pathlib.Path, cruda: Optional[str],
+                     si_sigue: Optional[Dict[str, Any]] = None) -> bool:
+    """Vuelve ``rescate_config.json`` al contenido ``cruda`` (de ``leer_config_cruda``) sin bajar la generación.
+
+    Si el servicio llegó a fijar una base con la generación nueva mientras tanto, volver a la vieja haría que la
+    próxima habilitación (vieja + 1 = la nueva) tomara esa base como propia: la generación queda en la mayor.
+
+    ``si_sigue`` (la config que escribió quien restaura, la que devolvió ``save_config``): solo se restaura si el
+    archivo sigue siendo exactamente ese, comparado bajo el lock de la config. Un guardado del panel (u otro cambio)
+    en el medio no se pisa: devuelve False sin escribir. True si restauró (o no había nada que restaurar)."""
+    path = pathlib.Path(data_dir) / CONFIG_FILE_NAME
+    with file_lock(pathlib.Path(data_dir) / CONFIG_LOCK_NAME):
+        if si_sigue is not None:
+            try:
+                vigente = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                vigente = None
+            if vigente != si_sigue:
+                return False
+        actual, _err = load_config(data_dir)
+        if cruda is None:
+            if not path.exists():
+                return True
+            restaurada = default_config()
+        else:
+            restaurada = json.loads(cruda)
+            if not isinstance(restaurada, dict):
+                raise ValueError("config a restaurar inválida")
+        gen_actual = actual.get("generacion") if isinstance(actual.get("generacion"), int) else 0
+        gen_vieja = restaurada.get("generacion") if isinstance(restaurada.get("generacion"), int) else 0
+        restaurada["generacion"] = max(gen_actual, gen_vieja)
+        write_json_atomic(path, restaurada, mode=0o600)
+        return True
 
 
 def reconocer_tope(data_dir: pathlib.Path, tope_id: Any, user: str) -> Dict[str, Any]:
@@ -565,6 +674,8 @@ def default_state() -> Dict[str, Any]:
         "cooldown_ms": {},
         # Disparo U: última evaluación (para el panel), última inyección U y escalón registrado en modo "registra".
         "upnl": {},
+        # Retiro periódico: ancla, período cerrado, acumulado por modo, último retiro y evaluación (ver _retiro).
+        "retiro": {},
     }
 
 
@@ -595,6 +706,8 @@ def load_state(data_dir: pathlib.Path) -> Tuple[Dict[str, Any], Optional[str]]:
         state["cooldown_ms"] = {}
     if not isinstance(state.get("upnl"), dict):
         state["upnl"] = {}
+    if not isinstance(state.get("retiro"), dict):
+        state["retiro"] = {}
     return state, None
 
 
@@ -908,6 +1021,96 @@ class RescateSettings:
             self.upnl_mode_error = (f"{ENV_UPNL_MODE}={raw_upnl!r} inválido: se usa off (valores: off, dry_run, "
                                     "real).")
         self.upnl_cooldown_seconds = _env_int(env, ENV_UPNL_COOLDOWN, DEFAULT_UPNL_COOLDOWN_S, 0, MAX_UPNL_COOLDOWN_S)
+        # Retiro periódico: su propio modo (default off), como el disparo U.
+        raw_retiro = env.get(ENV_RETIRO_MODE, "").strip().lower()
+        self.retiro_mode_error: Optional[str] = None
+        if raw_retiro in ("", MODE_OFF):
+            self.retiro_mode = MODE_OFF
+        elif raw_retiro in (MODE_DRY_RUN, MODE_REAL):
+            self.retiro_mode = raw_retiro
+        else:
+            self.retiro_mode = MODE_OFF
+            self.retiro_mode_error = (f"{ENV_RETIRO_MODE}={raw_retiro!r} inválido: se usa off (valores: off, dry_run, "
+                                      "real).")
+
+
+def retiro_estado(modo_servicio: Optional[str], modo_retiro: Optional[str]) -> str:
+    """Estado efectivo del retiro periódico (sin mirar el panel: ver ``RescateService._retiro_estado``).
+
+    * ``off``: servicio en off o ``FUTURESBOARD_RESCATE_RETIRO_MODE=off`` (default).
+    * ``simulado``: el servicio o el retiro en dry_run. No transfiere: registra lo que HARÍA y avisa con
+      ``[SIMULACIÓN]``. El retiro no tiene contrato con passivbot (no hay préstamo): passivbot no se entera.
+    * ``real``: servicio y retiro en real.
+    """
+    if modo_servicio not in (MODE_DRY_RUN, MODE_REAL) or modo_retiro not in (MODE_DRY_RUN, MODE_REAL):
+        return RETIRO_OFF
+    if modo_servicio == MODE_REAL and modo_retiro == MODE_REAL:
+        return RETIRO_REAL
+    return RETIRO_SIMULADO
+
+
+def retiro_periodo(ts: float, frecuencia: str) -> str:
+    """Clave del período calendario UTC de ``ts``: diaria, semanal (ISO, lunes), mensual, trimestral, anual."""
+    d = dt.datetime.fromtimestamp(ts, dt.timezone.utc)
+    if frecuencia == "diaria":
+        return d.strftime("%Y-%m-%d")
+    if frecuencia == "semanal":
+        iso = d.isocalendar()
+        return f"{iso[0]}-S{iso[1]:02d}"
+    if frecuencia == "mensual":
+        return d.strftime("%Y-%m")
+    if frecuencia == "trimestral":
+        return f"{d.year}-T{(d.month - 1) // 3 + 1}"
+    if frecuencia == "anual":
+        return str(d.year)
+    raise ValueError(f"frecuencia inválida: {frecuencia!r}")
+
+
+def retiro_proximo_inicio(ts: float, frecuencia: str) -> dt.datetime:
+    """Comienzo (00:00 UTC) del período que sigue al de ``ts``."""
+    d = dt.datetime.fromtimestamp(ts, dt.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    if frecuencia == "diaria":
+        return d + dt.timedelta(days=1)
+    if frecuencia == "semanal":
+        return d + dt.timedelta(days=7 - d.weekday())
+    if frecuencia == "mensual":
+        return d.replace(year=d.year + (d.month == 12), month=d.month % 12 + 1, day=1)
+    if frecuencia == "trimestral":
+        mes = ((d.month - 1) // 3 + 1) * 3 + 1
+        return d.replace(year=d.year + (mes > 12), month=(mes - 1) % 12 + 1, day=1)
+    if frecuencia == "anual":
+        return d.replace(year=d.year + 1, month=1, day=1)
+    raise ValueError(f"frecuencia inválida: {frecuencia!r}")
+
+
+def retiro_monto(wallet: Decimal, base: Decimal, max_withdraw: Decimal, margin: Decimal, maint: Decimal,
+                 umbral_devolucion: Optional[Decimal], upnl: Optional[Decimal], upnl_x_pct: Optional[Decimal],
+                 upnl_paso: Optional[Decimal]) -> Dict[str, Any]:
+    """Números del retiro (los usan el servicio y el panel, así no se separan).
+
+    ``excedente = wallet - base`` (wallet realizada: ``totalWalletBalance``, sin el uPnL). Se retira
+    ``min(excedente, maxWithdrawAmount, guardas)``, en centavos hacia abajo:
+
+    * guarda de margen (con mantenimiento): ``margen - umbral_devolucion × mantenimiento``. Después de retirar el
+      ratio queda en el umbral de devolución parcial o arriba: no se saca margen que el rescate volvería a pedir
+      (ni que la devolución parcial no devolvería).
+    * guarda del disparo por uPnL (con el disparo prestando, ``upnl_x_pct`` no None): ``(uPnL + X × wallet - paso) / X``.
+      Después de retirar, la pérdida queda al menos un paso arriba de la línea del disparo U (sin préstamo,
+      ``-X × wallet``): el retiro solo no lo dispara.
+    """
+    excedente = wallet - base
+    candidatos = [("excedente", max(Decimal(0), excedente)), ("maxWithdrawAmount", max(Decimal(0), max_withdraw))]
+    guarda_margen = guarda_upnl = None
+    if maint > 0 and umbral_devolucion is not None:
+        guarda_margen = margin - umbral_devolucion * maint
+        candidatos.append(("guarda de margen", max(Decimal(0), guarda_margen)))
+    if maint > 0 and upnl is not None and upnl_x_pct is not None and upnl_paso is not None and upnl_x_pct > 0:
+        x = upnl_x_pct / 100
+        guarda_upnl = (upnl + x * wallet - upnl_paso) / x
+        candidatos.append(("guarda del disparo por uPnL", max(Decimal(0), guarda_upnl)))
+    limite, monto = min(candidatos, key=lambda c: c[1])
+    return {"excedente": excedente, "monto": floor_cent(monto), "limite": limite, "guarda_margen": guarda_margen,
+            "guarda_upnl": guarda_upnl}
 
 
 def upnl_estado(modo_servicio: Optional[str], modo_upnl: Optional[str]) -> str:
@@ -1043,6 +1246,7 @@ class RescateService:
         self._fut_error: Optional[str] = None
         self._fut_prestamo: Optional[Dict[str, Any]] = None  # préstamo real al momento de la lectura
         self._fut_leido = False
+        self._transferencias = 0  # transferencias iniciadas (reales o simuladas): el retiro no va en el mismo ciclo
 
     # -- utilidades -------------------------------------------------------------------
     def _now_ms(self) -> int:
@@ -1170,7 +1374,8 @@ class RescateService:
             finally:
                 state["servicio"] = {"modo": self.mode, "heartbeat": now_iso(self.clock()),
                                      "intervalo": self.settings.interval, "testnet": self.testnet,
-                                     "upnl_modo": self.settings.upnl_mode}
+                                     "upnl_modo": self.settings.upnl_mode,
+                                     "retiro_modo": self.settings.retiro_mode}
                 save_state(self.data_dir, state)
             if self.c3 is not None:
                 self._tick_c3(state, cfg)
@@ -1259,25 +1464,31 @@ class RescateService:
         # Último spot leído OK, con el préstamo real y la transferencia en vuelo DESPUÉS de conciliar (así el saldo
         # leído y el préstamo cuentan las mismas transferencias): sirve para evaluar el tope si spot se cae.
         en_vuelo = state.get("en_vuelo")
+        # retirado_real: un retiro confirmado después de esta lectura baja la equity de futuros sin mover el préstamo;
+        # con spot caído, el estimado del tope lo suma (ver _tick_sin_spot).
         state["spot_ref"] = {"usdt": money(spot), "prestamo_real": money(get_loan(state, MODE_REAL)),
                              "en_vuelo_id": en_vuelo.get("id") if isinstance(en_vuelo, dict) else None,
+                             "retirado_real": money(self._retirado(state, MODE_REAL)),
                              "ts": now_iso(self.clock())}
 
         self._fijar_base(state, cfg, snap)
         self._tope(state, cfg, snap["capital"], now_ms)
         self._evaluar_upnl(state, cfg, snap)
 
-        if state.get("en_vuelo") or bloqueo:
-            return
-        if snap["posiciones"] == 0:
-            self._devolver(state, snap, now_ms)
-        else:
-            # Excluyentes: inyecta con ratio < umbral, devuelve con ratio >= umbral de devolución (mayor). El disparo
-            # por uPnL solo se mira si el de margen no se cumple (el de margen tiene prioridad, como en el backtest).
-            if not self._inyectar(state, cfg, snap, now_ms):
-                self._inyectar_upnl(state, cfg, snap, now_ms)
-            if not state.get("en_vuelo"):
-                self._devolver_parcial(state, cfg, snap, now_ms)
+        transferencias = self._transferencias
+        if not (state.get("en_vuelo") or bloqueo):
+            if snap["posiciones"] == 0:
+                self._devolver(state, snap, now_ms)
+            else:
+                # Excluyentes: inyecta con ratio < umbral, devuelve con ratio >= umbral de devolución (mayor). El
+                # disparo por uPnL solo se mira si el de margen no se cumple (el de margen tiene prioridad, como en el
+                # backtest).
+                if not self._inyectar(state, cfg, snap, now_ms):
+                    self._inyectar_upnl(state, cfg, snap, now_ms)
+                if not state.get("en_vuelo"):
+                    self._devolver_parcial(state, cfg, snap, now_ms)
+        # Retiro periódico: último, y solo si este ciclo no hubo otra transferencia (nunca dos a la vez).
+        self._retiro(state, cfg, snap, now_ms, bloqueo, otra=self._transferencias != transferencias)
 
     def _tick_off(self, state: Dict[str, Any]) -> None:
         """off: no opera. Solo evita que un préstamo SIMULADO quede achicando a passivbot para siempre.
@@ -1328,8 +1539,12 @@ class RescateService:
             try:
                 crecio = get_loan(state, MODE_REAL) - dec(ref["prestamo_real"])
                 spot_est = max(Decimal(0), dec(ref["usdt"]) - crecio)
+                # Un retiro real confirmado después de la lectura: la plata salió de futuros y llegó a spot, sin mover
+                # el préstamo. Sin sumarlo se vería una pérdida igual al retiro (falso tope).
+                spot_est += max(Decimal(0), self._retirado(state, MODE_REAL) - dec(ref.get("retirado_real") or "0"))
                 entry = state.get("en_vuelo")
-                if (isinstance(entry, dict) and entry.get("modo") == MODE_REAL and entry.get("tipo") == TIPO_DEVOLUCION
+                if (isinstance(entry, dict) and entry.get("modo") == MODE_REAL
+                        and entry.get("tipo") in (TIPO_DEVOLUCION, TIPO_RETIRO)
                         and entry.get("id") != ref.get("en_vuelo_id")):
                     spot_est += dec(entry["monto"])
             except (KeyError, ValueError):
@@ -1900,8 +2115,165 @@ class RescateService:
         self._set_cooldown(state, COOLDOWN_PARCIAL, now_ms + self.settings.devolucion_cooldown_seconds * 1000)
         self._transferir(state, TIPO_DEVOLUCION, amount, snap, now_ms, motivo)
 
+    # -- retiro periódico de ganancias ------------------------------------------------------
+    def _retiro_estado(self, cfg: Dict[str, Any]) -> str:
+        """Estado efectivo del retiro para este ciclo: off si la frecuencia del panel es off."""
+        if cfg.get("retiro_frecuencia") in (None, FRECUENCIA_OFF):
+            return RETIRO_OFF
+        return retiro_estado(self.mode, self.settings.retiro_mode)
+
+    @staticmethod
+    def _retirado(state: Dict[str, Any], mode: str) -> Decimal:
+        rs = state.get("retiro") if isinstance(state.get("retiro"), dict) else {}
+        acum = rs.get("acumulado") if isinstance(rs.get("acumulado"), dict) else {}
+        try:
+            return dec(acum.get(mode) or "0")
+        except ValueError:
+            return Decimal(0)
+
+    def _sumar_retirado(self, state: Dict[str, Any], mode: str, monto: Decimal, tran_id: Optional[int],
+                        entry: Dict[str, Any]) -> None:
+        rs = state.setdefault("retiro", {})
+        acum = rs.get("acumulado") if isinstance(rs.get("acumulado"), dict) else {}
+        acum[mode] = money(self._retirado(state, mode) + monto)
+        rs["acumulado"] = acum
+        rs["ultimo"] = {"ts": now_iso(self.clock()), "monto": money(monto), "modo": mode, "tranId": tran_id,
+                        "motivo": str(entry.get("motivo") or "")[:300]}
+        if mode == MODE_REAL:
+            from futuresboard import c3 as c3_mod  # c3 importa este módulo: import diferido
+
+            # capital_c3: el capital de futuros de C3 cuando se decidió el retiro (ver _retiro): la base baja en
+            # proporción, así el retiro solo nunca acerca el corte.
+            texto = c3_mod.ajustar_base_por_retiro(state, monto, self.clock(), entry.get("capital_c3"))
+            if texto:
+                self._event(state, "c3", texto)
+
+    def _retiro(self, state: Dict[str, Any], cfg: Dict[str, Any], snap: Dict[str, Any], now_ms: int,
+                bloqueo: Optional[str], otra: bool) -> None:
+        """Retiro periódico de ganancias: futuros -> spot (``UMFUTURE_MAIN``) de lo que exceda la base de futuros.
+
+        Períodos calendario UTC (diaria, semanal = lunes, mensual, trimestral, anual). Al activarse (frecuencia nueva
+        en el panel, o cambio del estado efectivo) el período en curso se da por cerrado: el primer retiro es al
+        comienzo del siguiente. Un período nuevo deja el retiro VENCIDO; mientras esté vencido, cada ciclo sin
+        préstamo, sin transferencia en vuelo ni otra en este ciclo, sin bloqueo y sin tope disparado o en confirmación:
+
+        * excedente (``wallet - base``) menor a ``MIN_RETIRO`` -> el período se cierra sin retiro;
+        * si no, retira ``retiro_monto`` (excedente, ``maxWithdrawAmount`` y las guardas de margen y del disparo U), con
+          ``RETIRO_COOLDOWN_MS`` entre retiros del mismo período. El período se cierra recién cuando el excedente
+          queda debajo del mínimo (lo que no se pudo retirar se reintenta). Una caída del servicio de varios períodos
+          hace un solo retiro al volver.
+        """
+        rs = state.setdefault("retiro", {})
+        estado = self._retiro_estado(cfg)
+        frecuencia = cfg.get("retiro_frecuencia") or FRECUENCIA_OFF
+        ts = self.clock()
+        if estado == RETIRO_OFF:
+            if rs.get("estado") not in (None, RETIRO_OFF):
+                self._event(state, TIPO_RETIRO, "Retiro periódico apagado (panel o FUTURESBOARD_RESCATE_RETIRO_MODE).")
+            rs.update(estado=RETIRO_OFF, ancla=None, eval=None, vencido_desde=None)
+            return
+        simulado = estado == RETIRO_SIMULADO
+        modo_txt = MODE_DRY_RUN if simulado else MODE_REAL
+        base = cfg_dec(cfg, "retiro_base_usdt") or DEFAULT_RETIRO_BASE
+        periodo = retiro_periodo(ts, frecuencia)
+        ancla = f"{frecuencia}|{cfg.get('retiro_desde')}|{estado}"
+        if rs.get("ancla") != ancla:
+            rs.update(ancla=ancla, estado=estado, periodo_cerrado=periodo, vencido_desde=None)
+            texto = (f"Retiro periódico activo ({'simulado' if simulado else 'real'}, {frecuencia}, base de futuros "
+                     f"{money(base)} USDT): el primer retiro es al comienzo del próximo período "
+                     f"({retiro_proximo_inicio(ts, frecuencia).isoformat()}).")
+            self._event(state, TIPO_RETIRO, texto, modo_txt)
+            self._notify(f"💸 <b>Rescate</b>: {esc(texto)}", simulado)
+        vencido = rs.get("periodo_cerrado") != periodo
+        # En simulación se descuenta todo lo retirado simulado (el acumulado simulado): como si hubiera salido de
+        # futuros, así el mismo excedente no se "retira" otra vez en cada período (ni al cambiar la frecuencia).
+        offset = self._retirado(state, MODE_DRY_RUN) if simulado else Decimal(0)
+        ev: Dict[str, Any] = {"ts": now_iso(ts), "estado": estado, "frecuencia": frecuencia, "base": money(base),
+                              "periodo": periodo, "vencido": vencido, "motivo_espera": None, "error": None,
+                              "proximo_en": retiro_proximo_inicio(ts, frecuencia).isoformat(),
+                              "simulado_descontado": money(offset) if simulado else None}
+        rs["eval"] = ev
+        wallet = snap.get("wallet_eff")
+        calc = None
+        if wallet is not None:
+            u_lend = self._upnl_estado(cfg) in (UPNL_SIMULADO, UPNL_REAL)
+            calc = retiro_monto(wallet - offset, base, snap["max_withdraw_eff"] - offset, snap["margin_eff"] - offset,
+                                snap["maint_margin"], cfg_dec(cfg, "umbral_devolucion_ratio"), snap.get("upnl"),
+                                cfg_dec(cfg, "upnl_x_pct") if u_lend else None,
+                                cfg_dec(cfg, "upnl_paso_usdt") if u_lend else None)
+            ev.update(wallet=money(wallet - offset), excedente=money(calc["excedente"]), monto_posible=money(calc["monto"]),
+                      limite=calc["limite"])
+        else:
+            ev["error"] = ("La lectura de futuros no trae totalWalletBalance: el retiro queda en pausa (se calcula sobre "
+                           "la wallet realizada).")
+        if not vencido:
+            rs["vencido_desde"] = None
+            return
+        rs["vencido_desde"] = rs.get("vencido_desde") or now_iso(ts)
+        loan = get_loan(state, self.mode)
+        espera = None
+        if bloqueo:
+            espera = f"transferencias bloqueadas ({bloqueo})"
+        elif state.get("en_vuelo"):
+            espera = "hay una transferencia en vuelo"
+        elif otra:
+            espera = "hubo otra transferencia en este ciclo"
+        elif loan > 0 or real_pendiente(state):
+            espera = (f"hay un préstamo pendiente ({money(max(loan, get_loan(state, MODE_REAL)))} USDT): se retira "
+                      "cuando se devuelva")
+        elif tope_activo(state, cfg) is not None:
+            espera = "el tope de pérdida está disparado (sin reconocer)"
+        elif state.get("tope_confirmacion"):
+            espera = "el tope de pérdida está en confirmación"
+        elif calc is None:
+            espera = "sin lectura de la wallet de futuros"
+        if espera:
+            ev["motivo_espera"] = espera
+            return
+        if calc["excedente"] < MIN_RETIRO:
+            rs.update(periodo_cerrado=periodo, vencido_desde=None)
+            ev.update(vencido=False, motivo_espera=None)
+            self._event(state, TIPO_RETIRO, f"Período {periodo} del retiro cerrado: excedente {money(calc['excedente'])} "
+                                            f"USDT (wallet {ev['wallet']} - base {money(base)}), menos de "
+                                            f"{money(MIN_RETIRO)}: no hay ganancia para retirar.", modo_txt)
+            return
+        if self._cooldown(state, TIPO_RETIRO, now_ms):
+            ev["motivo_espera"] = "esperando entre retiros (o después de un rechazo de Binance)"
+            return
+        if calc["monto"] < MIN_RETIRO:
+            ev["motivo_espera"] = (f"lo limita {calc['limite']} (puede retirar {money(calc['monto'])} USDT): se "
+                                   "reintenta en los ciclos siguientes")
+            return
+        motivo = (f"retiro {frecuencia} del período {periodo}: wallet {ev['wallet']} - base {money(base)} = excedente "
+                  f"{money(calc['excedente'])} USDT")
+        if calc["limite"] != "excedente":
+            motivo += f" (limitado por {calc['limite']}: el resto se reintenta)"
+        self._set_cooldown(state, TIPO_RETIRO, now_ms + RETIRO_COOLDOWN_MS)
+        if simulado:
+            self._retiro_simulado(state, calc["monto"], motivo)
+        else:
+            # Capital de futuros que ve C3 ahora (margen - préstamo real; acá no hay préstamo ni transferencia en
+            # vuelo): con él se baja la base de C3 en proporción al confirmarse (c3.ajustar_base_por_retiro).
+            capital_c3 = snap["margin_balance"] - get_loan(state, MODE_REAL)
+            self._transferir(state, TIPO_RETIRO, calc["monto"], snap, now_ms, motivo, capital_c3=capital_c3)
+
+    def _retiro_simulado(self, state: Dict[str, Any], monto: Decimal, motivo: str) -> None:
+        """Retiro en estado simulado: no llama a /sapi. Registra lo que HARÍA; suma al acumulado simulado, que el retiro
+        descuenta de la wallet que mira (ver ``_retiro``) para no volver a "retirar" el mismo excedente."""
+        self._transferencias += 1
+        entry = {"id": secrets.token_hex(8), "tipo": TIPO_RETIRO, "modo": MODE_DRY_RUN, "monto": money(monto),
+                 "creada_en": now_iso(self.clock()), "motivo": motivo}
+        self._sumar_retirado(state, MODE_DRY_RUN, monto, None, entry)
+        self._registrar(state, entry, "simulada", None, f"Simulación ({motivo}).")
+        causa = ("servicio en dry_run" if self.mode == MODE_DRY_RUN else f"{ENV_RETIRO_MODE}=dry_run")
+        texto = (f"HARÍA retiro de ganancias {money(monto)} USDT futuros → spot: {motivo}. No se transfirió nada "
+                 f"({causa}). Retirado acumulado (simulado): {money(self._retirado(state, MODE_DRY_RUN))} USDT.")
+        self._event(state, TIPO_RETIRO, texto, MODE_DRY_RUN)
+        self._notify(f"💸 <b>Rescate</b>: {esc(texto)}", True)
+
     def _transferir(self, state: Dict[str, Any], tipo: str, amount: Decimal, snap: Dict[str, Any], now_ms: int,
-                    motivo: str, disparo: Optional[str] = None) -> None:
+                    motivo: str, disparo: Optional[str] = None, capital_c3: Optional[Decimal] = None) -> None:
+        self._transferencias += 1
         entry: Dict[str, Any] = {
             "id": secrets.token_hex(8),
             "tipo": tipo,
@@ -1919,6 +2291,8 @@ class RescateService:
         }
         if disparo is not None:
             entry["disparo"] = disparo  # solo el disparo U lo marca (las inyecciones sin marca son de margen)
+        if capital_c3 is not None:
+            entry["capital_c3"] = money(capital_c3)  # solo el retiro: ver _sumar_retirado
         if self.mode == MODE_DRY_RUN:
             # No se llama a /sapi: se registra lo que HARÍA y se actualiza el préstamo simulado.
             self._finalizar(state, entry, "simulada", None, f"Simulación ({motivo}).")
@@ -1953,7 +2327,7 @@ class RescateService:
 
     @staticmethod
     def _titulo(tipo: str) -> str:
-        return "Inyección" if tipo == TIPO_INYECCION else "Devolución"
+        return {TIPO_INYECCION: "Inyección", TIPO_RETIRO: "Retiro de ganancias"}.get(tipo, "Devolución")
 
     def _aplicar_prestamo(self, state: Dict[str, Any], entry: Dict[str, Any]) -> None:
         if entry.get("prestamo_aplicado"):
@@ -2002,6 +2376,11 @@ class RescateService:
                         "motivo": str(entry.get("motivo") or "")[:300]}
             else:
                 self._revertir_prestamo(state, entry)
+        elif tipo == TIPO_RETIRO:
+            if ok:
+                # El retiro no toca el préstamo. Cuenta en el acumulado y baja la base de C3 (la plata salió de
+                # futuros sin ser una pérdida: sin esto C3 vería una caída igual al retiro y podría cortar).
+                self._sumar_retirado(state, mode, monto, tran_id, entry)
         elif ok:
             # La devolución recién baja el préstamo con la transferencia confirmada.
             set_loan(state, mode, get_loan(state, mode) - monto)
@@ -2014,6 +2393,9 @@ class RescateService:
             ref = f" (tranId {tran_id})" if tran_id else ""
             texto = (f"{self._titulo(tipo)} {money(monto)} USDT {flecha}{ref}. {detalle} "
                      f"Préstamo pendiente: {loan} USDT.")
+            if tipo == TIPO_RETIRO:
+                texto = (f"{self._titulo(tipo)} {money(monto)} USDT {flecha}{ref}. {detalle} Retirado acumulado: "
+                         f"{money(self._retirado(state, mode))} USDT.")
             self._event(state, tipo, texto)
             self._notify(f"🛟 <b>Rescate</b>: {esc(texto)}")
         else:
@@ -2207,12 +2589,33 @@ def panel_status(data_dir: pathlib.Path, now: Optional[float] = None) -> Dict[st
         "eval": upnl_eval,  # última evaluación del servicio (vieja si el servicio no late: ver servicio.vivo)
         "ultima_inyeccion": ultima_u if isinstance(ultima_u, dict) else None,
     }
+    retiro_state = state.get("retiro") if isinstance(state.get("retiro"), dict) else {}
+    retiro_modo = (servicio or {}).get("retiro_modo")
+    retiro_eval = retiro_state.get("eval") if isinstance(retiro_state.get("eval"), dict) else None
+    retiro_ultimo = retiro_state.get("ultimo")
+    frecuencia = cfg.get("retiro_frecuencia") or FRECUENCIA_OFF
+    acum = retiro_state.get("acumulado") if isinstance(retiro_state.get("acumulado"), dict) else {}
+    retiro = {
+        "frecuencia": frecuencia,
+        "base": cfg.get("retiro_base_usdt"),
+        "desde": cfg.get("retiro_desde"),
+        "modo": retiro_modo,  # FUTURESBOARD_RESCATE_RETIRO_MODE del servicio (None: servicio sin latido todavía)
+        # Estado efectivo según los modos y el panel: off / simulado / real.
+        "estado": RETIRO_OFF if frecuencia == FRECUENCIA_OFF else retiro_estado(modo, retiro_modo),
+        "eval": retiro_eval,  # última evaluación del servicio (vieja si el servicio no late)
+        "acumulado": {MODE_REAL: acum.get(MODE_REAL) or "0.00", MODE_DRY_RUN: acum.get(MODE_DRY_RUN) or "0.00"},
+        "ultimo": retiro_ultimo if isinstance(retiro_ultimo, dict) else None,
+        "recomendada": FRECUENCIA_RECOMENDADA,
+        "frecuencias": list(FRECUENCIAS),
+    }
     return {
         "config": {k: cfg.get(k) for k in ("habilitado", "generacion", "reserva_max_usdt", "paso_usdt",
                                             "umbral_ratio", "umbral_devolucion_ratio", "tope_perdida_pct",
                                             "upnl_habilitado", "upnl_x_pct", "upnl_paso_usdt",
+                                            "retiro_frecuencia", "retiro_base_usdt", "retiro_desde", "perfil",
                                             "actualizado_en", "actualizado_por")},
         "upnl": upnl,
+        "retiro": retiro,
         "limites": {k: [str(lo), str(hi)] for k, (lo, hi) in LIMITES.items()},
         "errores": [e for e in (cfg_err, state_err) if e],
         "servicio": {"modo": modo, "vivo": vivo, "heartbeat": (servicio or {}).get("heartbeat"),
@@ -2372,6 +2775,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         log.error("%s", settings.mode_error)
     if settings.upnl_mode_error:
         log.error("%s", settings.upnl_mode_error)
+    if settings.retiro_mode_error:
+        log.error("%s", settings.retiro_mode_error)
     config = _load_app_config()
 
     if args.comando == "simular-inyeccion":
@@ -2385,6 +2790,8 @@ def main(argv: Optional[List[str]] = None) -> int:
              settings.interval, settings.loan_state_path, service.data_dir, service.testnet)
     log.info("Disparo por uPnL: modo %s (estado efectivo %s si se habilita en el panel), %ss entre inyecciones U.",
              settings.upnl_mode, upnl_estado(settings.mode, settings.upnl_mode), settings.upnl_cooldown_seconds)
+    log.info("Retiro periódico: modo %s (estado efectivo %s si se elige una frecuencia en el panel).",
+             settings.retiro_mode, retiro_estado(settings.mode, settings.retiro_mode))
     if service.c3 is not None:
         log.info("C3 (stop con reinicio): modo %s, latido %s, pares %s.", service.c3.mode,
                  service.c3.settings.heartbeat_path, ",".join(service.c3.settings.pares))
