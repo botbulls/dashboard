@@ -153,6 +153,8 @@ body.bb {
 .bb a { color: var(--bb-link); text-decoration: none; }
 .bb h1, .bb h2, .bb h3, .bb h4, .bb h5, .bb h6 { font-weight: 600; line-height: 1.2; letter-spacing: 0; color: var(--bb-text); }
 .bb :focus-visible { outline: 2px solid var(--bb-focus); outline-offset: 2px; box-shadow: none; }
+/* Adentro de lo que recorta (overflow hidden o scroll: selector de tema, tablas) el anillo va hacia adentro; afuera no se ve. */
+.bb .bb-segmento :focus-visible, .bb .bb-tabla-card :focus-visible, .bb .bb-tabla-scroll :focus-visible { outline-offset: -2px; }
 .bb button, .bb a, .bb summary, .bb [role="button"] { touch-action: manipulation; }
 .bb button, .bb .btn, .bb summary, .bb .badge, .bb [role="button"] { -webkit-user-select: none; user-select: none; }
 .bb-saltar { position: absolute; left: -9999px; }
@@ -400,9 +402,10 @@ body.bb {
 .bb-semaforo__dato .bb-tarjeta__valor { font-size: var(--bb-fs-24); }
 .bb-medidor { position: relative; height: 8px; border-radius: var(--bb-r-pill); background: var(--bb-surface-2); border: 1px solid var(--bb-border); overflow: hidden; }
 .bb-medidor span { position: absolute; top: 0; bottom: 0; }
-.bb-medidor .z-rojo { left: 0; background: color-mix(in srgb, var(--bb-loss-mark) 55%, transparent); }
-.bb-medidor .z-amarillo { background: color-mix(in srgb, var(--bb-warn-mark) 55%, transparent); }
-.bb-medidor .z-verde { right: 0; background: color-mix(in srgb, var(--bb-gain-mark) 35%, transparent); }
+/* Zonas con opacity y no con color-mix(): en iOS < 16.2 color-mix() no existe y la zona quedaba sin color (los spans están vacíos). */
+.bb-medidor .z-rojo { left: 0; background: var(--bb-loss-mark); opacity: .55; }
+.bb-medidor .z-amarillo { background: var(--bb-warn-mark); opacity: .55; }
+.bb-medidor .z-verde { right: 0; background: var(--bb-gain-mark); opacity: .35; }
 .bb-medidor .aguja { width: 3px; background: var(--bb-text); border-radius: 2px; }
 @media (max-width: 1199.98px) {
   .bb-rescate { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -644,6 +647,8 @@ body.bb {
   .bb-confirmacion__botones .btn { flex: 1 1 0; }
   .bb .dataTables_wrapper .dataTables_filter input, .bb .dataTables_wrapper .dataTables_length select { min-height: var(--bb-tap); font-size: var(--bb-fs-16); }
   .bb .dataTables_wrapper .dataTables_paginate .paginate_button { min-height: var(--bb-tap); min-width: var(--bb-tap); display: inline-flex; align-items: center; justify-content: center; }
+  /* Encabezados que ordenan: 44 px de alto (en una celda, height funciona como mínimo). */
+  .bb table.dataTable thead th { height: var(--bb-tap); }
   /* Casillas y switches: la etiqueta completa los 44 px del objetivo táctil. */
   .bb .form-check { min-height: var(--bb-tap); align-items: center; }
   .bb .form-check-label { padding: var(--bb-s2) 0; }

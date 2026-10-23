@@ -258,6 +258,18 @@ def test_tokens_oscuros_iguales_en_auto_y_en_elegido():
     assert len(norm(auto)) > 30
 
 
+def test_foco_adentro_de_lo_que_recorta_y_encabezados_tactiles():
+    css = (STATIC / "styles" / "bb.css").read_text(encoding="utf-8")
+    # Selector de tema (overflow hidden) y tablas con scroll: el anillo del foco va hacia adentro para que se vea.
+    assert ".bb .bb-segmento :focus-visible, .bb .bb-tabla-card :focus-visible, .bb .bb-tabla-scroll :focus-visible { outline-offset: -2px; }" in css
+    assert "overflow: hidden" in css.split(".bb-segmento {", 1)[1].split("}", 1)[0]
+    celu = css.split("@media (max-width: 767.98px) {\n  .bb-app", 1)[1]
+    assert ".bb table.dataTable thead th { height: var(--bb-tap); }" in celu
+    # Medidor del semáforo: sin color-mix() (iOS < 16.2 lo ignora y las zonas quedaban sin color).
+    medidor = [linea for linea in css.splitlines() if linea.startswith(".bb-medidor .z-")]
+    assert len(medidor) == 3 and not any("color-mix" in linea for linea in medidor)
+
+
 def test_cdns_con_version_fija(client):  # noqa: F811
     for url in ("/", "/login"):
         html = client.get(url).get_data(as_text=True)
