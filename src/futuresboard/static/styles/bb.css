@@ -341,6 +341,29 @@ body.bb {
 .bb-detalle-pedido dd { margin: 0; font-variant-numeric: tabular-nums; }
 .bb-detalle-pedido__ancho { grid-column: 1 / -1; }
 
+/* ------------------------------------------------------------------ 7. Secciones y KPIs */
+.bb-seccion { display: grid; gap: var(--bb-s3); min-width: 0; }
+.bb-seccion__titulo { display: flex; align-items: center; gap: var(--bb-s2); flex-wrap: wrap; margin: 0; font-size: var(--bb-fs-20); }
+.bb-seccion__titulo a { color: var(--bb-text); }
+.bb-seccion__titulo .bb-seccion__mas { margin-left: auto; font-size: var(--bb-fs-14); font-weight: 500; color: var(--bb-link); }
+.bb-kpis { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--bb-s4); }
+.bb-kpis > * { min-width: 0; }
+.bb-kpi { grid-column: span 2; display: flex; flex-direction: column; color: var(--bb-text) !important; text-decoration: none !important; }
+.bb-kpi .card-body { display: grid; gap: var(--bb-s1); align-content: start; }
+.bb-kpi__etiqueta { font-size: var(--bb-fs-13); color: var(--bb-text-2); font-weight: 500; }
+.bb-kpi__valor { font-size: var(--bb-fs-24); font-weight: 600; line-height: 1.15; white-space: nowrap; color: var(--bb-text); font-variant-numeric: tabular-nums; }
+.bb-kpi__var { font-size: var(--bb-fs-13); font-weight: 600; display: flex; flex-wrap: wrap; align-items: center; column-gap: 4px; font-variant-numeric: tabular-nums; }
+.bb-kpi__var.is-gana { color: var(--bb-gain); } .bb-kpi__var.is-pierde { color: var(--bb-loss); } .bb-kpi__var.is-cero { color: var(--bb-text-2); }
+.bb-kpi__aclara { font-size: var(--bb-fs-13); color: var(--bb-text-2); font-weight: 400; white-space: nowrap; }
+.bb-hero { grid-column: span 4; }
+.bb-hero .bb-kpi__valor { font-size: var(--bb-fs-40); letter-spacing: -0.01em; }
+.bb-hero__upnl { display: flex; align-items: baseline; gap: var(--bb-s2); flex-wrap: wrap; margin-top: var(--bb-s2); padding-top: var(--bb-s2); border-top: 1px solid var(--bb-border); }
+.bb-hero__upnl .bb-num { font-weight: 600; }
+@media (max-width: 1199.98px) {
+  .bb-kpi { grid-column: span 3; }
+  .bb-kpi.bb-hero { grid-column: span 12; }
+}
+
 /* ------------------------------------------------------------------ 12. Pie */
 .bb-pie { padding: var(--bb-s5); padding-right: calc(var(--bb-s5) + 56px); border-top: 1px solid var(--bb-border); color: var(--bb-text-2); font-size: var(--bb-fs-13); display: grid; gap: var(--bb-s2); }
 .bb-pie p { margin: 0; max-width: 72ch; }
@@ -357,6 +380,7 @@ body.bb {
   .bb-icono-btn:hover, .bb-segmento button:hover { background: var(--bb-surface-hover); color: var(--bb-text); }
   .bb-monedas td:first-child a:hover, .bb-inactivas li a:hover { color: var(--bb-link); }
   .bb .last-order-badge:hover { background: var(--bb-surface-hover); }
+  .bb a.bb-kpi:hover { box-shadow: var(--bb-shadow-hover); border-color: var(--bb-border-strong); }
   .bb .bot-status-badge:hover { filter: brightness(.95); }
 }
 .bb .btn-outline-secondary:active, .bb .btn-light:active, .bb .btn-secondary:active, .bb-icono-btn:active, .bb-nav__item:active { background-color: var(--bb-surface-hover); color: var(--bb-text); }
@@ -406,6 +430,12 @@ body.bb {
   .bb-franja .bot-status-badge, .bb-franja .last-order-badge { min-height: var(--bb-tap); }
   .bb .bb-franja .bb-badge { min-height: 30px; }
   .bb-solo-celu { display: inline; }
+  .bb-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--bb-s3); }
+  .bb-kpi, .bb-kpi.bb-hero { grid-column: span 1; }
+  .bb-kpi.bb-hero { grid-column: span 2; }
+  .bb-hero .bb-kpi__valor { font-size: 32px; }
+  .bb-kpi .card-body { padding: var(--bb-s3); }
+  .bb-kpi__valor { font-size: var(--bb-fs-20); }
 }
 
 /* ------------------------------------------------------------------ 16. Neutralizar lo viejo mientras queden reglas de

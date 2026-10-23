@@ -78,92 +78,49 @@
             </div>
         </div>
     </div>
-    <div class="row">
-        <div class="col-sm-2">
-            <a href="{{ url_for("main.dashboard_page", start=timeranges[0][0], end=timeranges[0][1]) }}" style="text-decoration: none;">
-                <div class="card text-center h-100">
-                  <div class="card-body">
-                    <h5 class="card-title mb-2" style="font-size: 2rem; font-weight: 700; color: var(--success-color, #10b981);">{{ totals[6][0] }}%</h5>
-                    <p class="card-text mb-0" style="font-size: 1.25rem; color: var(--text-secondary, #64748b);">${{ totals[1] }}</p>
-                  </div>
-                  <div class="card-footer text-muted" style="font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px;">
-                    Profit today
-                  </div>
-                </div>
-            </a>
-        </div>
-        <div class="col-sm-2">
-            <a href="{{ url_for("main.dashboard_page", start=timeranges[2][0], end=timeranges[2][1]) }}" style="text-decoration: none;">
-                <div class="card text-center h-100">
-                  <div class="card-body">
-                    <h5 class="card-title mb-2" style="font-size: 2rem; font-weight: 700; color: var(--info-color, #3b82f6);">{{ totals[6][1] }}%</h5>
-                    <p class="card-text mb-0" style="font-size: 1.25rem; color: var(--text-secondary, #64748b);">${{ totals[2] }}</p>
-                  </div>
-                  <div class="card-footer text-muted" style="font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px;">
-                    Profit from Monday
-                  </div>
-                </div>
-            </a>
-        </div>
-        <div class="col-sm-2">
-             <a href="{{ url_for("main.dashboard_page", start=timeranges[4][0], end=timeranges[4][1]) }}" style="text-decoration: none;">
-                <div class="card text-center h-100">
-                  <div class="card-body">
-                    <h5 class="card-title mb-2" style="font-size: 2rem; font-weight: 700; color: var(--secondary-color, #8b5cf6);">{{ totals[6][2] }}%</h5>
-                    <p class="card-text mb-0" style="font-size: 1.25rem; color: var(--text-secondary, #64748b);">${{ totals[3] }}</p>
-                  </div>
-                  <div class="card-footer text-muted" style="font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px;">
-                    Profit in {{ totals[8] }}
-                  </div>
-                </div>
-            </a>
-        </div>
-        <div class="col-sm-2">
-           <a href="{{ url_for("main.dashboard_page", start=timeranges[8][0], end=timeranges[8][1]) }}" style="text-decoration: none;">
-                <div class="card text-center h-100">
-                  <div class="card-body">
-                    <h5 class="card-title mb-2" style="font-size: 2rem; font-weight: 700; color: var(--primary-color, #6366f1);">{{ totals[6][3] }}%</h5>
-                    <p class="card-text mb-0" style="font-size: 1.25rem; color: var(--text-secondary, #64748b);">${{ totals[0] }}</p>
-                  </div>
-                  <div class="card-footer text-muted" style="font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px;">
-                    Total profit
-                  </div>
-                </div>
-            </a>
-        </div>
-        <div class="col-sm-2">
-            <a href="{{ url_for("main.positions_page") }}" style="text-decoration: none;">
-                <div class="card text-center h-100">
-                  <div class="card-body">
-                    <h5 class="card-title mb-2" style="font-size: 2rem; font-weight: 700; color: var(--warning-color, #f59e0b);">${{ totals[7][0] }}</h5>
-	            <p class="card-text mb-0" style="font-size: 1.25rem; color: var(--text-secondary, #64748b);">
-                        {% set unrealised = totals[7][0]|replace('$', '')|replace(',', '')|float %}
-                        {% set balance = totals[7][1]|replace('$', '')|replace(',', '')|float %}
-                        {% if balance > 0 %}
-                            {{ "%.2f"|format((unrealised / balance) * 100) }}%
-                        {% else %}
-                            -
-                        {% endif %}
-                    </p>
-                  </div>
-                  <div class="card-footer text-muted" style="font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px;">
-                    Unrealised PnL
-                  </div>
-                </div>
-            </a>
-        </div>
-        <div class="col-sm-2">
-            <div class="card text-center h-100">
-              <div class="card-body">
-                <h5 class="card-title mb-2" style="font-size: 2rem; font-weight: 700; color: var(--success-color, #10b981);">${{ totals[7][1] }}</h5>
-                <p class="card-text mb-0" style="font-size: 1.25rem; color: var(--text-secondary, #64748b);">&nbsp;</p>
-              </div>
-              <div class="card-footer text-muted" style="font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px;">
-                Wallet balance
-              </div>
+    {# KPIs: valores de plata en tinta neutra con signo; la variación (% del balance) en verde/rojo con ícono.
+       El crudo queda en data-value; las cuentas de abajo usan el crudo (totals[7]), nunca el texto formateado. #}
+    {% macro kpi(etiqueta, valor, porcentaje, url) %}
+        {% set t = valor|tendencia %}
+        <a class="card bb-kpi" href="{{ url }}">
+            <div class="card-body">
+                <span class="bb-kpi__etiqueta">{{ etiqueta }}</span>
+                <div class="bb-kpi__valor bb-num" data-value="{{ valor }}">{{ valor|usd(signo=True) }}</div>
+                <span class="bb-kpi__var is-{{ t or 'cero' }}" data-value="{{ porcentaje }}">
+                    {%- if t == 'gana' %}<i class="fas fa-caret-up" aria-hidden="true"></i> {% elif t == 'pierde' %}<i class="fas fa-caret-down" aria-hidden="true"></i> {% endif -%}
+                    {%- if porcentaje == '-' %}<span class="bb-kpi__aclara">sin balance</span>{% else %}{{ porcentaje|pct(signo=True) }} <span class="bb-kpi__aclara">del balance</span>{% endif -%}
+                </span>
             </div>
+        </a>
+    {% endmacro %}
+    {% set unrealised = totals[7][0]|replace('$', '')|replace(',', '')|float %}
+    {% set balance = totals[7][1]|replace('$', '')|replace(',', '')|float %}
+    <section class="bb-seccion" aria-labelledby="bbTituloGanancia">
+        <h2 class="bb-sr" id="bbTituloGanancia">Cuenta y ganancia</h2>
+        <div class="bb-kpis">
+            <a class="card bb-kpi bb-hero" href="{{ url_for("main.positions_page") }}">
+                <div class="card-body">
+                    <span class="bb-kpi__etiqueta">Balance de la billetera</span>
+                    <div class="bb-kpi__valor bb-num" data-value="{{ totals[7][1] }}">{{ totals[7][1]|usd }}</div>
+                    <div class="bb-hero__upnl">
+                        <span class="bb-kpi__aclara">PnL no realizado</span>
+                        <span class="bb-num" data-value="{{ totals[7][0] }}">{{ totals[7][0]|usd(signo=True) }}</span>
+                        {% if balance > 0 %}
+                            {% set upnl_pct = (unrealised / balance) * 100 %}
+                            {% set t = totals[7][0]|tendencia %}
+                            <span class="bb-kpi__var is-{{ t or 'cero' }}" data-value="{{ "%.2f"|format(upnl_pct) }}">
+                                {%- if t == 'gana' %}<i class="fas fa-caret-up" aria-hidden="true"></i> {% elif t == 'pierde' %}<i class="fas fa-caret-down" aria-hidden="true"></i> {% endif -%}
+                                {{ upnl_pct|pct(dec=2, signo=True) }}</span>
+                        {% endif %}
+                    </div>
+                </div>
+            </a>
+            {{ kpi("Hoy", totals[1], totals[6][0], url_for("main.dashboard_page", start=timeranges[0][0], end=timeranges[0][1])) }}
+            {{ kpi("Desde el lunes", totals[2], totals[6][1], url_for("main.dashboard_page", start=timeranges[2][0], end=timeranges[2][1])) }}
+            {{ kpi(totals[8]|mes_es, totals[3], totals[6][2], url_for("main.dashboard_page", start=timeranges[4][0], end=timeranges[4][1])) }}
+            {{ kpi("Total", totals[0], totals[6][3], url_for("main.dashboard_page", start=timeranges[8][0], end=timeranges[8][1])) }}
         </div>
-    </div>
+    </section>
     {% if rescate_resumen %}{% include "_rescate_tarjetas.html" %}{% endif %}
     <br>
     <div class="row g-3 align-items-stretch dashboard_charts_row">
