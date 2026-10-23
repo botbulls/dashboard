@@ -14,6 +14,10 @@ Cómo funciona (ver ``docs/rescate.md``):
 * **Inyección** solo cerca de la liquidación: si ``totalMarginBalance / totalMaintMargin < umbral`` y hay
   posiciones, transfiere de spot a futuros un paso, sin superar la reserva máxima ni el USDT libre en
   spot. Una transferencia en vuelo a la vez.
+* **Disparo anticipado por uPnL** (opcional, apagado por default; ``FUTURESBOARD_RESCATE_UPNL_MODE``): si el
+  de margen no dispara, inyecta un paso cuando ``uPnL + préstamo <= -X% × (wallet - préstamo)`` (escalera: el
+  siguiente paso recién cuando la pérdida no cubierta por lo ya prestado vuelve a cruzar la línea). Con el
+  disparo prendido, la devolución parcial no devuelve lo que la regla volvería a pedir (sin ping-pong).
 * **Devolución automática**: sin posiciones y con préstamo pendiente, transfiere de futuros a spot
   ``min(préstamo, maxWithdrawAmount)``; si no alcanza, en partes en los ciclos siguientes.
 * **Devolución parcial con margen sano**: con préstamo y posiciones abiertas, si el ratio es
@@ -84,6 +88,8 @@ ENV_SPOT_URL = "FUTURESBOARD_RESCATE_SPOT_URL"
 ENV_TOPE_CONFIRM = "FUTURESBOARD_RESCATE_TOPE_CONFIRM_SECONDS"
 ENV_DEVOLUCION_MIN = "FUTURESBOARD_RESCATE_DEVOLUCION_MIN_USDT"
 ENV_DEVOLUCION_COOLDOWN = "FUTURESBOARD_RESCATE_DEVOLUCION_COOLDOWN_SECONDS"
+ENV_UPNL_MODE = "FUTURESBOARD_RESCATE_UPNL_MODE"
+ENV_UPNL_COOLDOWN = "FUTURESBOARD_RESCATE_UPNL_COOLDOWN_SECONDS"
 
 MODE_OFF = "off"
 MODE_DRY_RUN = "dry_run"
@@ -120,6 +126,18 @@ MAX_DEVOLUCION_MIN_USDT = 1_000_000
 DEFAULT_DEVOLUCION_COOLDOWN_S = 600
 MAX_DEVOLUCION_COOLDOWN_S = 86_400
 
+# Disparo anticipado por uPnL (U). Defaults del backtest multianual (botbulls-lab multianual/rescate_upnl, fila
+# elegida con IS y confirmada en OOS: TWE4_U70_p1000_t0): X = 70 % del capital propio de futuros, paso 1.000 USDT y
+# 1 min entre inyecciones U. Ver docs/rescate.md ("Disparo anticipado por uPnL").
+DEFAULT_UPNL_COOLDOWN_S = 60
+MAX_UPNL_COOLDOWN_S = 3_600
+# Estados efectivos del disparo U (según FUTURESBOARD_RESCATE_MODE y FUTURESBOARD_RESCATE_UPNL_MODE):
+UPNL_OFF = "off"            # no se evalúa
+UPNL_REGISTRA = "registra"  # servicio en real y U en dry_run: solo registra lo que HARÍA (no transfiere, sin guarda)
+UPNL_SIMULADO = "simulado"  # servicio en dry_run: inyecciones simuladas sobre el préstamo simulado (con guarda)
+UPNL_REAL = "real"          # servicio y U en real: transfiere de verdad (con guarda)
+DISPARO_UPNL = "upnl"       # marca del ledger; las inyecciones sin marca son del disparo de margen
+
 SPOT_MAINNET_URL = "https://api.binance.com"
 # Binance Demo Trading (spot). /sapi no existe en Demo: el modo real queda bloqueado ahí.
 SPOT_DEMO_URL = "https://demo-api.binance.com"
@@ -144,6 +162,8 @@ DEFAULT_UMBRAL = Decimal("8")
 # valor que no empeora la supervivencia frente a no devolver; con 12, 16 y 24 lo que limita es maxWithdrawAmount
 # (IM/MM ≈ 17-25 con apalancamiento 10), se devuelve todo lo retirable y una corrida sobreviviente pasó a stop.
 DEFAULT_UMBRAL_DEVOLUCION = Decimal("32")
+DEFAULT_UPNL_X_PCT = Decimal("70")
+DEFAULT_UPNL_PASO = Decimal("1000")
 # (mínimo, máximo) inclusivos. El umbral es la relación margen / mantenimiento: Binance liquida en 1.
 LIMITES: Dict[str, Tuple[Decimal, Decimal]] = {
     "reserva_max_usdt": (Decimal("10"), Decimal("1000000")),
@@ -151,14 +171,21 @@ LIMITES: Dict[str, Tuple[Decimal, Decimal]] = {
     "umbral_ratio": (Decimal("1.2"), Decimal("10")),
     "umbral_devolucion_ratio": (Decimal("2"), Decimal("100")),
     "tope_perdida_pct": (Decimal("1"), Decimal("80")),
+    # Disparo U: X en % del capital propio de futuros (wallet - préstamo) y paso propio de las inyecciones U.
+    "upnl_x_pct": (Decimal("10"), Decimal("95")),
+    "upnl_paso_usdt": (Decimal("10"), Decimal("1000000")),
 }
-CAMPOS_NUMERICOS = tuple(LIMITES)
+# Campos obligatorios del POST del panel (los del disparo U van juntos y son opcionales: ver validate_config_body).
+CAMPOS_NUMERICOS = ("reserva_max_usdt", "paso_usdt", "umbral_ratio", "umbral_devolucion_ratio", "tope_perdida_pct")
+CAMPOS_UPNL_NUMERICOS = ("upnl_x_pct", "upnl_paso_usdt")
+CAMPOS_UPNL = ("upnl_habilitado", *CAMPOS_UPNL_NUMERICOS)
 
 TRANSFER_ASSET = "USDT"
 TIPO_INYECCION = "inyeccion"
 TIPO_DEVOLUCION = "devolucion"
 TIPO_API = {TIPO_INYECCION: "MAIN_UMFUTURE", TIPO_DEVOLUCION: "UMFUTURE_MAIN"}
 COOLDOWN_PARCIAL = "devolucion_parcial"  # clave en cooldown_ms (entre devoluciones parciales)
+COOLDOWN_UPNL = "inyeccion_upnl"         # clave en cooldown_ms (entre inyecciones del disparo U)
 
 MIN_INYECCION = Decimal("1")      # no se inyectan montos menores (USDT)
 MIN_DEVOLUCION = CENT
@@ -330,6 +357,11 @@ def default_config() -> Dict[str, Any]:
         "umbral_ratio": str(DEFAULT_UMBRAL),
         "umbral_devolucion_ratio": str(DEFAULT_UMBRAL_DEVOLUCION),
         "tope_perdida_pct": None,
+        # Disparo anticipado por uPnL: apagado por default. Una config guardada antes de que existiera lo toma
+        # apagado con los defaults del backtest (X 70 %, paso 1.000).
+        "upnl_habilitado": False,
+        "upnl_x_pct": str(DEFAULT_UPNL_X_PCT),
+        "upnl_paso_usdt": money(DEFAULT_UPNL_PASO),
         "tope_reconocido": None,
         "actualizado_en": None,
         "actualizado_por": None,
@@ -369,6 +401,12 @@ def load_config(data_dir: pathlib.Path) -> Tuple[Dict[str, Any], Optional[str]]:
             raise ValueError("falta paso o umbral")
         if dec(cfg["umbral_devolucion_ratio"]) <= dec(cfg["umbral_ratio"]):
             raise ValueError("el umbral de devolución tiene que ser mayor que el de inyección")
+        if not isinstance(cfg["upnl_habilitado"], bool):
+            raise ValueError("upnl_habilitado no es booleano")
+        for name in CAMPOS_UPNL_NUMERICOS:
+            if cfg[name] is None:
+                raise ValueError(f"falta {name}")
+            _check_range(name, dec(cfg[name]))
     except ValueError as exc:
         return default_config(), f"{CONFIG_FILE_NAME} inválido ({exc}): rescate deshabilitado."
     return cfg, None
@@ -379,6 +417,17 @@ def cfg_dec(cfg: Dict[str, Any], name: str) -> Optional[Decimal]:
     return None if value is None else dec(value)
 
 
+def _numero_body(name: str, value: Any) -> Decimal:
+    """Número JSON finito (no bool, no texto) dentro de su rango."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} tiene que ser un número.")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{name} tiene que ser un número finito.")
+    parsed = dec(value)
+    _check_range(name, parsed)
+    return parsed
+
+
 def validate_config_body(body: Any) -> Dict[str, Any]:
     """Validación estricta del POST del panel. Devuelve los valores como Decimal (o None).
 
@@ -386,14 +435,18 @@ def validate_config_body(body: Any) -> Dict[str, Any]:
     ``umbral_devolucion_ratio``, ``tope_perdida_pct`` (números JSON finitos, no bool). ``reserva`` y ``tope``
     pueden ser null solo con el rescate deshabilitado. ``umbral_devolucion_ratio > umbral_ratio``. Campos
     desconocidos: error.
+
+    Disparo por uPnL: ``upnl_habilitado`` (bool), ``upnl_x_pct`` y ``upnl_paso_usdt`` van **los tres o ninguno**.
+    Sin ellos se conservan los guardados (una pestaña del panel abierta antes del deploy no puede prender ni
+    apagar el disparo). ``out["upnl"]`` es None si no vinieron.
     """
     if not isinstance(body, dict):
         raise ValueError("Body inválido: se esperaba un objeto JSON.")
-    allowed = {"habilitado", *CAMPOS_NUMERICOS}
-    unknown = sorted(set(body) - allowed)
+    required = {"habilitado", *CAMPOS_NUMERICOS}
+    unknown = sorted(set(body) - required - set(CAMPOS_UPNL))
     if unknown:
         raise ValueError(f"Campos desconocidos: {', '.join(unknown)}.")
-    missing = sorted(allowed - set(body))
+    missing = sorted(required - set(body))
     if missing:
         raise ValueError(f"Faltan campos: {', '.join(missing)}.")
     habilitado = body["habilitado"]
@@ -407,13 +460,23 @@ def validate_config_body(body: Any) -> Dict[str, Any]:
                 raise ValueError(f"{name} es obligatorio.")
             out[name] = None
             continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"{name} tiene que ser un número.")
-        if isinstance(value, float) and not math.isfinite(value):
-            raise ValueError(f"{name} tiene que ser un número finito.")
-        parsed = dec(value)
-        _check_range(name, parsed)
-        out[name] = parsed
+        out[name] = _numero_body(name, value)
+    out["upnl"] = None
+    presentes = [name for name in CAMPOS_UPNL if name in body]
+    if presentes:
+        faltan = [name for name in CAMPOS_UPNL if name not in body]
+        if faltan:
+            raise ValueError(f"Los campos del disparo por uPnL van juntos: faltan {', '.join(faltan)}.")
+        if not isinstance(body["upnl_habilitado"], bool):
+            raise ValueError("upnl_habilitado tiene que ser true o false.")
+        upnl: Dict[str, Any] = {"upnl_habilitado": body["upnl_habilitado"]}
+        for name in CAMPOS_UPNL_NUMERICOS:
+            if body[name] is None:
+                raise ValueError(f"{name} es obligatorio.")
+            upnl[name] = _numero_body(name, body[name])
+        if out["reserva_max_usdt"] is not None and upnl["upnl_paso_usdt"] > out["reserva_max_usdt"]:
+            raise ValueError("El paso del disparo por uPnL no puede ser mayor que la reserva máxima.")
+        out["upnl"] = upnl
     if habilitado and out["reserva_max_usdt"] is None:
         raise ValueError("Para habilitar el rescate hay que fijar la reserva máxima.")
     if habilitado and out["tope_perdida_pct"] is None:
@@ -444,6 +507,15 @@ def save_config(data_dir: pathlib.Path, parsed: Dict[str, Any], user: str) -> Di
         cfg["habilitado"] = parsed["habilitado"]
         for name in CAMPOS_NUMERICOS:
             cfg[name] = _num_to_cfg(parsed[name])
+        upnl = parsed.get("upnl")
+        if upnl is not None:
+            cfg["upnl_habilitado"] = upnl["upnl_habilitado"]
+            for name in CAMPOS_UPNL_NUMERICOS:
+                cfg[name] = _num_to_cfg(upnl[name])
+        # Sin los campos del disparo U se conservan los guardados: el paso guardado tampoco puede superar la reserva.
+        if (cfg.get("upnl_habilitado") and cfg.get("reserva_max_usdt") is not None
+                and dec(cfg["upnl_paso_usdt"]) > dec(cfg["reserva_max_usdt"])):
+            raise ValueError("El paso del disparo por uPnL no puede ser mayor que la reserva máxima.")
         cfg["actualizado_en"] = now_iso()
         cfg["actualizado_por"] = user
         write_json_atomic(data_dir / CONFIG_FILE_NAME, cfg, mode=0o600)
@@ -490,6 +562,8 @@ def default_state() -> Dict[str, Any]:
         "bloqueo": None,
         "servicio": None,
         "cooldown_ms": {},
+        # Disparo U: última evaluación (para el panel), última inyección U y escalón registrado en modo "registra".
+        "upnl": {},
     }
 
 
@@ -518,6 +592,8 @@ def load_state(data_dir: pathlib.Path) -> Tuple[Dict[str, Any], Optional[str]]:
             state[key] = []
     if not isinstance(state.get("cooldown_ms"), dict):
         state["cooldown_ms"] = {}
+    if not isinstance(state.get("upnl"), dict):
+        state["upnl"] = {}
     return state, None
 
 
@@ -634,6 +710,14 @@ def _field(data: Dict[str, Any], key: str, path: str) -> Decimal:
         raise ReadError(f"Respuesta inesperada de Binance en {path}: falta o es inválido {key}.") from exc
 
 
+def _field_opcional(data: Dict[str, Any], key: str) -> Optional[Decimal]:
+    """Campo que solo usa el disparo U: si falta o es inválido es None (el disparo U no actúa; el resto sigue)."""
+    try:
+        return dec(data[key])
+    except (KeyError, ValueError):
+        return None
+
+
 class RescateBinance:
     """Cliente REST mínimo. Firma igual que ``bot_control.BinanceFuturesClient`` (HMAC-SHA256 del query)."""
 
@@ -700,6 +784,9 @@ class RescateBinance:
             "max_withdraw": _field(data, "maxWithdrawAmount", path),
             "available": _field(data, "availableBalance", path),
             "posiciones": abiertas,
+            # Solo para el disparo U (opcionales: sin ellos el disparo U queda en pausa, el resto no cambia).
+            "wallet_balance": _field_opcional(data, "totalWalletBalance"),
+            "upnl": _field_opcional(data, "totalUnrealizedProfit"),
         }
 
     def spot_usdt_free(self) -> Decimal:
@@ -808,6 +895,34 @@ class RescateSettings:
                                                     MAX_DEVOLUCION_MIN_USDT))
         self.devolucion_cooldown_seconds = _env_int(env, ENV_DEVOLUCION_COOLDOWN, DEFAULT_DEVOLUCION_COOLDOWN_S, 0,
                                                     MAX_DEVOLUCION_COOLDOWN_S)
+        # Disparo U: su propio modo (default off) para probarlo en dry_run con el servicio ya en real.
+        raw_upnl = env.get(ENV_UPNL_MODE, "").strip().lower()
+        self.upnl_mode_error: Optional[str] = None
+        if raw_upnl in ("", MODE_OFF):
+            self.upnl_mode = MODE_OFF
+        elif raw_upnl in (MODE_DRY_RUN, MODE_REAL):
+            self.upnl_mode = raw_upnl
+        else:
+            self.upnl_mode = MODE_OFF
+            self.upnl_mode_error = (f"{ENV_UPNL_MODE}={raw_upnl!r} inválido: se usa off (valores: off, dry_run, "
+                                    "real).")
+        self.upnl_cooldown_seconds = _env_int(env, ENV_UPNL_COOLDOWN, DEFAULT_UPNL_COOLDOWN_S, 0, MAX_UPNL_COOLDOWN_S)
+
+
+def upnl_estado(modo_servicio: Optional[str], modo_upnl: Optional[str]) -> str:
+    """Estado efectivo del disparo U.
+
+    * ``off``: servicio en off o ``FUTURESBOARD_RESCATE_UPNL_MODE=off`` (default).
+    * ``registra``: servicio en real y U en dry_run. Solo registra lo que HARÍA: no transfiere ni aplica la guarda
+      de la devolución parcial (nada cambia en la cuenta real).
+    * ``simulado``: servicio en dry_run (U en dry_run o real): inyecciones simuladas sobre el préstamo simulado.
+    * ``real``: servicio y U en real.
+    """
+    if modo_servicio not in (MODE_DRY_RUN, MODE_REAL) or modo_upnl not in (MODE_DRY_RUN, MODE_REAL):
+        return UPNL_OFF
+    if modo_servicio == MODE_DRY_RUN:
+        return UPNL_SIMULADO
+    return UPNL_REAL if modo_upnl == MODE_REAL else UPNL_REGISTRA
 
 
 def check_restrictions(data: Dict[str, Any]) -> List[str]:
@@ -917,13 +1032,18 @@ class RescateService:
         snap["spot_real"] = spot
         snap["capital"] = fut["margin_balance"] + spot
         margin, max_withdraw, spot_eff = fut["margin_balance"], fut["max_withdraw"], spot
+        wallet = fut.get("wallet_balance")
         if self.mode == MODE_DRY_RUN:
-            # Como si lo simulado se hubiera movido de verdad: el margen y lo retirable suben y el spot baja.
+            # Como si lo simulado se hubiera movido de verdad: el margen, la wallet y lo retirable suben y el spot
+            # baja. Con la wallet así, el capital propio del disparo U (wallet - préstamo simulado) es la wallet real.
             loan = get_loan(state, MODE_DRY_RUN)
             margin, max_withdraw, spot_eff = margin + loan, max_withdraw + loan, max(Decimal(0), spot - loan)
+            wallet = None if wallet is None else wallet + loan
         snap["margin_eff"] = margin
         snap["max_withdraw_eff"] = max_withdraw
         snap["spot_eff"] = spot_eff
+        snap["wallet_eff"] = wallet
+        snap["upnl"] = fut.get("upnl")
         maint = fut["maint_margin"]
         snap["ratio"] = (margin / maint) if maint > 0 else None
         return snap
@@ -966,7 +1086,8 @@ class RescateService:
                 error_rescate = exc
             finally:
                 state["servicio"] = {"modo": self.mode, "heartbeat": now_iso(self.clock()),
-                                     "intervalo": self.settings.interval, "testnet": self.testnet}
+                                     "intervalo": self.settings.interval, "testnet": self.testnet,
+                                     "upnl_modo": self.settings.upnl_mode}
                 save_state(self.data_dir, state)
             if self.c3 is not None:
                 self._tick_c3(state, cfg)
@@ -1061,14 +1182,17 @@ class RescateService:
 
         self._fijar_base(state, cfg, snap)
         self._tope(state, cfg, snap["capital"], now_ms)
+        self._evaluar_upnl(state, cfg, snap)
 
         if state.get("en_vuelo") or bloqueo:
             return
         if snap["posiciones"] == 0:
             self._devolver(state, snap, now_ms)
         else:
-            # Excluyentes: inyecta con ratio < umbral, devuelve con ratio >= umbral de devolución (mayor).
-            self._inyectar(state, cfg, snap, now_ms)
+            # Excluyentes: inyecta con ratio < umbral, devuelve con ratio >= umbral de devolución (mayor). El disparo
+            # por uPnL solo se mira si el de margen no se cumple (el de margen tiene prioridad, como en el backtest).
+            if not self._inyectar(state, cfg, snap, now_ms):
+                self._inyectar_upnl(state, cfg, snap, now_ms)
             if not state.get("en_vuelo"):
                 self._devolver_parcial(state, cfg, snap, now_ms)
 
@@ -1480,18 +1604,27 @@ class RescateService:
     def _set_cooldown(self, state: Dict[str, Any], tipo: str, until_ms: int) -> None:
         state.setdefault("cooldown_ms", {})[tipo] = until_ms
 
-    def _inyectar(self, state: Dict[str, Any], cfg: Dict[str, Any], snap: Dict[str, Any], now_ms: int) -> None:
+    @staticmethod
+    def _puede_prestar(state: Dict[str, Any], cfg: Dict[str, Any]) -> bool:
+        """Condiciones comunes de los dos disparos: rescate habilitado, base fijada, sin tope disparado ni en
+        confirmación."""
         if not cfg.get("habilitado") or tope_activo(state, cfg) or state.get("tope_confirmacion"):
-            return  # con el tope disparado o en confirmación no se presta más
+            return False  # con el tope disparado o en confirmación no se presta más
         base = state.get("base")
-        if not isinstance(base, dict) or base.get("generacion") != cfg.get("generacion"):
-            return  # sin base fijada el tope no está armado: no se presta
+        # sin base fijada el tope no está armado: no se presta
+        return isinstance(base, dict) and base.get("generacion") == cfg.get("generacion")
+
+    def _inyectar(self, state: Dict[str, Any], cfg: Dict[str, Any], snap: Dict[str, Any], now_ms: int) -> bool:
+        """Disparo de margen. Devuelve True si su condición se cumple (aunque no se inyecte: cooldown, sin reserva):
+        ahí el disparo por uPnL no se mira."""
+        if not self._puede_prestar(state, cfg):
+            return False
         ratio = snap.get("ratio")
         umbral = cfg_dec(cfg, "umbral_ratio")
         if ratio is None or snap["posiciones"] <= 0 or umbral is None or not ratio < umbral:
-            return
+            return False
         if self._cooldown(state, TIPO_INYECCION, now_ms):
-            return
+            return True
         reserva = cfg_dec(cfg, "reserva_max_usdt") or Decimal(0)
         paso = cfg_dec(cfg, "paso_usdt") or Decimal(0)
         disponible = reserva - get_loan(state, self.mode)
@@ -1503,10 +1636,128 @@ class RescateService:
             else:
                 self._alert("sin_reserva", f"Ratio {ratio:.2f} < {umbral} pero no hay USDT libre en spot "
                                            f"({money(snap['spot_eff'])}).")
-            return
+            return True
         self._clear("sin_reserva")
         motivo = f"ratio margen/mantenimiento {ratio:.2f} < {umbral}"
         self._transferir(state, TIPO_INYECCION, amount, snap, now_ms, motivo)
+        return True
+
+    # -- disparo anticipado por uPnL ------------------------------------------------------
+    def _upnl_estado(self, cfg: Dict[str, Any]) -> str:
+        """Estado efectivo del disparo U para este ciclo (off si está deshabilitado en el panel)."""
+        if not cfg.get("upnl_habilitado"):
+            return UPNL_OFF
+        return upnl_estado(self.mode, self.settings.upnl_mode)
+
+    def _upnl_valores(self, state: Dict[str, Any], cfg: Dict[str, Any],
+                      snap: Dict[str, Any]) -> Optional[Dict[str, Decimal]]:
+        """Números del disparo U con la lectura del ciclo (None si la lectura no trae wallet o uPnL).
+
+        ``capital_propio = wallet - préstamo`` (lo que usa passivbot para dimensionar). Dispara si
+        ``uPnL + préstamo <= -X × capital_propio`` y ``capital_propio > 0``. ``upnl_dispara`` es el uPnL en el que
+        sale el próximo paso (``-X × capital_propio - préstamo``).
+        """
+        upnl, wallet = snap.get("upnl"), snap.get("wallet_eff")
+        x_pct, paso = cfg_dec(cfg, "upnl_x_pct"), cfg_dec(cfg, "upnl_paso_usdt")
+        if upnl is None or wallet is None or x_pct is None or paso is None:
+            return None
+        loan = get_loan(state, self.mode)
+        propio = wallet - loan
+        linea = -(x_pct / 100) * propio
+        cubierto = upnl + loan
+        return {"upnl": upnl, "prestamo": loan, "wallet": wallet, "capital_propio": propio, "x_pct": x_pct,
+                "paso": paso, "linea": linea, "cubierto": cubierto, "upnl_dispara": linea - loan,
+                "dispara": propio > 0 and cubierto <= linea}
+
+    def _upnl_guarda(self, valores: Dict[str, Decimal]) -> Decimal:
+        """Lo máximo que puede devolver la devolución parcial sin que el disparo U lo vuelva a pedir:
+        ``uPnL + préstamo + X × capital_propio - paso`` (la guarda del backtest contra el ping-pong)."""
+        return floor_cent(valores["cubierto"] + (valores["x_pct"] / 100) * valores["capital_propio"]
+                          - valores["paso"])
+
+    def _evaluar_upnl(self, state: Dict[str, Any], cfg: Dict[str, Any], snap: Dict[str, Any]) -> None:
+        """Deja la evaluación del disparo U en el estado (para el panel) y avisa si la lectura no alcanza."""
+        upnl_state = state.setdefault("upnl", {})
+        estado = self._upnl_estado(cfg)
+        if estado == UPNL_OFF:
+            upnl_state["eval"] = None
+            upnl_state["registro_escalon"] = 0
+            self._clear("upnl_lectura")
+            return
+        valores = self._upnl_valores(state, cfg, snap)
+        ts = now_iso(self.clock())
+        if valores is None:
+            texto = ("La lectura de futuros no trae totalWalletBalance / totalUnrealizedProfit válidos: el disparo por "
+                     "uPnL queda en pausa (y con él la devolución parcial, que depende de su guarda). El disparo de "
+                     "margen sigue igual.")
+            upnl_state["eval"] = {"ts": ts, "estado": estado, "error": texto}
+            self._alert("upnl_lectura", texto)
+            return
+        self._clear("upnl_lectura", "Disparo por uPnL: lectura de wallet y uPnL recuperada.")
+        eval_ = {"ts": ts, "estado": estado, "error": None, "dispara": bool(valores["dispara"]),
+                 "x_pct": format(valores["x_pct"].normalize(), "f")}
+        for key in ("upnl", "prestamo", "wallet", "capital_propio", "linea", "cubierto", "upnl_dispara", "paso"):
+            eval_[key] = money(valores[key])
+        eval_["devolucion_max_guarda"] = (money(max(Decimal(0), self._upnl_guarda(valores)))
+                                          if estado in (UPNL_SIMULADO, UPNL_REAL) else None)
+        upnl_state["eval"] = eval_
+
+    def _inyectar_upnl(self, state: Dict[str, Any], cfg: Dict[str, Any], snap: Dict[str, Any], now_ms: int) -> None:
+        """Disparo U: con posiciones, sin transferencia en vuelo (lo garantiza el ciclo) y el de margen sin cumplirse,
+        inyecta ``upnl_paso_usdt`` si ``uPnL + préstamo <= -X × (wallet - préstamo)``. Escalera: lo ya prestado
+        cuenta como cubierto, así el paso siguiente sale recién cuando la pérdida vuelve a cruzar la línea. Un
+        minuto (``FUTURESBOARD_RESCATE_UPNL_COOLDOWN_SECONDS``) entre inyecciones U."""
+        upnl_state = state.setdefault("upnl", {})
+        estado = self._upnl_estado(cfg)
+        if estado == UPNL_OFF or not self._puede_prestar(state, cfg) or snap["posiciones"] <= 0:
+            return
+        valores = self._upnl_valores(state, cfg, snap)
+        if valores is None:
+            return  # avisado en _evaluar_upnl
+        if not valores["dispara"]:
+            upnl_state["registro_escalon"] = 0
+            return
+        x_txt = format(valores["x_pct"].normalize(), "f")
+        motivo = (f"rescate anticipado por uPnL: uPnL {money(valores['upnl'])} + préstamo {money(valores['prestamo'])} "
+                  f"= {money(valores['cubierto'])} <= -{x_txt}% × capital propio de futuros "
+                  f"{money(valores['capital_propio'])} = {money(valores['linea'])}")
+        reserva = cfg_dec(cfg, "reserva_max_usdt") or Decimal(0)
+        disponible = reserva - valores["prestamo"]
+        if estado == UPNL_REGISTRA:
+            self._upnl_registrar(state, valores, disponible, motivo)
+            return
+        if self._cooldown(state, TIPO_INYECCION, now_ms) or self._cooldown(state, COOLDOWN_UPNL, now_ms):
+            return
+        amount = floor_cent(min(valores["paso"], disponible, snap["spot_eff"]))
+        if amount < MIN_INYECCION:
+            if disponible < MIN_INYECCION:
+                self._alert("sin_reserva_upnl", f"Disparo por uPnL cumplido ({motivo}) pero la reserva máxima "
+                                                f"({money(reserva)} USDT) ya está prestada: no se inyecta más.")
+            else:
+                self._alert("sin_reserva_upnl", f"Disparo por uPnL cumplido ({motivo}) pero no hay USDT libre en "
+                                                f"spot ({money(snap['spot_eff'])}).")
+            return
+        self._clear("sin_reserva_upnl")
+        self._set_cooldown(state, COOLDOWN_UPNL, now_ms + self.settings.upnl_cooldown_seconds * 1000)
+        self._transferir(state, TIPO_INYECCION, amount, snap, now_ms, motivo, disparo=DISPARO_UPNL)
+
+    def _upnl_registrar(self, state: Dict[str, Any], valores: Dict[str, Decimal], disponible: Decimal,
+                        motivo: str) -> None:
+        """Modo ``registra`` (servicio en real, U en dry_run): no transfiere. Registra y avisa una vez por escalón:
+        cuántos pasos habría inyectado ya el disparo real (``⌊déficit / paso⌋ + 1``)."""
+        upnl_state = state.setdefault("upnl", {})
+        deficit = valores["linea"] - valores["cubierto"]
+        escalon = int(deficit // valores["paso"]) + 1
+        previo = upnl_state.get("registro_escalon")
+        previo = previo if isinstance(previo, int) and not isinstance(previo, bool) else 0
+        if escalon <= previo:
+            return
+        upnl_state["registro_escalon"] = escalon
+        texto = (f"HARÍA inyección por uPnL (escalón {escalon}, {money(valores['paso'])} USDT por paso; reserva "
+                 f"disponible {money(max(Decimal(0), disponible))} USDT): {motivo}. No se transfirió nada: "
+                 f"{ENV_UPNL_MODE}=dry_run.")
+        self._event(state, "upnl", texto, MODE_DRY_RUN)
+        self._notify(f"🛟 <b>Rescate</b>: {esc(texto)}", True)
 
     def _devolver(self, state: Dict[str, Any], snap: Dict[str, Any], now_ms: int) -> None:
         loan = get_loan(state, self.mode)
@@ -1546,12 +1797,24 @@ class RescateService:
         por_ratio = floor_cent(snap["margin_eff"] - umbral_dev * maint)
         max_withdraw = floor_cent(snap["max_withdraw_eff"])
         amount = min(floor_cent(loan), max_withdraw, por_ratio)
+        por_guarda: Optional[Decimal] = None
+        if self._upnl_estado(cfg) in (UPNL_SIMULADO, UPNL_REAL) and cfg.get("habilitado"):
+            # Guarda contra el ping-pong con el disparo U: sin ella, a -X% de uPnL el ratio suele quedar arriba del
+            # umbral de devolución y lo inyectado volvía a spot a los 10 min para re-inyectarse al minuto siguiente
+            # (backtest: hasta 10.322 idas y vueltas por ventana). Sin wallet/uPnL no se evalúa: no se devuelve.
+            valores = self._upnl_valores(state, cfg, snap)
+            if valores is None:
+                return
+            por_guarda = self._upnl_guarda(valores)
+            amount = min(amount, por_guarda)
         if amount < self.settings.devolucion_min_usdt:
             return
         if amount == floor_cent(loan):
             limite = "devuelve todo el préstamo"
         elif amount == max_withdraw:
             limite = f"limitada por maxWithdrawAmount {money(max_withdraw)}"
+        elif por_guarda is not None and amount == por_guarda:
+            limite = "limitada por la guarda del disparo por uPnL (no devuelve lo que volvería a pedir)"
         else:
             limite = f"limitada por el umbral de devolución {umbral_dev}"
         queda = (snap["margin_eff"] - amount) / maint
@@ -1561,7 +1824,7 @@ class RescateService:
         self._transferir(state, TIPO_DEVOLUCION, amount, snap, now_ms, motivo)
 
     def _transferir(self, state: Dict[str, Any], tipo: str, amount: Decimal, snap: Dict[str, Any], now_ms: int,
-                    motivo: str) -> None:
+                    motivo: str, disparo: Optional[str] = None) -> None:
         entry: Dict[str, Any] = {
             "id": secrets.token_hex(8),
             "tipo": tipo,
@@ -1577,6 +1840,8 @@ class RescateService:
             "chequeos": 0,
             "prestamo_aplicado": False,
         }
+        if disparo is not None:
+            entry["disparo"] = disparo  # solo el disparo U lo marca (las inyecciones sin marca son de margen)
         if self.mode == MODE_DRY_RUN:
             # No se llama a /sapi: se registra lo que HARÍA y se actualiza el préstamo simulado.
             self._finalizar(state, entry, "simulada", None, f"Simulación ({motivo}).")
@@ -1631,12 +1896,15 @@ class RescateService:
 
     def _registrar(self, state: Dict[str, Any], entry: Dict[str, Any], estado: str, tran_id: Optional[int],
                    detalle: str) -> None:
-        state["ledger"].append({
+        row = {
             "id": entry["id"], "ts": now_iso(self.clock()), "creada_en": entry.get("creada_en"),
             "tipo": entry["tipo"], "modo": entry["modo"], "monto": entry["monto"], "estado": estado,
             "tranId": tran_id, "detalle": detalle[:300],
             "prestamo_despues": money(get_loan(state, entry["modo"])),
-        })
+        }
+        if entry.get("disparo"):
+            row["disparo"] = entry["disparo"]
+        state["ledger"].append(row)
         state["ledger"] = state["ledger"][-MAX_LEDGER:]
 
     def _finalizar(self, state: Dict[str, Any], entry: Dict[str, Any], estado: str, tran_id: Optional[int],
@@ -1651,6 +1919,10 @@ class RescateService:
                 # devolvería en el ciclo siguiente el margen recién inyectado (justo antes de una segunda caída).
                 self._set_cooldown(state, COOLDOWN_PARCIAL,
                                    self._now_ms() + self.settings.devolucion_cooldown_seconds * 1000)
+                if entry.get("disparo") == DISPARO_UPNL:
+                    state.setdefault("upnl", {})["ultima_inyeccion"] = {
+                        "ts": now_iso(self.clock()), "monto": entry["monto"], "modo": mode, "tranId": tran_id,
+                        "motivo": str(entry.get("motivo") or "")[:300]}
             else:
                 self._revertir_prestamo(state, entry)
         elif ok:
@@ -1843,10 +2115,24 @@ def panel_status(data_dir: pathlib.Path, now: Optional[float] = None) -> Dict[st
             tope_pct = format(pct.normalize(), "f")
     except ValueError:
         base_vigente, limite, tope_pct, por_prestamo = None, None, None, False
+    upnl_state = state.get("upnl") if isinstance(state.get("upnl"), dict) else {}
+    upnl_modo = (servicio or {}).get("upnl_modo")
+    upnl_eval = upnl_state.get("eval") if isinstance(upnl_state.get("eval"), dict) else None
+    ultima_u = upnl_state.get("ultima_inyeccion")
+    upnl = {
+        "habilitado": bool(cfg.get("upnl_habilitado")),
+        "modo": upnl_modo,  # FUTURESBOARD_RESCATE_UPNL_MODE del servicio (None: servicio sin latido todavía)
+        # Estado efectivo según los modos y el panel: off / registra / simulado / real.
+        "estado": upnl_estado(modo, upnl_modo) if cfg.get("upnl_habilitado") else UPNL_OFF,
+        "eval": upnl_eval,  # última evaluación del servicio (vieja si el servicio no late: ver servicio.vivo)
+        "ultima_inyeccion": ultima_u if isinstance(ultima_u, dict) else None,
+    }
     return {
         "config": {k: cfg.get(k) for k in ("habilitado", "generacion", "reserva_max_usdt", "paso_usdt",
                                             "umbral_ratio", "umbral_devolucion_ratio", "tope_perdida_pct",
+                                            "upnl_habilitado", "upnl_x_pct", "upnl_paso_usdt",
                                             "actualizado_en", "actualizado_por")},
+        "upnl": upnl,
         "limites": {k: [str(lo), str(hi)] for k, (lo, hi) in LIMITES.items()},
         "errores": [e for e in (cfg_err, state_err) if e],
         "servicio": {"modo": modo, "vivo": vivo, "heartbeat": (servicio or {}).get("heartbeat"),
@@ -2004,6 +2290,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     settings = RescateSettings()
     if settings.mode_error:
         log.error("%s", settings.mode_error)
+    if settings.upnl_mode_error:
+        log.error("%s", settings.upnl_mode_error)
     config = _load_app_config()
 
     if args.comando == "simular-inyeccion":
@@ -2015,6 +2303,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     telegram_notify.log_startup_state(log)
     log.info("Rescate iniciado: modo %s, intervalo %ss, loan_state %s, datos %s, testnet %s.", settings.mode,
              settings.interval, settings.loan_state_path, service.data_dir, service.testnet)
+    log.info("Disparo por uPnL: modo %s (estado efectivo %s si se habilita en el panel), %ss entre inyecciones U.",
+             settings.upnl_mode, upnl_estado(settings.mode, settings.upnl_mode), settings.upnl_cooldown_seconds)
     if service.c3 is not None:
         log.info("C3 (stop con reinicio): modo %s, latido %s, pares %s.", service.c3.mode,
                  service.c3.settings.heartbeat_path, ",".join(service.c3.settings.pares))

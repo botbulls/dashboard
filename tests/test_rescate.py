@@ -37,6 +37,8 @@ class FakeRescateBinance:
 
     def __init__(self):
         self.margin = Decimal("2000")
+        self.upnl = Decimal("0")       # totalUnrealizedProfit (wallet = margin - upnl)
+        self.omitir_upnl = False       # True: la respuesta no trae totalWalletBalance / totalUnrealizedProfit
         self.maint = Decimal("1000")
         self.max_withdraw = Decimal("1500")
         self.positions = {"BTCUSDT": "0.5"}
@@ -86,13 +88,16 @@ class FakeRescateBinance:
             return FakeResponse(500, {"code": -1001, "msg": "Internal error"})
         if (method, u.path) == ("GET", "/fapi/v2/account"):
             assert base == FUT
-            return FakeResponse(200, {
+            cuenta = {
                 "totalMarginBalance": str(self.margin), "totalMaintMargin": str(self.maint),
                 "maxWithdrawAmount": str(self.max_withdraw), "availableBalance": str(self.max_withdraw),
-                "totalWalletBalance": str(self.margin),
+                "totalWalletBalance": str(self.margin - self.upnl), "totalUnrealizedProfit": str(self.upnl),
                 "positions": [{"symbol": s, "positionAmt": a} for s, a in self.positions.items()]
                 + [{"symbol": "ETHUSDT", "positionAmt": "0"}],
-            })
+            }
+            if self.omitir_upnl:
+                del cuenta["totalWalletBalance"], cuenta["totalUnrealizedProfit"]
+            return FakeResponse(200, cuenta)
         assert base == SPOT, f"{u.path} tiene que ir a spot, fue a {base}"
         if (method, u.path) == ("GET", "/api/v3/account"):
             return FakeResponse(200, {"balances": [{"asset": "BNB", "free": "1", "locked": "0"},
@@ -172,11 +177,12 @@ class Harness:
                                       apagar=self.apagar if apagar else None,
                                       send=lambda t: self.sent.append(t) or True, clock=self.clock)
 
-    def configurar(self, habilitado=True, reserva=5000, paso=1000, umbral=8, devolucion=16, tope=30):
-        parsed = rescate.validate_config_body({"habilitado": habilitado, "reserva_max_usdt": reserva,
-                                               "paso_usdt": paso, "umbral_ratio": umbral,
-                                               "umbral_devolucion_ratio": devolucion,
-                                               "tope_perdida_pct": tope})
+    def configurar(self, habilitado=True, reserva=5000, paso=1000, umbral=8, devolucion=16, tope=30, upnl=None):
+        body = {"habilitado": habilitado, "reserva_max_usdt": reserva, "paso_usdt": paso, "umbral_ratio": umbral,
+                "umbral_devolucion_ratio": devolucion, "tope_perdida_pct": tope}
+        if upnl is not None:  # disparo por uPnL: {"upnl_habilitado", "upnl_x_pct", "upnl_paso_usdt"}
+            body.update(upnl)
+        parsed = rescate.validate_config_body(body)
         return rescate.save_config(self.data_dir, parsed, "cliente17")
 
     def state(self):

@@ -158,6 +158,8 @@ Un ciclo cada `FUTURESBOARD_RESCATE_INTERVAL` segundos (default 15). En cada cic
    tope activo ni en confirmación, hay posiciones y `totalMarginBalance / totalMaintMargin < umbral` (estricto: en el umbral
    exacto no inyecta). Monto = `min(paso, reserva_max - préstamo, USDT libre en spot)`, redondeado hacia
    abajo a centavos; menos de 1 USDT no se inyecta (aviso único de "reserva agotada" o "sin USDT en spot").
+   Si esta condición no se cumple, se mira el [disparo anticipado por uPnL](#disparo-anticipado-por-upnl)
+   (opcional, apagado por default).
 6. **Devolución** (futuros → spot, `UMFUTURE_MAIN`) cuando la cuenta de futuros no tiene posiciones y
    hay préstamo: `min(préstamo, maxWithdrawAmount)`. Si no alcanza, sigue en los ciclos siguientes. La
    devolución sigue aunque el rescate esté deshabilitado o con el tope disparado (es plata prestada).
@@ -197,6 +199,106 @@ Un ciclo cada `FUTURESBOARD_RESCATE_INTERVAL` segundos (default 15). En cada cic
      mínimo).
    - Sigue con el rescate deshabilitado (es plata prestada), pero **no** con el tope en confirmación o
      disparado: ahí no se mueve plata entre wallets.
+
+## Disparo anticipado por uPnL
+
+!!! warning "Apagado por default. Herramienta, no asesor"
+    Se validó en backtest solo con TWE 2, 3 y 4 sobre 10k (más 10k de reserva). Prod hoy corre con `twe_long` 12, y
+    con eso **no está validado**. En el backtest no salvó ninguna ventana más que el disparo de margen, y el capital
+    final dio igual con cualquier X y paso. Solo cambia cuánta reserva ya está en futuros cuando llega la mecha.
+
+Es un segundo disparo de inyección, además del de margen (`equity / mantenimiento < umbral`). El de margen tiene
+prioridad: en un ciclo se mira el de uPnL solo si el de margen no se cumple, y nunca hay dos transferencias a la vez.
+
+**Regla.** Con el rescate habilitado, la base fijada, sin tope disparado ni en confirmación, con posiciones abiertas
+y sin transferencia en vuelo:
+
+```
+capital_propio = totalWalletBalance - préstamo          (lo mismo con lo que dimensiona passivbot)
+inyecta upnl_paso_usdt si  capital_propio > 0  y  totalUnrealizedProfit + préstamo <= -X% × capital_propio
+```
+
+- **Escalera.** Lo ya prestado (por cualquiera de los dos disparos) cuenta como cubierto. La primera inyección sale
+  con `uPnL <= -X% × capital_propio`; la `n+1`, con `uPnL <= -X% × capital_propio - n × paso`. Con la condición
+  literal, sin descontar lo prestado, se seguiría cumpliendo después de inyectar y vaciaría la reserva en minutos.
+- **Monto:** `min(upnl_paso_usdt, reserva_max - préstamo, USDT libre en spot)`, en centavos hacia abajo; menos de
+  1 USDT no se inyecta (aviso único).
+- **Espera:** `FUTURESBOARD_RESCATE_UPNL_COOLDOWN_SECONDS` (60 s) entre inyecciones de este disparo. Un rechazo de
+  Binance frena las dos reglas 5 min, como siempre.
+- La transferencia es una inyección más: el mismo ledger (con `"disparo": "upnl"`), la misma conciliación, el
+  préstamo publicado antes del `POST` y el mismo `loan_state.json`
+  ([sin cambios de contrato](contratos.md#el-disparo-por-upnl-no-cambia-este-contrato)).
+
+**Guarda de la devolución parcial.** Con el disparo transfiriendo (estados `simulado` o `real`), la devolución
+parcial no devuelve lo que la regla volvería a pedir:
+
+```
+r <= uPnL + préstamo + X% × capital_propio - upnl_paso_usdt
+```
+
+Sin la guarda hay ping-pong: a -50 % de uPnL el ratio suele quedar arriba de 32, lo inyectado vuelve a spot a los
+10 min y se re-inyecta al minuto siguiente. En el backtest, con la devolución parcial de siempre y sin guarda, una
+ventana llegó a 10.322 inyecciones (6.238 idas y vueltas); con la guarda, como mucho 44. Con X 70 % casi no aparece
+(como mucho 1 ida y vuelta por ventana), pero la guarda queda igual por si se baja X. El cooldown de 10 min después
+de cada inyección sigue igual.
+
+**Lectura.** Usa `totalWalletBalance` y `totalUnrealizedProfit` de `GET /fapi/v2/account`, que el resto del rescate
+no necesita. Si faltan o son inválidos, el disparo por uPnL queda en pausa con un aviso. La devolución parcial
+también se pausa, porque depende de la guarda. El disparo de margen y el tope siguen igual.
+
+### Modos (`FUTURESBOARD_RESCATE_UPNL_MODE`)
+
+Tiene su propio modo, aparte de `FUTURESBOARD_RESCATE_MODE`, para probarlo en `dry_run` con el rescate ya en `real`.
+Además hay que habilitarlo en el panel (`upnl_habilitado`).
+
+| Servicio | `UPNL_MODE` | Estado | Qué hace |
+|---|---|---|---|
+| cualquiera | `off` (default) | off | No se evalúa. |
+| `off` | cualquiera | off | El rescate no opera. |
+| `real` | `dry_run` | registra | No transfiere ni aplica la guarda: nada cambia en la cuenta real. Registra y avisa por Telegram (`[SIMULACIÓN]`) una vez por escalón lo que HARÍA: "escalón n" = cuántos pasos habría inyectado ya el disparo real. |
+| `dry_run` | `dry_run` o `real` | simulado | Inyecciones simuladas sobre el préstamo simulado, con escalera y guarda, como el resto del `dry_run`. |
+| `real` | `real` | real | Transfiere de verdad. |
+
+Orden sugerido: `registra` unos días con la cuenta real y, si los avisos tienen sentido, `real`.
+
+### Diferencias con el backtest
+
+| Backtest (`botbulls-lab/multianual/rescate_upnl`) | Servicio |
+|---|---|
+| Decide al inicio de cada minuto con el close (last price) del minuto anterior | Cada 15 s con el `totalUnrealizedProfit` de Binance, que se calcula con el mark price |
+| Monto `min(paso, reserva, tope de préstamo - prestado)` | Monto `min(paso, reserva - préstamo, USDT libre en spot)` |
+| Devolución parcial: 10 min desde la última inyección | Igual (`FUTURESBOARD_RESCATE_DEVOLUCION_COOLDOWN_SECONDS`, contado desde la confirmación) |
+
+### Por qué estos defaults (X 70 %, paso 1.000)
+
+Backtest multianual 2021-2026: passivbot v6.1 clock en wallet compartida BNB/BTC/ETH/XRP, apalancamiento 10,
+10k en futuros + 10k de reserva. 36 ventanas de 12 meses más el camino continuo, en tres escenarios: base, demora
+de 5 min en las transferencias y mechas de mark 1,5 % más profundas (`mark985`). Grilla: TWE 3 y 4 × X 30/50/70 ×
+paso 1.000/2.500 × sin tope / tope 60 %. Con la regla fijada antes de correr, sobre IS (hasta 2023-11-10), salió
+**X 70 %, paso 1.000**: mayor mediana del capital final y, como desempate, menos reserva usada. En OOS se confirmó:
+0 liquidaciones en los tres escenarios y una mediana pareada contra el disparo de margen solo de 0.
+
+- No salva ninguna ventana más que el disparo de margen. En `mark985`, ene-feb 2026, TWE 4 sin rescate se
+  liquidó en 3 de 36 ventanas. Las salvaron por igual el de margen solo y todas las variantes con uPnL. En el
+  camino continuo `mark985` se liquidan todas igual el 2026-02-06: 10k de reserva es poco frente a la wallet ya
+  compuesta.
+- El capital final es el mismo con cualquier X y paso, porque passivbot dimensiona sin el préstamo. X y paso solo
+  deciden cuánta reserva ya está en futuros cuando llega la mecha, cuánto tiempo queda prestada y cuántas
+  transferencias hay.
+- Colchón de margen, como equity / mantenimiento mínimo en la peor ventana de `mark985` con TWE 4:
+
+  | Disparo | eq/MM mínimo |
+  |---|---|
+  | Margen solo | 2,2 |
+  | uPnL X 70 % / 1.000 | 3,5 |
+  | uPnL X 50 % / 1.000 | 14,2 |
+  | uPnL X 30 % / 1.000 | 32,9 |
+
+  Un X más bajo presta antes y más seguido: más colchón, más tiempo con la reserva en futuros y más transferencias.
+- Con TWE 2 no inyectó nunca: 0 inyecciones en las 36 ventanas.
+
+Las mejoras de riesgo que se evaluaron después ([contratos.md](contratos.md#lo-que-no-se-introdujo-loan_state-v2-sizing_state))
+se midieron todas con este disparo (X 70 %, paso 1.000) como rescate de referencia.
 
 ### Préstamo y transferencias (sin idempotencia en Binance)
 
@@ -242,7 +344,10 @@ reinicio sobre futuros (C3) corre en este mismo servicio: ver [c3.md](c3.md).
 Sección **Rescate (colchón)** del menú lateral (`/rescate`, con login). Muestra modo y latido del
 servicio, ratio margen/mantenimiento vs los umbrales de inyección y de devolución, posiciones, préstamo
 pendiente, USDT libre en spot, capital total vs base y límite del tope, la transferencia en vuelo, el motivo de bloqueo y los últimos
-eventos. Si hay un tope en confirmación, lo muestra con el capital del cruce, la última lectura y desde
+eventos. La fila **Disparo por uPnL** muestra su estado (off / registra / simulado / real), el uPnL, el uPnL en el
+que sale el próximo paso, hasta cuánto deja devolver la guarda y la última inyección por uPnL; en la configuración
+están el interruptor, X y el paso. En el dashboard principal aparece la tarjeta **Disparo por uPnL** solo si está
+habilitado en el panel. Si hay un tope en confirmación, lo muestra con el capital del cruce, la última lectura y desde
 cuándo se puede ejecutar (y aclara si el servicio no late y nadie la está evaluando). Si hay un tope
 disparado, lo muestra con el resultado del Apagar y el
 botón para reconocerlo.
@@ -250,7 +355,7 @@ botón para reconocerlo.
 | Método | Ruta | Body | Efecto |
 |---|---|---|---|
 | GET | `/api/rescate/status` | – | Estado para la UI (lee los archivos, no consulta Binance). |
-| POST | `/api/rescate/config` | `{"habilitado", "reserva_max_usdt", "paso_usdt", "umbral_ratio", "umbral_devolucion_ratio", "tope_perdida_pct"}` | Guarda la config. Habilitar (false → true) abre una generación nueva = base nueva. |
+| POST | `/api/rescate/config` | `{"habilitado", "reserva_max_usdt", "paso_usdt", "umbral_ratio", "umbral_devolucion_ratio", "tope_perdida_pct"}` y, opcionales y juntos, `"upnl_habilitado", "upnl_x_pct", "upnl_paso_usdt"` | Guarda la config. Habilitar (false → true) abre una generación nueva = base nueva. Sin los campos `upnl_*` se conservan los guardados. |
 | POST | `/api/rescate/reconocer-tope` | `{"id": "<id del tope>"}` | Desbloquea START y deshabilita el rescate. |
 
 Todos los POST exigen sesión, `X-CSRF-Token` y JSON (igual que el panel de passivbot) y quedan en
@@ -266,6 +371,14 @@ Validación estricta (400 si no se cumple): todos los campos presentes y ninguno
 | `umbral_ratio` | 1,2 – 10 (Binance liquida en 1) | 8 |
 | `umbral_devolucion_ratio` | 2 – 100 y **mayor** que `umbral_ratio` | 32 |
 | `tope_perdida_pct` | 1 – 80 | (obligatorio para habilitar) |
+| `upnl_habilitado` | booleano | `false` |
+| `upnl_x_pct` | 10 – 95 (% del capital propio de futuros) | 70 |
+| `upnl_paso_usdt` | 10 – 1.000.000 y ≤ reserva (también con los guardados) | 1000 |
+
+Los tres campos `upnl_*` van juntos o no van: si falta alguno, 400. Sin ninguno se conservan los guardados, así una
+pestaña abierta antes del deploy no puede prender ni apagar el disparo por uPnL. Una config guardada antes de que
+existieran lo toma apagado con los defaults de la tabla. Un valor `upnl_*` inválido en el archivo invalida la config
+entera: rescate deshabilitado con el error en el panel, como con cualquier otro campo.
 
 Los defaults solo se usan mientras no hay nada guardado: una config ya guardada conserva sus valores
 (por ejemplo, un umbral 3 guardado antes de que el default pasara a 8 sigue en 3 hasta cambiarlo en el panel).
@@ -290,6 +403,8 @@ Todas fail-closed: un valor inválido nunca habilita más de lo pedido.
 | `FUTURESBOARD_RESCATE_LOAN_STATE` | `/rescate/loan_state.json` | Dónde se escribe el contrato para passivbot. |
 | `FUTURESBOARD_RESCATE_DEVOLUCION_MIN_USDT` | `100` | Mínimo por devolución parcial (1–1.000.000). Vacío, no entero o menor que 1 = 100. |
 | `FUTURESBOARD_RESCATE_DEVOLUCION_COOLDOWN_SECONDS` | `600` | Espera entre devoluciones parciales (0–86.400). Vacío, no entero o negativo = 600. |
+| `FUTURESBOARD_RESCATE_UPNL_MODE` | `off` | Disparo anticipado por uPnL: `off` \| `dry_run` (con el servicio en real, solo registra) \| `real`. Cualquier otro valor = `off` + error en el log. Ver [Modos](#modos-futuresboard_rescate_upnl_mode). |
+| `FUTURESBOARD_RESCATE_UPNL_COOLDOWN_SECONDS` | `60` | Espera entre inyecciones del disparo por uPnL (0–3.600). Vacío, no entero o negativo = 60; más de 3.600 = 3.600. |
 | `FUTURESBOARD_RESCATE_TOPE_CONFIRM_SECONDS` | `60` | Confirmación del tope (0–600). `0` = disparo inmediato. Vacío, no entero o negativo = 60; más de 600 = 600. Espera máxima sin lecturas: `max(5 × valor, 300)` s. |
 | `FUTURESBOARD_RESCATE_SPOT_URL` | `https://api.binance.com` (`https://demo-api.binance.com` con testnet) | Base de spot y `/sapi`. |
 | `FUTURESBOARD_DOCKER_URL` / `FUTURESBOARD_PASSIVBOT_CONTAINER` | (vacía) / `client17-passivbot` | Necesarias para que el tope ejecute Apagar. Sin `FUTURESBOARD_DOCKER_URL`, `real` no transfiere. |
@@ -297,7 +412,7 @@ Todas fail-closed: un valor inválido nunca habilita más de lo pedido.
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `TELEGRAM_PREFIX` | (vacías) | Avisos (ver [notificaciones.md](notificaciones.md)). |
 | `FUTURESBOARD_CONFIG_DIR` | `./config` | Directorio de `config.json` (API key/secret, `EXCHANGE`, testnet). El estado y el lock van junto a la DB. |
 
-Telegram: un aviso por inyección, devolución (total o parcial, con el ratio antes y después),
+Telegram: un aviso por inyección (de margen o por uPnL, con el motivo), devolución (total o parcial, con el ratio antes y después),
 transferencia rechazada o incierta, tope en confirmación,
 confirmación cancelada, disparo del tope y resultado del Apagar, y por cambios de estado (lectura caída / recuperada, bloqueo, reserva agotada),
 sin repetir el mismo aviso cada ciclo. En `dry_run` todos llevan `[SIMULACIÓN]`.
@@ -323,6 +438,7 @@ services:
       FUTURESBOARD_RESCATE_MODE: dry_run            # off | dry_run | real (real: bloqueado en Demo)
       FUTURESBOARD_RESCATE_INTERVAL: "15"
       FUTURESBOARD_RESCATE_TOPE_CONFIRM_SECONDS: "60"   # 0 = tope sin confirmación (Apagar inmediato)
+      FUTURESBOARD_RESCATE_UPNL_MODE: "off"         # disparo por uPnL: off | dry_run (solo registra) | real
       FUTURESBOARD_RESCATE_LOAN_STATE: /rescate/loan_state.json
       FUTURESBOARD_DOCKER_URL: http://docker-proxy:2375
       FUTURESBOARD_PASSIVBOT_CONTAINER: client17-passivbot
