@@ -2,7 +2,8 @@
 {% block title %}Rescate (colchón){% endblock %}
 {% block bajada %}<p>Préstamo de spot a futuros cuando el margen se acerca a la liquidación, con tope de pérdida total.</p>{% endblock %}
 {% block content %}
-    {# Avisos que piden acción primero (los muestra el JS con d-none); después la explicación, corta y con el detalle plegado. #}
+    {# Avisos que piden acción primero, del rescate y de C3 (los muestra el JS con d-none: el lugar en el DOM no importa);
+       después la explicación, corta y con el detalle plegado. #}
     <div class="alert alert-danger d-none bb-alerta-accion" id="rescateTope" role="alert" aria-live="assertive">
         <h2 class="alert-heading"><i class="fas fa-exclamation-triangle me-2" aria-hidden="true"></i>Tope de pérdida disparado</h2>
         <p class="mb-2" data-r="tope-texto"></p>
@@ -23,6 +24,17 @@
     </div>
 
     <div id="rescateErrores" class="alert alert-danger d-none" role="alert"></div>
+    <div class="alert alert-danger d-none bb-alerta-accion" id="c3Corte" role="alert" aria-live="assertive">
+        <h2 class="alert-heading"><i class="fas fa-stop-circle me-2" aria-hidden="true"></i>C3 parado (stop con reinicio)</h2>
+        <p class="mb-1" data-c3="corte-texto"></p>
+        <p class="mb-0" data-c3="corte-reinicio"></p>
+        <a class="bb-tarjeta__link" href="#c3">Ver C3</a>
+    </div>
+    <div class="alert alert-warning d-none bb-alerta-accion" id="c3Confirmacion" role="status" aria-live="polite">
+        <h2 class="alert-heading"><i class="fas fa-hourglass-half me-2" aria-hidden="true"></i>Piso de C3 en confirmación</h2>
+        <p class="mb-0" data-c3="confirmacion-texto"></p>
+    </div>
+    <div id="c3Errores" class="alert alert-danger d-none" role="alert"></div>
 
     <div class="bb-alerta bb-alerta--aviso" role="note">
         <i class="fas fa-exclamation-triangle" aria-hidden="true"></i>
@@ -144,16 +156,6 @@
     </div>
 
     <h2 class="bb-seccion__titulo mt-2" id="c3"><i class="fas fa-redo-alt" aria-hidden="true"></i> Stop con reinicio (C3)</h2>
-    <div class="alert alert-danger d-none bb-alerta-accion" id="c3Corte" role="alert" aria-live="assertive">
-        <h2 class="alert-heading"><i class="fas fa-stop-circle me-2" aria-hidden="true"></i>C3 parado</h2>
-        <p class="mb-1" data-c3="corte-texto"></p>
-        <p class="mb-0" data-c3="corte-reinicio"></p>
-    </div>
-    <div class="alert alert-warning d-none bb-alerta-accion" id="c3Confirmacion" role="status" aria-live="polite">
-        <h2 class="alert-heading"><i class="fas fa-hourglass-half me-2" aria-hidden="true"></i>Piso de C3 en confirmación</h2>
-        <p class="mb-0" data-c3="confirmacion-texto"></p>
-    </div>
-    <div id="c3Errores" class="alert alert-danger d-none" role="alert"></div>
     <div class="bb-alerta bb-alerta--aviso" role="note">
         <i class="fas fa-exclamation-triangle" aria-hidden="true"></i>
         <div>
