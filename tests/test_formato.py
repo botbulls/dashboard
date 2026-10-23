@@ -115,3 +115,46 @@ def test_formato_js_coincide_con_python():
     js = json.loads(out)
     py = [str(getattr(formato, f)(v, dec=o.get("dec"), signo=o.get("signo", False))) for f, v, o in casos]
     assert js == py
+
+
+def _node(expr):
+    script = ("global.window = {}; global.getComputedStyle = () => ({});" + JS.read_text(encoding="utf-8")
+              + ";const f=window.BB.fmt;const eje=(vs)=>{const t=vs.map((v)=>({value:v}));"
+              "return vs.map((v,i)=>f.usdEje(v,i,t));};console.log(JSON.stringify(" + expr + "));")
+    out = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30, check=True).stdout
+    return json.loads(out)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="sin node")
+@pytest.mark.parametrize("ticks,esperado", [
+    # Ganancias diarias entre 0,05 y 0,35: antes los 5 ticks decían "$0".
+    ([0, 0.1, 0.2, 0.3, 0.4], ["$0,00", "$0,10", "$0,20", "$0,30", "$0,40"]),
+    # Con −0,69 en los datos el eje ya no redondea a −$1 / $0 / $1.
+    ([-1, -0.5, 0, 0.5, 1, 1.5], [M + "$1,00", M + "$0,50", "$0,00", "$0,50", "$1,00", "$1,50"]),
+    # Balance que casi no se mueve: antes "$5.416, $5.416, $5.416, $5.417, $5.417".
+    ([5416.2, 5416.4, 5416.6, 5416.8, 5417], ["$5.416,20", "$5.416,40", "$5.416,60", "$5.416,80", "$5.417,00"]),
+    ([-0.4, -0.2, -2.7e-17, 0.2], [M + "$0,40", M + "$0,20", "$0,00", "$0,20"]),  # 0 con ruido: sin "−$0"
+    ([0, 1000, 2000], ["$0", "$1.000", "$2.000"]),  # pasos enteros: sin decimales
+    ([0, 0.025, 0.05], ["$0,000", "$0,025", "$0,050"]),
+])
+def test_eje_de_montos_con_los_decimales_que_distinguen_los_ticks(ticks, esperado):
+    js = _node("eje(" + json.dumps(ticks) + ")")
+    assert js == esperado
+    assert len(set(js)) == len(js)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="sin node")
+def test_fechas_de_los_graficos_con_anio_si_el_rango_cruza_anios():
+    assert _node('f.dias(["2026-10-22","2026-10-23"])') == ["22/10", "23/10"]
+    assert _node('f.dias(["2025-10-23","2026-10-23"])') == ["23/10/25", "23/10/26"]
+    assert _node('[f.fecha("2026-10-23"), f.fecha("x"), f.dias(["x"])]') == ["23/10/2026", "x", ["x"]]
+
+
+def test_ningun_eje_de_grafico_redondea_a_cero_decimales():
+    plantillas = pathlib.Path(__file__).resolve().parents[1] / "src" / "futuresboard" / "templates"
+    for p in plantillas.glob("*.html"):
+        s = p.read_text(encoding="utf-8")
+        assert "dec: 0" not in s, p.name
+        assert "etiquetaDia" not in s, p.name
+    for nombre in ("home.html", "coin.html", "projection.html"):
+        assert "callback: f.usdEje" in (plantillas / nombre).read_text(encoding="utf-8"), nombre

@@ -343,7 +343,6 @@
             (function () {
                 const f = window.BB.fmt;
                 let grafico = null;
-                const etiquetaDia = (d) => (typeof d === 'string' && d.length >= 10 ? d.slice(8, 10) + '/' + d.slice(5, 7) : d);
                 function pintar() {
                     const T = f.token;
                     const gana = T('--bb-gain-mark'), pierde = T('--bb-loss-mark'), texto3 = T('--bb-text-3');
@@ -351,7 +350,7 @@
                     if (grafico) grafico.destroy();
                     grafico = new Chart(document.getElementById('lineChart'), {
                         type: 'bar',
-                        data: { labels: DIAS_MONEDA.map(etiquetaDia), datasets: [{ label: 'Ganancia', data: DIARIO_MONEDA, backgroundColor: DIARIO_MONEDA.map((v) => (v < 0 ? pierde : gana)), borderRadius: 4, maxBarThickness: 40 }] },
+                        data: { labels: f.dias(DIAS_MONEDA), datasets: [{ label: 'Ganancia', data: DIARIO_MONEDA, backgroundColor: DIARIO_MONEDA.map((v) => (v < 0 ? pierde : gana)), borderRadius: 4, maxBarThickness: 40 }] },
                         options: {
                             maintainAspectRatio: false, animation: false,
                             plugins: {
@@ -359,12 +358,12 @@
                                 tooltip: {
                                     backgroundColor: T('--bb-surface'), titleColor: T('--bb-text'), bodyColor: T('--bb-text'),
                                     borderColor: T('--bb-border'), borderWidth: 1, padding: 10, displayColors: false,
-                                    callbacks: { label: (c) => f.usd(c.raw, { dec: 2, signo: true }) },
+                                    callbacks: { title: (it) => (it.length ? f.fecha(DIAS_MONEDA[it[0].dataIndex]) : ''), label: (c) => f.usd(c.raw, { dec: 2, signo: true }) },
                                 },
                             },
                             scales: {
                                 x: { grid: { display: false }, ticks: { color: texto3 } },
-                                y: { grid: { color: (ctx) => (ctx.tick && ctx.tick.value === 0 ? eje : grilla), drawBorder: false }, ticks: { color: texto3, maxTicksLimit: 5, callback: (v) => f.usd(v, { dec: 0 }) } },
+                                y: { grid: { color: (ctx) => (ctx.tick && ctx.tick.value === 0 ? eje : grilla), drawBorder: false }, ticks: { color: texto3, maxTicksLimit: 5, callback: f.usdEje } },
                             },
                         },
                     });

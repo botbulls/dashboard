@@ -81,7 +81,6 @@
             let grafico = null;
             const hex = (h) => { const n = parseInt(h.replace('#', ''), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
             const mezcla = (a, b, t) => { const x = hex(a), y = hex(b); return 'rgb(' + x.map((v, i) => Math.round(v + (y[i] - v) * t)).join(',') + ')'; };
-            const etiquetaDia = (d) => (typeof d === 'string' && d.length >= 10 ? d.slice(8, 10) + '/' + d.slice(5, 7) : d);
 
             function pintar() {
                 const T = f.token;
@@ -99,7 +98,7 @@
                 }
                 grafico = new Chart(document.getElementById('lineChart'), {
                     type: 'line',
-                    data: { labels: FECHAS.map(etiquetaDia), datasets },
+                    data: { labels: f.dias(FECHAS), datasets },
                     options: {
                         maintainAspectRatio: false, animation: false,
                         interaction: { mode: 'index', intersect: false },
@@ -110,12 +109,12 @@
                             tooltip: {
                                 backgroundColor: T('--bb-surface'), titleColor: T('--bb-text'), bodyColor: T('--bb-text'),
                                 borderColor: T('--bb-border'), borderWidth: 1, padding: 10,
-                                callbacks: { label: (c) => `${c.dataset.label}: ${f.usd(c.raw, { dec: 2 })}` },
+                                callbacks: { title: (it) => (it.length ? f.fecha(FECHAS[it[0].dataIndex]) : ''), label: (c) => `${c.dataset.label}: ${f.usd(c.raw, { dec: 2 })}` },
                             },
                         },
                         scales: {
                             x: { grid: { display: false }, ticks: { color: texto3, maxTicksLimit: 8, maxRotation: 0 } },
-                            y: { grid: { color: grilla, drawBorder: false }, ticks: { color: texto3, maxTicksLimit: 6, callback: (v) => f.usd(v, { dec: 0 }) } },
+                            y: { grid: { color: grilla, drawBorder: false }, ticks: { color: texto3, maxTicksLimit: 6, callback: f.usdEje } },
                         },
                     },
                 });

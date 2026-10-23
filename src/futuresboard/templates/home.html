@@ -243,7 +243,6 @@ function graphClickEvent(event, array){
 
 (function () {
     const f = window.BB.fmt;
-    const etiquetaDia = (d) => (typeof d === 'string' && d.length >= 10 ? d.slice(8, 10) + '/' + d.slice(5, 7) : d);
     let graficos = [];
 
     function pintar() {
@@ -264,23 +263,23 @@ function graphClickEvent(event, array){
 
         graficos.push(new Chart(document.getElementById('graficoDiario'), {
             type: 'bar',
-            data: { labels: DIAS.map(etiquetaDia), datasets: [{ label: 'Ganancia', data: DIARIO, backgroundColor: porSigno(DIARIO), borderRadius: 4, maxBarThickness: 40 }] },
+            data: { labels: f.dias(DIAS), datasets: [{ label: 'Ganancia', data: DIARIO, backgroundColor: porSigno(DIARIO), borderRadius: 4, maxBarThickness: 40 }] },
             options: {
                 maintainAspectRatio: false, animation: false,
                 plugins: {
                     legend: { display: false }, datalabels: { display: false },
-                    tooltip: Object.assign({}, tooltip, { callbacks: { label: (c) => f.usd(c.raw, { dec: 2, signo: true }) } }),
+                    tooltip: Object.assign({}, tooltip, { callbacks: { title: (it) => (it.length ? f.fecha(DIAS[it[0].dataIndex]) : ''), label: (c) => f.usd(c.raw, { dec: 2, signo: true }) } }),
                 },
                 scales: {
                     x: { grid: { display: false }, ticks: { color: texto3 } },
-                    y: { grid: { color: cero, drawBorder: false }, ticks: { color: texto3, maxTicksLimit: 5, callback: (v) => f.usd(v, { dec: 0 }) } },
+                    y: { grid: { color: cero, drawBorder: false }, ticks: { color: texto3, maxTicksLimit: 5, callback: f.usdEje } },
                 },
             },
         }));
 
         graficos.push(new Chart(document.getElementById('lineChart'), {
             type: 'line',
-            data: { labels: BALANCE_DIAS.map(etiquetaDia), datasets: [{ label: 'Balance', data: BALANCE, borderColor: linea, backgroundColor: linea, borderWidth: 2, pointRadius: 3, pointHoverRadius: 5, fill: false, tension: 0 }] },
+            data: { labels: f.dias(BALANCE_DIAS), datasets: [{ label: 'Balance', data: BALANCE, borderColor: linea, backgroundColor: linea, borderWidth: 2, pointRadius: 3, pointHoverRadius: 5, fill: false, tension: 0 }] },
             options: {
                 maintainAspectRatio: false, animation: false,
                 layout: { padding: { top: 22, right: 48 } },
@@ -290,11 +289,11 @@ function graphClickEvent(event, array){
                         display: (c) => c.dataIndex === BALANCE.length - 1, align: 'top', anchor: 'end', clamp: true,
                         color: texto2, font: { weight: 600 }, formatter: (v) => f.usd(v, { dec: 2 }),
                     },
-                    tooltip: Object.assign({}, tooltip, { callbacks: { label: (c) => f.usd(c.raw, { dec: 2 }) } }),
+                    tooltip: Object.assign({}, tooltip, { callbacks: { title: (it) => (it.length ? f.fecha(BALANCE_DIAS[it[0].dataIndex]) : ''), label: (c) => f.usd(c.raw, { dec: 2 }) } }),
                 },
                 scales: {
                     x: { grid: { display: false }, ticks: { color: texto3 } },
-                    y: { grid: { color: grilla, drawBorder: false }, ticks: { color: texto3, maxTicksLimit: 5, callback: (v) => f.usd(v, { dec: 0 }) } },
+                    y: { grid: { color: grilla, drawBorder: false }, ticks: { color: texto3, maxTicksLimit: 5, callback: f.usdEje } },
                 },
             },
         }));
@@ -313,7 +312,7 @@ function graphClickEvent(event, array){
                     tooltip: Object.assign({}, tooltip, { callbacks: { label: (c) => f.usd(c.raw, { dec: 2, signo: true }) } }),
                 },
                 scales: {
-                    x: { grace: '10%', grid: { color: cero, drawBorder: false }, ticks: { color: texto3, maxTicksLimit: 4, callback: (v) => f.usd(v, { dec: 0 }) } },
+                    x: { grace: '10%', grid: { color: cero, drawBorder: false }, ticks: { color: texto3, maxTicksLimit: 4, callback: f.usdEje } },
                     y: { grid: { display: false }, ticks: { color: texto, autoSkip: false, font: { weight: 500 } } },
                 },
             },
