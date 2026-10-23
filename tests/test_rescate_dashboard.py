@@ -37,7 +37,8 @@ def hd(app, tmp_path):  # noqa: F811
 
 
 def _tarjeta(html, nombre):
-    m = re.search(r'data-tarjeta="%s".*?</div>\s*<div class="card-footer' % nombre, html, re.S)
+    # La tarjeta incluye su pie (<div class="card-footer">): ahí va la antigüedad ("hace 10 s").
+    m = re.search(r'data-tarjeta="%s".*?<div class="card-footer[^>]*>.*?</div>' % nombre, html, re.S)
     assert m, f"falta la tarjeta {nombre}"
     return m.group(0)
 
@@ -61,14 +62,19 @@ def test_tarjetas_con_rescate_habilitado_en_real(client, hd):  # noqa: F811
     html = _home(client)
     assert 'id="rescateTarjetas"' in html
     billetera = _tarjeta(html, "billetera")
-    assert "$19000.00" in billetera and "USDT libre en spot" in billetera and "hace" in billetera
-    assert "$1000.00" in _tarjeta(html, "prestamo")
+    # Formato es-AR solo en el texto; el crudo queda en data-value (el valor no cambia).
+    assert "$19.000,00" in billetera and 'data-value="19000.00"' in billetera
+    assert "USDT libre en spot" in billetera and "hace" in billetera
+    prestamo = _tarjeta(html, "prestamo")
+    assert "$1.000,00" in prestamo and 'data-value="1000.00"' in prestamo
     capital = _tarjeta(html, "capital")
-    assert "$21500.00" in capital and "-500.00 (-2.27%) vs base $22000.00" in capital
+    assert "$21.500,00" in capital and "\u2212500,00 (\u22122,27\u00a0%) vs base $22.000,00" in capital
+    assert 'data-value="-500.00"' in capital and 'data-base="22000.00"' in capital
     ratio = _tarjeta(html, "ratio")
-    assert 'data-semaforo="verde"' in html and "12.50" in ratio and "rojo debajo de 8" in ratio
+    assert 'data-semaforo="verde"' in html and "12,50" in ratio and 'data-value="12.50"' in ratio
+    assert "rojo debajo de 8" in ratio and "Holgado" in ratio
     estado = _tarjeta(html, "estado")
-    assert "Real" in estado and "habilitado" in estado and "tope armado (piso $15400.00)" in estado
+    assert "Real" in estado and "habilitado" in estado and "tope armado (piso $15.400,00)" in estado
     assert "el servicio no late" not in html and "simulados" not in html
 
 
@@ -91,7 +97,7 @@ def test_tarjetas_en_dry_run_aclaran_que_el_prestamo_es_simulado(client, hd):  #
     assert "simulado (dry_run)" in _tarjeta(html, "prestamo")
     assert "dry_run: los montos de préstamo son simulados" in html
     billetera = _tarjeta(html, "billetera")
-    assert "$20000.00" in billetera and "simulado: $19000.00" in billetera  # saldo real + efectivo simulado
+    assert "$20.000,00" in billetera and "simulado: $19.000,00" in billetera  # saldo real + efectivo simulado
     assert "Simulación" in _tarjeta(html, "estado")
 
 
@@ -114,7 +120,7 @@ def test_tarjetas_con_spot_ilegible_usan_el_ultimo_saldo_leido(client, hd):  # n
     svc.tick()
     html = _home(client)
     billetera = _tarjeta(html, "billetera")
-    assert "$20000.00" in billetera and "último saldo leído" in billetera
+    assert "$20.000,00" in billetera and "último saldo leído" in billetera
     assert "sin lectura" in _tarjeta(html, "capital")
     assert "Última lectura con error" in html
 

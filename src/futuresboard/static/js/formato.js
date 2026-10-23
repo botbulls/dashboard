@@ -15,6 +15,7 @@
       if (Object.is(v, -0) || (v < 0 && s.charAt(0) !== '-')) s = '-' + s.replace('-', '');
     } else {
       s = String(v).trim();
+      if (/^\+\d/.test(s)) s = s.slice(1);  // "+0.00": positivo explícito (variaciones del rescate)
       if (!LIMPIO.test(s)) return null;
       if (dec !== undefined && dec !== null) {
         var neg = s.charAt(0) === '-';

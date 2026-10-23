@@ -573,12 +573,12 @@ def test_tarjeta_del_retiro(client, hd):  # noqa: F811
     svc = _servicio(hd)
     svc.tick()
     tarjeta = _tarjeta(_home(client), "retiro")
-    assert "$0.00" in tarjeta and "diaria · base $10000.00" in tarjeta and "próximo retiro" in tarjeta
+    assert "$0,00" in tarjeta and "diaria · base $10.000,00" in tarjeta and "próximo retiro" in tarjeta
     # Período nuevo: retira.
     hd.avanzar(86400)
     svc.tick()
     tarjeta = _tarjeta(_home(client), "retiro")
-    assert "$2000.00" in tarjeta and "último $2000.00" in tarjeta
+    assert "$2.000,00" in tarjeta and "último $2.000,00" in tarjeta and 'data-value="2000.00"' in tarjeta
     r = resumen_rescate.tarjetas(pathlib.Path(hd.data_dir), now=hd.clock.t)["retiro"]
     assert r["acumulado"] == "2000.00" and r["estado"] == "real"
 

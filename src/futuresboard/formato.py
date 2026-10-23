@@ -8,6 +8,7 @@ Reciben el valor crudo que imprime el template (texto de ``format_dp`` como ``"-
   esconde una pérdida redondeada;
 - sin ``dec`` se respetan los decimales del crudo (no se redondea nada); con ``dec``, un ``float`` se formatea igual
   que ``"%.{dec}f"`` y un texto o ``Decimal`` se cuantiza con ROUND_HALF_EVEN, como ``format_dp``;
+- un ``+`` adelante (``"+0.00"``, como arma ``resumen_rescate`` la variación) se acepta y se trata como positivo;
 - lo que no es un número limpio (``None``, ``"-"``, ``""``, ``"5,416.80"``, ``"1e-05"``) vuelve tal cual: nunca se
   adivina.
 
@@ -24,6 +25,7 @@ from decimal import InvalidOperation
 MENOS = "−"
 NBSP = " "
 _LIMPIO = re.compile(r"^-?\d+(\.\d+)?$")
+_CON_MAS = re.compile(r"^\+\d+(\.\d+)?$")
 
 MESES = {
     "january": "Enero", "february": "Febrero", "march": "Marzo", "april": "Abril", "may": "Mayo",
@@ -51,6 +53,8 @@ def _texto(valor, dec):
         s = format(valor, "f")
     else:
         s = str(valor).strip()
+        if _CON_MAS.match(s):
+            s = s[1:]
     if not _LIMPIO.match(s):
         return None
     if dec is not None:

@@ -43,6 +43,10 @@ CASOS = [
     (num, (0.1 + 0.2,), {"dec": 2}, "0,30"),
     (num, (-0.004,), {"dec": 2}, M + "0,00"),
     (usd, (-27.43,), {"dec": 2, "signo": True}, M + "$27,43"),
+    (num, ("+500.00",), {"signo": True}, "+500,00"),  # variación del rescate con + explícito
+    (num, ("+0.00",), {"signo": True}, "0,00"),
+    (pct, ("+2.27",), {"signo": True}, "+2,27" + NB + "%"),
+    (num, ("+500.00",), {}, "500,00"),
 ]
 
 
@@ -51,7 +55,7 @@ def test_formato_es_ar(f, args, kw, esperado):
     assert f(*args, **kw) == esperado
 
 
-@pytest.mark.parametrize("crudo", [None, "-", "", "n/a", "5,416.80", "1e-05", float("nan"), True])
+@pytest.mark.parametrize("crudo", [None, "-", "", "n/a", "5,416.80", "1e-05", float("nan"), True, "+", "++1", "+-1"])
 def test_lo_que_no_es_un_numero_limpio_vuelve_tal_cual(crudo):
     for f in (num, usd, pct):
         assert f(crudo) is crudo
@@ -101,7 +105,8 @@ def test_formato_js_coincide_con_python():
              ("num", "1852.77", {}), ("num", "0.0022", {}), ("num", 131.5, {}), ("pct", "4.98", {}),
              ("pct", -0.04, {"signo": True}), ("usd", -27.43, {"dec": 2, "signo": True}), ("num", 0.0007, {}),
              ("usd", 57.37687, {"dec": 2}), ("num", "1234567.5", {}), ("usd", "-", {}), ("num", "n/a", {}),
-             ("usd", 0, {"dec": 0}), ("usd", 5000, {"dec": 0}), ("usd", -100, {"dec": 0})]
+             ("usd", 0, {"dec": 0}), ("usd", 5000, {"dec": 0}), ("usd", -100, {"dec": 0}),
+             ("num", "+500.00", {"signo": True}), ("pct", "+0.00", {"signo": True})]
     script = ("global.window = {}; global.getComputedStyle = () => ({});"
               + JS.read_text(encoding="utf-8")
               + ";const c=" + json.dumps(casos) + ";"

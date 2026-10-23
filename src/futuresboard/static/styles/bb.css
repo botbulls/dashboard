@@ -364,6 +364,46 @@ body.bb {
   .bb-kpi.bb-hero { grid-column: span 12; }
 }
 
+/* ------------------------------------------------------------------ 8. Rescate: semáforo y tarjetas */
+.bb-rescate { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--bb-s3); }
+.bb-rescate > * { min-width: 0; }
+.bb-rescate > .col-sem { grid-column: span 2; }
+.bb-tarjeta { height: 100%; display: flex; flex-direction: column; color: var(--bb-text); }
+.bb-tarjeta .card-body { display: grid; gap: 2px; align-content: start; padding: var(--bb-s3) var(--bb-s4); }
+.bb-tarjeta__etiqueta { font-size: var(--bb-fs-13); color: var(--bb-text-2); font-weight: 500; }
+.bb-tarjeta__valor { font-size: var(--bb-fs-20); font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.bb-tarjeta__valor.bb-num { white-space: nowrap; }
+.bb-tarjeta__linea { font-size: var(--bb-fs-13); color: var(--bb-text-2); }
+.bb-tarjeta__aviso { color: var(--bb-warn); }
+.bb-tarjeta__aviso i { margin-right: 2px; }
+.bb-tarjeta__link { font-size: var(--bb-fs-13); font-weight: 500; width: fit-content; }
+.bb-tarjeta .card-footer { margin-top: auto; }
+.bb-detalle { font-size: var(--bb-fs-13); color: var(--bb-text-2); }
+.bb-detalle summary { cursor: pointer; color: var(--bb-link); font-weight: 500; min-height: 32px; display: inline-flex; align-items: center; gap: 6px; list-style: none; }
+.bb-detalle summary::-webkit-details-marker { display: none; }
+.bb-detalle summary i { transition: transform var(--bb-dur) var(--bb-ease); font-size: 11px; }
+.bb-detalle[open] summary i { transform: rotate(90deg); }
+.bb-detalle ul { margin: var(--bb-s1) 0 0; padding-left: 18px; }
+.bb-detalle li + li { margin-top: 2px; }
+
+.bb-semaforo .card-body { gap: var(--bb-s2); }
+.bb-semaforo__estado { display: inline-flex; align-items: center; gap: var(--bb-s2); font-size: var(--bb-fs-16); font-weight: 600; padding: 6px var(--bb-s3); border-radius: var(--bb-r-pill); width: fit-content; }
+.bb-semaforo[data-semaforo="verde"] .bb-semaforo__estado { background: var(--bb-gain-bg); color: var(--bb-gain); }
+.bb-semaforo[data-semaforo="amarillo"] .bb-semaforo__estado { background: var(--bb-warn-bg); color: var(--bb-warn); }
+.bb-semaforo[data-semaforo="rojo"] .bb-semaforo__estado { background: var(--bb-loss-bg); color: var(--bb-loss); }
+.bb-semaforo[data-semaforo="gris"] .bb-semaforo__estado { background: var(--bb-neutral-bg); color: var(--bb-neutral); }
+.bb-semaforo__dato { display: flex; align-items: baseline; gap: var(--bb-s2); flex-wrap: wrap; }
+.bb-semaforo__dato .bb-tarjeta__valor { font-size: var(--bb-fs-24); }
+.bb-medidor { position: relative; height: 8px; border-radius: var(--bb-r-pill); background: var(--bb-surface-2); border: 1px solid var(--bb-border); overflow: hidden; }
+.bb-medidor span { position: absolute; top: 0; bottom: 0; }
+.bb-medidor .z-rojo { left: 0; background: color-mix(in srgb, var(--bb-loss-mark) 55%, transparent); }
+.bb-medidor .z-amarillo { background: color-mix(in srgb, var(--bb-warn-mark) 55%, transparent); }
+.bb-medidor .z-verde { right: 0; background: color-mix(in srgb, var(--bb-gain-mark) 35%, transparent); }
+.bb-medidor .aguja { width: 3px; background: var(--bb-text); border-radius: 2px; }
+@media (max-width: 1199.98px) {
+  .bb-rescate { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 /* ------------------------------------------------------------------ 12. Pie */
 .bb-pie { padding: var(--bb-s5); padding-right: calc(var(--bb-s5) + 56px); border-top: 1px solid var(--bb-border); color: var(--bb-text-2); font-size: var(--bb-fs-13); display: grid; gap: var(--bb-s2); }
 .bb-pie p { margin: 0; max-width: 72ch; }
@@ -436,6 +476,11 @@ body.bb {
   .bb-hero .bb-kpi__valor { font-size: 32px; }
   .bb-kpi .card-body { padding: var(--bb-s3); }
   .bb-kpi__valor { font-size: var(--bb-fs-20); }
+  .bb-rescate { gap: var(--bb-s2); }
+  .bb-tarjeta .card-body { padding: var(--bb-s3); }
+  .bb-tarjeta__valor { font-size: var(--bb-fs-16); }
+  .bb-detalle summary, .bb-tarjeta__link { min-height: var(--bb-tap); display: inline-flex; align-items: center; }
+  .bb-seccion__titulo a { display: inline-flex; align-items: center; min-height: var(--bb-tap); }
 }
 
 /* ------------------------------------------------------------------ 16. Neutralizar lo viejo mientras queden reglas de

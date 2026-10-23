@@ -990,7 +990,8 @@ def test_tarjeta_c3_en_el_dashboard_principal(app, client, tmp_path):  # noqa: F
     svc.tick()
     html = client.get("/").get_data(as_text=True)
     m = html.split('data-tarjeta="c3"', 1)[1].split("card-footer", 1)[0]
-    assert "Operando" in m and "piso $7000.00" in m and "a $1000.00 (12.50%) del piso" in m
+    assert "Operando" in m and "piso $7.000,00" in m and "a $1.000,00 (12,50\u00a0%) del piso" in m
+    assert 'data-value="7000.00"' in m and 'data-value="1000.00"' in m
     cortar(harness, svc, capital="6900")
     html = client.get("/").get_data(as_text=True)
     m = html.split('data-tarjeta="c3"', 1)[1].split("card-footer", 1)[0]

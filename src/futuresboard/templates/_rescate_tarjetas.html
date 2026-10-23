@@ -1,220 +1,247 @@
-{# Tarjetas del rescate en el dashboard principal. Lee rescate_resumen (resumen_rescate.tarjetas): sin llamadas a Binance. #}
+{# Tarjetas del rescate en el dashboard principal. Lee rescate_resumen (resumen_rescate.tarjetas): sin llamadas a Binance.
+   Estructura que leen los tests: data-tarjeta en la raíz de cada tarjeta y <div class="card-footer"> como último hijo
+   (el pie lleva la antigüedad). Cada frase va en un solo nodo de texto. Montos en es-AR con el crudo en data-value. #}
 {% set r = rescate_resumen %}
-<style>
-    .rescate_tarjetas .card-title { font-size: 1.5rem; font-weight: 700; }
-    .rescate_tarjetas .card-text { font-size: 0.85rem; color: var(--text-secondary, #64748b); }
-    .rescate_tarjetas .card-footer { font-weight: 600; text-transform: uppercase; font-size: 0.7rem; letter-spacing: 0.5px; }
-    .rescate_tarjetas .semaforo { display: inline-block; width: 0.75rem; height: 0.75rem; border-radius: 50%; margin-right: 0.35rem; vertical-align: middle; }
-    .rescate_tarjetas .semaforo-verde { background: var(--success-color, #10b981); }
-    .rescate_tarjetas .semaforo-amarillo { background: var(--warning-color, #f59e0b); }
-    .rescate_tarjetas .semaforo-rojo { background: var(--danger-color, #ef4444); }
-    .rescate_tarjetas .semaforo-gris { background: var(--text-secondary, #94a3b8); }
-    .rescate_tarjetas .rescate_aviso { font-size: 0.85rem; }
-    @media (max-width: 575.98px) {
-        .rescate_tarjetas .card-title { font-size: 1.1rem; }
-        .rescate_tarjetas .card-body { padding: 0.6rem; }
-        .rescate_tarjetas .card-footer { font-size: 0.65rem; padding: 0.4rem; }
-    }
-</style>
-<div class="rescate_tarjetas mt-3" id="rescateTarjetas">
-    <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
-        <h5 class="mb-0" style="font-weight: 700;">
-            <a href="{{ url_for('main.rescate_page') }}" style="text-decoration: none; color: var(--text-primary);"><i class="fas fa-life-ring"></i> Rescate</a>
-        </h5>
+<section class="bb-seccion rescate_tarjetas" id="rescateTarjetas" aria-labelledby="bbTituloRescate">
+    <h2 class="bb-seccion__titulo" id="bbTituloRescate">
+        <a href="{{ url_for('main.rescate_page') }}"><i class="fas fa-life-ring" aria-hidden="true"></i> Rescate</a>
         {% if r.error %}
-            <span class="badge bg-secondary">sin datos</span>
+            <span class="badge bb-badge bb-badge--neutro">sin datos</span>
         {% else %}
-            {% if r.modo == 'real' %}<span class="badge bg-success">real</span>
-            {% elif r.modo == 'dry_run' %}<span class="badge bg-info text-dark">dry_run (simulación)</span>
-            {% elif r.modo == 'off' %}<span class="badge bg-secondary">off</span>
-            {% else %}<span class="badge bg-secondary">sin datos</span>{% endif %}
-            {% if r.testnet %}<span class="badge bg-warning text-dark">testnet/Demo</span>{% endif %}
-            {% if r.modo and not r.servicio_vivo %}<span class="badge bg-danger">el servicio no late</span>{% endif %}
+            {% if r.modo == 'real' %}<span class="badge bb-badge bb-badge--real">real</span>
+            {% elif r.modo == 'dry_run' %}<span class="badge bb-badge bb-badge--sim">dry_run (simulación)</span>
+            {% elif r.modo == 'off' %}<span class="badge bb-badge bb-badge--neutro">off</span>
+            {% else %}<span class="badge bb-badge bb-badge--neutro">sin datos</span>{% endif %}
+            {% if r.testnet %}<span class="badge bb-badge bb-badge--testnet">testnet/Demo</span>{% endif %}
+            {% if r.modo and not r.servicio_vivo %}<span class="badge bb-badge bb-badge--peligro">el servicio no late</span>{% endif %}
         {% endif %}
-    </div>
+        <a class="bb-seccion__mas" href="{{ url_for('main.rescate_page') }}">Ver rescate</a>
+    </h2>
 
     {% if r.error %}
         <div class="alert alert-secondary rescate_aviso mb-0" role="status">{{ r.error }} {{ r.como_activar }}</div>
     {% else %}
-    <div class="row g-2">
-        <div class="col-6 col-md-4 col-xl-2">
-            <a href="{{ url_for('main.rescate_page') }}" style="text-decoration: none;">
-            <div class="card text-center h-100" data-tarjeta="billetera">
-                <div class="card-body">
-                    {% if r.spot.usdt is not none %}
-                        <h5 class="card-title mb-1" style="color: {% if r.spot.vieja %}var(--text-secondary, #64748b){% else %}var(--success-color, #10b981){% endif %};">${{ r.spot.usdt }}</h5>
-                        <p class="card-text mb-0">
-                            USDT libre en spot{% if r.spot.fuente == 'ultimo_saldo_leido' %} (último saldo leído){% endif %}
-                            {% if r.spot.hace %}<br>{{ r.spot.hace }}{% endif %}
-                            {% if r.spot.vieja %}<br><strong>dato viejo ({{ r.motivo_vieja }})</strong>{% endif %}
-                            {% if r.spot.efectivo is not none %}<br>simulado: ${{ r.spot.efectivo }}{% endif %}
-                        </p>
-                    {% else %}
-                        <h5 class="card-title mb-1" style="color: var(--text-secondary, #64748b);">sin datos</h5>
-                        <p class="card-text mb-0">sin saldo spot leído</p>
+    <div class="bb-rescate">
+        {# ---- Semáforo: margen / mantenimiento. Estado con ícono y palabra; el detalle va plegado. #}
+        {% set rt_ = r.ratio %}
+        {% set sem = rt_.semaforo %}
+        <div class="card bb-tarjeta bb-semaforo col-sem" data-tarjeta="ratio" data-semaforo="{{ sem }}">
+            <div class="card-body">
+                <span class="bb-tarjeta__etiqueta">Margen / mantenimiento</span>
+                <span class="bb-semaforo__estado">
+                    {%- if sem == 'verde' %}<i class="fas fa-check-circle" aria-hidden="true"></i> Holgado
+                    {%- elif sem == 'amarillo' %}<i class="fas fa-exclamation-triangle" aria-hidden="true"></i> Ajustado
+                    {%- elif sem == 'rojo' %}<i class="fas fa-life-ring" aria-hidden="true"></i> Inyecta
+                    {%- else %}<i class="fas fa-question-circle" aria-hidden="true"></i> Sin dato{% endif -%}
+                </span>
+                <div class="bb-semaforo__dato">
+                    {% if rt_.valor is not none %}<span class="bb-tarjeta__valor bb-num" data-value="{{ rt_.valor }}">{{ rt_.valor|num }}</span>
+                    {% elif rt_.posiciones == 0 %}<span class="bb-tarjeta__valor">sin posiciones</span>
+                    {% else %}<span class="bb-tarjeta__valor">-</span>{% endif %}
+                    {% if rt_.simulado %}<span class="bb-tarjeta__linea">con el préstamo simulado</span>{% endif %}
+                </div>
+                {% if rt_.valor is not none and rt_.umbral and rt_.amarillo_hasta %}
+                    {% set escala = (rt_.amarillo_hasta|float) * 2 %}
+                    {% if escala > 0 %}
+                        {% set z_rojo = [(rt_.umbral|float) / escala * 100, 100]|min %}
+                        {% set z_amarillo = [(rt_.amarillo_hasta|float) / escala * 100, 100]|min %}
+                        {% set aguja = [(rt_.valor|float) / escala * 100, 100]|min %}
+                        <div class="bb-medidor" aria-hidden="true">
+                            <span class="z-rojo" style="width: {{ '%.1f'|format(z_rojo) }}%"></span>
+                            <span class="z-amarillo" style="left: {{ '%.1f'|format(z_rojo) }}%; width: {{ '%.1f'|format(z_amarillo - z_rojo) }}%"></span>
+                            <span class="z-verde" style="left: {{ '%.1f'|format(z_amarillo) }}%"></span>
+                            <span class="aguja" style="left: calc({{ '%.1f'|format([aguja, 0]|max) }}% - {{ '%.1f'|format(aguja / 100 * 3) }}px)"></span>
+                        </div>
                     {% endif %}
-                </div>
-                <div class="card-footer text-muted">Billetera de rescate</div>
+                {% endif %}
+                {% if rt_.vieja %}<span class="bb-tarjeta__linea bb-tarjeta__aviso"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> dato viejo ({{ r.motivo_vieja }}): semáforo en gris</span>{% endif %}
+                <details class="bb-detalle">
+                    <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Cómo se lee</summary>
+                    <ul>
+                        {% if rt_.umbral %}
+                            <li>rojo debajo de {{ rt_.umbral }} (inyecta), amarillo hasta {{ rt_.amarillo_hasta }}</li>
+                            <li>Es el margen de la cuenta de futuros dividido el margen de mantenimiento: Binance liquida en 1.</li>
+                        {% else %}
+                            <li>sin umbral</li>
+                        {% endif %}
+                    </ul>
+                </details>
             </div>
-            </a>
+            <div class="card-footer">{{ rt_.hace or 'sin lectura' }}</div>
         </div>
-        <div class="col-6 col-md-4 col-xl-2">
-            <div class="card text-center h-100" data-tarjeta="prestamo">
-                <div class="card-body">
-                    <h5 class="card-title mb-1" style="color: var(--warning-color, #f59e0b);">{% if r.prestamo.usdt is not none %}${{ r.prestamo.usdt }}{% else %}-{% endif %}</h5>
-                    <p class="card-text mb-0">{% if r.prestamo.simulado %}simulado (dry_run){% else %}spot → futuros, pendiente de devolver{% endif %}
-                        {% if r.prestamo.hace %}<br>registro del servicio {{ r.prestamo.hace }}{% endif %}</p>
-                </div>
-                <div class="card-footer text-muted">Préstamo de rescate</div>
+
+        {# ---- Estado del rescate #}
+        <div class="card bb-tarjeta col-t" data-tarjeta="estado">
+            <div class="card-body">
+                <span class="bb-tarjeta__etiqueta">Estado del rescate</span>
+                <span class="bb-tarjeta__valor">{% if r.modo == 'real' %}Real{% elif r.modo == 'dry_run' %}Simulación{% elif r.modo == 'off' %}Apagado{% else %}Sin datos{% endif %}</span>
+                <span class="bb-tarjeta__linea">
+                    {%- if r.habilitado %}habilitado{% else %}deshabilitado{% endif %} ·
+                    {% if r.tope.estado == 'disparado' %}<strong class="text-danger"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> tope DISPARADO</strong>
+                    {%- elif r.tope.estado == 'en_confirmacion' %}<strong class="text-warning"><i class="fas fa-hourglass-half" aria-hidden="true"></i> tope en confirmación</strong>
+                    {%- elif r.tope.estado == 'armado' %}tope armado (piso {{ r.tope.limite|usd }})
+                    {%- else %}tope sin armar{% endif -%}
+                </span>
             </div>
+            <div class="card-footer">{% if r.latido_hace %}latido {{ r.latido_hace }}{% else %}sin latido{% endif %}</div>
         </div>
-        <div class="col-6 col-md-4 col-xl-2">
-            <div class="card text-center h-100" data-tarjeta="capital">
-                <div class="card-body">
-                    {% if r.capital.usdt is not none %}
-                        <h5 class="card-title mb-1" style="color: {% if r.capital.vieja %}var(--text-secondary, #64748b){% else %}var(--primary-color, #6366f1){% endif %};">${{ r.capital.usdt }}</h5>
-                        <p class="card-text mb-0">
-                            {% if r.capital.variacion_usdt is not none %}{{ r.capital.variacion_usdt }} ({{ r.capital.variacion_pct }}%) vs base ${{ r.capital.base }}
-                            {% else %}sin base (tope sin armar){% endif %}
-                            {% if r.capital.hace %}<br>{{ r.capital.hace }}{% endif %}
-                            {% if r.capital.vieja %}<br><strong>dato viejo ({{ r.motivo_vieja }})</strong>{% endif %}
-                        </p>
+
+        {# ---- Capital total (futuros + spot) y su variación contra la base #}
+        {% set cap = r.capital %}
+        <div class="card bb-tarjeta col-t" data-tarjeta="capital">
+            <div class="card-body">
+                <span class="bb-tarjeta__etiqueta">Capital total</span>
+                {% if cap.usdt is not none %}
+                    <span class="bb-tarjeta__valor bb-num" data-value="{{ cap.usdt }}">{{ cap.usdt|usd }}</span>
+                    {% if cap.variacion_usdt is not none %}
+                        {% set t = cap.variacion_usdt|tendencia %}
+                        <span class="bb-kpi__var is-{{ t or 'cero' }}" data-value="{{ cap.variacion_usdt }}" data-base="{{ cap.base }}">
+                            {%- if t == 'gana' %}<i class="fas fa-caret-up" aria-hidden="true"></i> {% elif t == 'pierde' %}<i class="fas fa-caret-down" aria-hidden="true"></i> {% endif -%}
+                            {{ cap.variacion_usdt|num(signo=True) }} ({{ cap.variacion_pct|pct(signo=True) }}) vs base {{ cap.base|usd }}</span>
                     {% else %}
-                        <h5 class="card-title mb-1" style="color: var(--text-secondary, #64748b);">sin lectura</h5>
-                        <p class="card-text mb-0">futuros + spot</p>
+                        <span class="bb-tarjeta__linea">sin base (tope sin armar)</span>
                     {% endif %}
-                </div>
-                <div class="card-footer text-muted">Capital total</div>
+                    {% if cap.vieja %}<span class="bb-tarjeta__linea bb-tarjeta__aviso"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> dato viejo ({{ r.motivo_vieja }})</span>{% endif %}
+                {% else %}
+                    <span class="bb-tarjeta__valor">sin lectura</span>
+                    <span class="bb-tarjeta__linea">futuros + spot</span>
+                {% endif %}
             </div>
+            <div class="card-footer">{{ cap.hace or 'sin lectura' }}</div>
         </div>
-        <div class="col-6 col-md-4 col-xl-2">
-            <div class="card text-center h-100" data-tarjeta="ratio" data-semaforo="{{ r.ratio.semaforo }}">
-                <div class="card-body">
-                    <h5 class="card-title mb-1"><span class="semaforo semaforo-{{ r.ratio.semaforo }}" aria-hidden="true"></span>{% if r.ratio.valor is not none %}{{ r.ratio.valor }}{% elif r.ratio.posiciones == 0 %}sin posiciones{% else %}-{% endif %}</h5>
-                    <p class="card-text mb-0">
-                        {% if r.ratio.umbral %}rojo debajo de {{ r.ratio.umbral }} (inyecta), amarillo hasta {{ r.ratio.amarillo_hasta }}{% else %}sin umbral{% endif %}
-                        {% if r.ratio.simulado %}<br>con el préstamo simulado{% endif %}
-                        {% if r.ratio.hace %}<br>{{ r.ratio.hace }}{% endif %}
-                        {% if r.ratio.vieja %}<br><strong>dato viejo ({{ r.motivo_vieja }}): semáforo en gris</strong>{% endif %}
-                    </p>
-                </div>
-                <div class="card-footer text-muted">Margen / mantenimiento</div>
-            </div>
-        </div>
-        <div class="col-6 col-md-4 col-xl-2">
-            <a href="{{ url_for('main.rescate_page') }}" style="text-decoration: none;">
-            <div class="card text-center h-100" data-tarjeta="estado">
-                <div class="card-body">
-                    <h5 class="card-title mb-1" style="color: {% if r.tope.estado == 'disparado' %}var(--danger-color, #ef4444){% elif r.tope.estado == 'en_confirmacion' %}var(--warning-color, #f59e0b){% else %}var(--text-primary){% endif %};">
-                        {% if r.modo == 'real' %}Real{% elif r.modo == 'dry_run' %}Simulación{% elif r.modo == 'off' %}Apagado{% else %}Sin datos{% endif %}
-                    </h5>
-                    <p class="card-text mb-0">
-                        {% if r.habilitado %}habilitado{% else %}deshabilitado{% endif %} ·
-                        {% if r.tope.estado == 'disparado' %}<strong>tope DISPARADO</strong>
-                        {% elif r.tope.estado == 'en_confirmacion' %}<strong>tope en confirmación</strong>
-                        {% elif r.tope.estado == 'armado' %}tope armado (piso ${{ r.tope.limite }})
-                        {% else %}tope sin armar{% endif %}
-                        {% if r.latido_hace %}<br>latido {{ r.latido_hace }}{% endif %}
-                    </p>
-                </div>
-                <div class="card-footer text-muted">Estado del rescate</div>
-            </div>
-            </a>
-        </div>
+
+        {# ---- Disparo por uPnL #}
         {% if r.upnl %}
         {% set u = r.upnl %}
-        <div class="col-6 col-md-4 col-xl-2">
-            <a href="{{ url_for('main.rescate_page') }}" style="text-decoration: none;">
-            <div class="card text-center h-100" data-tarjeta="upnl" data-upnl-estado="{{ u.estado }}">
-                <div class="card-body">
-                    <h5 class="card-title mb-1" style="color: {% if u.vieja or u.upnl is none %}var(--text-secondary, #64748b){% elif u.dispara %}var(--danger-color, #ef4444){% else %}var(--text-primary){% endif %};">
-                        {% if u.upnl is not none %}${{ u.upnl }}{% else %}-{% endif %}
-                    </h5>
-                    <p class="card-text mb-0">
-                        {% if u.estado == 'off' and not u.rescate_habilitado %}habilitado en el panel, pero el rescate está deshabilitado: no se evalúa
-                        {% elif u.estado == 'off' %}habilitado en el panel; el servicio no lo evalúa (FUTURESBOARD_RESCATE_UPNL_MODE={{ u.modo or 'off' }})
-                        {% else %}{% if u.estado == 'registra' %}solo registra (dry_run){% elif u.estado == 'simulado' %}simulado{% else %}real{% endif %} · X {{ u.x_pct }}% · paso ${{ u.paso }}{% endif %}
-                        {% if u.upnl_dispara is not none %}<br>próximo paso con uPnL ≤ ${{ u.upnl_dispara }}{% endif %}
-                        {% if u.dispara %}<br><strong>condición cumplida</strong>{% endif %}
-                        {% if u.error %}<br>{{ u.error|truncate(110) }}{% endif %}
-                        {% if u.hace %}<br>{{ u.hace }}{% endif %}
-                        {% if u.vieja %}<br><strong>dato viejo ({{ r.motivo_vieja }})</strong>{% endif %}
-                        {% if u.ultima %}<br>última inyección uPnL ${{ u.ultima.monto }} {{ u.ultima.hace }}{% if u.ultima.simulada %} (simulada){% endif %}{% endif %}
-                    </p>
-                </div>
-                <div class="card-footer text-muted">Disparo por uPnL</div>
+        <div class="card bb-tarjeta col-t" data-tarjeta="upnl" data-upnl-estado="{{ u.estado }}">
+            <div class="card-body">
+                <span class="bb-tarjeta__etiqueta">Disparo por uPnL</span>
+                {% if u.upnl is not none %}<span class="bb-tarjeta__valor bb-num" data-value="{{ u.upnl }}">{{ u.upnl|usd(signo=True) }}</span>
+                {% else %}<span class="bb-tarjeta__valor">-</span>{% endif %}
+                <span class="bb-tarjeta__linea">
+                    {%- if u.estado == 'off' and not u.rescate_habilitado %}habilitado en el panel, pero el rescate está deshabilitado: no se evalúa
+                    {%- elif u.estado == 'off' %}habilitado en el panel; el servicio no lo evalúa (FUTURESBOARD_RESCATE_UPNL_MODE={{ u.modo or 'off' }})
+                    {%- else %}{% if u.estado == 'registra' %}solo registra (dry_run){% elif u.estado == 'simulado' %}simulado{% else %}real{% endif %} · X {{ u.x_pct|pct }} · paso {{ u.paso|usd }}{% endif -%}
+                </span>
+                {% if u.dispara %}<span class="bb-tarjeta__linea bb-tarjeta__aviso"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> <strong>condición cumplida</strong></span>{% endif %}
+                {% if u.vieja %}<span class="bb-tarjeta__linea bb-tarjeta__aviso"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> dato viejo ({{ r.motivo_vieja }})</span>{% endif %}
+                {% if u.upnl_dispara is not none or u.error or u.ultima %}
+                    <details class="bb-detalle">
+                        <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Detalle</summary>
+                        <ul>
+                            {% if u.upnl_dispara is not none %}<li>próximo paso con uPnL ≤ {{ u.upnl_dispara|usd }}</li>{% endif %}
+                            {% if u.error %}<li>{{ u.error|truncate(110) }}</li>{% endif %}
+                            {% if u.ultima %}<li>última inyección uPnL {{ u.ultima.monto|usd }} {{ u.ultima.hace }}{% if u.ultima.simulada %} (simulada){% endif %}</li>{% endif %}
+                        </ul>
+                    </details>
+                {% endif %}
             </div>
-            </a>
+            <div class="card-footer">{{ u.hace or 'sin evaluación' }}</div>
         </div>
         {% endif %}
+
+        {# ---- Billetera de rescate: USDT libre en spot #}
+        {% set sp = r.spot %}
+        <div class="card bb-tarjeta col-t" data-tarjeta="billetera">
+            <div class="card-body">
+                <span class="bb-tarjeta__etiqueta">Billetera de rescate</span>
+                {% if sp.usdt is not none %}
+                    <span class="bb-tarjeta__valor bb-num" data-value="{{ sp.usdt }}">{{ sp.usdt|usd }}</span>
+                    <span class="bb-tarjeta__linea">USDT libre en spot{% if sp.fuente == 'ultimo_saldo_leido' %} (último saldo leído){% endif %}</span>
+                    {% if sp.efectivo is not none %}<span class="bb-tarjeta__linea" data-value="{{ sp.efectivo }}">simulado: {{ sp.efectivo|usd }}</span>{% endif %}
+                    {% if sp.vieja %}<span class="bb-tarjeta__linea bb-tarjeta__aviso"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> dato viejo ({{ r.motivo_vieja }})</span>{% endif %}
+                {% else %}
+                    <span class="bb-tarjeta__valor">sin datos</span>
+                    <span class="bb-tarjeta__linea">sin saldo spot leído</span>
+                {% endif %}
+            </div>
+            <div class="card-footer">{{ sp.hace or 'sin lectura' }}</div>
+        </div>
+
+        {# ---- Préstamo de rescate: registro del servicio #}
+        <div class="card bb-tarjeta col-t" data-tarjeta="prestamo">
+            <div class="card-body">
+                <span class="bb-tarjeta__etiqueta">Préstamo de rescate</span>
+                {% if r.prestamo.usdt is not none %}<span class="bb-tarjeta__valor bb-num" data-value="{{ r.prestamo.usdt }}">{{ r.prestamo.usdt|usd }}</span>
+                {% else %}<span class="bb-tarjeta__valor">-</span>{% endif %}
+                <span class="bb-tarjeta__linea">{% if r.prestamo.simulado %}simulado (dry_run){% else %}spot → futuros, pendiente de devolver{% endif %}</span>
+            </div>
+            <div class="card-footer">{% if r.prestamo.hace %}registro del servicio {{ r.prestamo.hace }}{% else %}sin registro{% endif %}</div>
+        </div>
+
+        {# ---- Retiro periódico de ganancias #}
         {% if r.retiro %}
         {% set rt = r.retiro %}
-        <div class="col-6 col-md-4 col-xl-2">
-            <a href="{{ url_for('main.rescate_page') }}" style="text-decoration: none;">
-            <div class="card text-center h-100" data-tarjeta="retiro" data-retiro-estado="{{ rt.estado }}">
-                <div class="card-body">
-                    <h5 class="card-title mb-1" style="color: {% if rt.vieja %}var(--text-secondary, #64748b){% else %}var(--success-color, #10b981){% endif %};">${{ rt.acumulado }}</h5>
-                    <p class="card-text mb-0">
-                        retirado a spot (acumulado)
-                        {% if rt.acumulado_simulado != '0.00' %}<br>simulado: ${{ rt.acumulado_simulado }}{% endif %}
-                        {% if rt.frecuencia == 'off' %}<br>retiro apagado
-                        {% elif rt.estado == 'off' %}<br>{{ rt.frecuencia }} en el panel; el servicio no lo ejecuta (FUTURESBOARD_RESCATE_RETIRO_MODE={{ rt.modo or 'off' }})
-                        {% else %}<br>{{ rt.frecuencia }}{% if rt.estado == 'simulado' %} (simulado){% endif %} · base ${{ rt.base }}
-                            {% if rt.vencido %}<br><strong>vencido</strong>{% if rt.motivo_espera %}: {{ rt.motivo_espera|truncate(90) }}{% endif %}
-                            {% elif rt.proximo %}<br>próximo retiro {{ rt.proximo[:10] }}{% endif %}
-                            {% if rt.excedente is not none %}<br>excedente hoy ${{ rt.excedente }}{% endif %}
-                        {% endif %}
-                        {% if rt.error %}<br>{{ rt.error|truncate(90) }}{% endif %}
-                        {% if rt.ultimo %}<br>último ${{ rt.ultimo.monto }} {{ rt.ultimo.hace }}{% if rt.ultimo.simulado %} (simulado){% endif %}{% endif %}
-                        {% if rt.vieja %}<br><strong>dato viejo ({{ r.motivo_vieja }})</strong>{% endif %}
-                    </p>
-                </div>
-                <div class="card-footer text-muted">Retiro de ganancias</div>
+        <div class="card bb-tarjeta col-t" data-tarjeta="retiro" data-retiro-estado="{{ rt.estado }}">
+            <div class="card-body">
+                <span class="bb-tarjeta__etiqueta">Retiro de ganancias</span>
+                <span class="bb-tarjeta__valor bb-num" data-value="{{ rt.acumulado }}">{{ rt.acumulado|usd }}</span>
+                {% if rt.frecuencia == 'off' %}<span class="bb-tarjeta__linea">retiro apagado</span>
+                {% elif rt.estado == 'off' %}<span class="bb-tarjeta__linea">{{ rt.frecuencia }} en el panel; el servicio no lo ejecuta (FUTURESBOARD_RESCATE_RETIRO_MODE={{ rt.modo or 'off' }})</span>
+                {% else %}
+                    <span class="bb-tarjeta__linea">{{ rt.frecuencia }}{% if rt.estado == 'simulado' %} (simulado){% endif %} · base {{ rt.base|usd }}</span>
+                    {% if rt.vencido %}<span class="bb-tarjeta__linea bb-tarjeta__aviso"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> <strong>vencido</strong>{% if rt.motivo_espera %}: {{ rt.motivo_espera|truncate(90) }}{% endif %}</span>
+                    {% elif rt.proximo %}<span class="bb-tarjeta__linea">próximo retiro {{ rt.proximo[:10] }}</span>{% endif %}
+                {% endif %}
+                {% if rt.vieja %}<span class="bb-tarjeta__linea bb-tarjeta__aviso"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> dato viejo ({{ r.motivo_vieja }})</span>{% endif %}
+                <details class="bb-detalle">
+                    <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Detalle</summary>
+                    <ul>
+                        <li>retirado a spot (acumulado){% if rt.acumulado_simulado != '0.00' %}; simulado: {{ rt.acumulado_simulado|usd }}{% endif %}</li>
+                        {% if rt.frecuencia != 'off' and rt.estado != 'off' and rt.excedente is not none %}<li>excedente hoy {{ rt.excedente|usd }}</li>{% endif %}
+                        {% if rt.error %}<li>{{ rt.error|truncate(90) }}</li>{% endif %}
+                        {% if rt.ultimo %}<li>último {{ rt.ultimo.monto|usd }} {{ rt.ultimo.hace }}{% if rt.ultimo.simulado %} (simulado){% endif %}</li>{% endif %}
+                    </ul>
+                </details>
             </div>
-            </a>
+            <div class="card-footer">{{ rt.hace or 'sin evaluación' }}</div>
         </div>
         {% endif %}
+
+        {# ---- Stop con reinicio (C3). El latido queda en el cuerpo (los tests cortan antes del pie). #}
         {% if r.c3 %}
         {% set c = r.c3 %}
-        <div class="col-6 col-md-4 col-xl-2">
-            <a href="{{ url_for('main.rescate_page') }}#c3" style="text-decoration: none;">
-            <div class="card text-center h-100" data-tarjeta="c3" data-c3-estado="{{ c.estado }}">
-                <div class="card-body">
-                    <h5 class="card-title mb-1" style="color: {% if c.parado %}var(--danger-color, #ef4444){% elif c.estado in ('en_confirmacion', 'sin_observacion') %}var(--warning-color, #f59e0b){% elif c.estado == 'operando' %}var(--success-color, #10b981){% else %}var(--text-secondary, #64748b){% endif %};">
-                        {% if c.parado %}Parado{% elif c.estado == 'operando' %}Operando{% elif c.estado == 'en_confirmacion' %}En confirmación{% elif c.estado == 'sin_observacion' %}Sin observación{% elif c.estado == 'base_pendiente' %}Base pendiente{% elif c.estado == 'off' %}Off{% elif c.estado == 'bloqueado' %}Bloqueado{% else %}{{ c.estado }}{% endif %}{% if c.simulado %} (sim.){% endif %}
-                    </h5>
-                    <p class="card-text mb-0">
-                        {% if c.piso %}piso ${{ c.piso }}{% endif %}
-                        {% if c.distancia_usdt is not none %}<br>a ${{ c.distancia_usdt }} ({{ c.distancia_pct }}%) del piso{% endif %}
-                        {% if c.parado and c.proximo_reinicio %}<br>reinicio: {{ c.proximo_reinicio|truncate(90) }}{% endif %}
-                        {% if c.ultimo_evento %}<br>último {{ c.ultimo_evento.tipo|replace('_', ' ') }} {{ c.ultimo_evento.hace }}{% endif %}
-                        {% if c.capital_hace %}<br>lectura {{ c.capital_hace }}{% endif %}
-                        {% if c.sin_observacion %}<br><strong>{{ c.sin_observacion }}</strong>{% endif %}
-                        {% if c.lectura_error %}<br>error: {{ c.lectura_error|truncate(90) }}{% endif %}
-                        {% if c.latido_suspendido %}<br><strong>latido C3 suspendido</strong>: {{ c.latido_suspendido|truncate(110) }}{% if c.latido_hace %} (último {{ c.latido_hace }}){% endif %}
-                        {% elif c.latido_error %}<br><strong>latido C3 con error</strong>: {{ c.latido_error }}
-                        {% elif c.latido_hace %}<br>latido C3 {{ c.latido_hace }}{% if c.latido_modo and c.latido_modo != 'real' %} ({{ c.latido_modo }}){% endif %}{% endif %}
-                    </p>
-                </div>
-                <div class="card-footer text-muted">Stop con reinicio (C3)</div>
+        <div class="card bb-tarjeta col-t" data-tarjeta="c3" data-c3-estado="{{ c.estado }}">
+            <div class="card-body">
+                <span class="bb-tarjeta__etiqueta">Stop con reinicio (C3)</span>
+                <span class="bb-tarjeta__valor {% if c.parado %}text-danger{% elif c.estado in ('en_confirmacion', 'sin_observacion') %}text-warning{% endif %}">
+                    {%- if c.parado %}<i class="fas fa-stop-circle" aria-hidden="true"></i> Parado{% elif c.estado == 'operando' %}Operando{% elif c.estado == 'en_confirmacion' %}<i class="fas fa-hourglass-half" aria-hidden="true"></i> En confirmación{% elif c.estado == 'sin_observacion' %}<i class="fas fa-exclamation-triangle" aria-hidden="true"></i> Sin observación{% elif c.estado == 'base_pendiente' %}Base pendiente{% elif c.estado == 'off' %}Off{% elif c.estado == 'bloqueado' %}Bloqueado{% else %}{{ c.estado }}{% endif %}{% if c.simulado %} (sim.){% endif -%}
+                </span>
+                {% if c.piso %}<span class="bb-tarjeta__linea" data-value="{{ c.piso }}">piso {{ c.piso|usd }}</span>{% endif %}
+                {% if c.distancia_usdt is not none %}<span class="bb-tarjeta__linea" data-value="{{ c.distancia_usdt }}">a {{ c.distancia_usdt|usd }} ({{ c.distancia_pct|pct }}) del piso</span>{% endif %}
+                {% if c.sin_observacion %}<span class="bb-tarjeta__linea bb-tarjeta__aviso"><strong>{{ c.sin_observacion }}</strong></span>{% endif %}
+                {% if c.latido_suspendido %}<span class="bb-tarjeta__linea bb-tarjeta__aviso"><strong>latido C3 suspendido</strong>: {{ c.latido_suspendido|truncate(110) }}{% if c.latido_hace %} (último {{ c.latido_hace }}){% endif %}</span>
+                {% elif c.latido_error %}<span class="bb-tarjeta__linea bb-tarjeta__aviso"><strong>latido C3 con error</strong>: {{ c.latido_error }}</span>
+                {% elif c.latido_hace %}<span class="bb-tarjeta__linea">latido C3 {{ c.latido_hace }}{% if c.latido_modo and c.latido_modo != 'real' %} ({{ c.latido_modo }}){% endif %}</span>{% endif %}
+                {% if (c.parado and c.proximo_reinicio) or c.ultimo_evento or c.lectura_error %}
+                    <details class="bb-detalle">
+                        <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Detalle</summary>
+                        <ul>
+                            {% if c.parado and c.proximo_reinicio %}<li>reinicio: {{ c.proximo_reinicio|truncate(90) }}</li>{% endif %}
+                            {% if c.ultimo_evento %}<li>último {{ c.ultimo_evento.tipo|replace('_', ' ') }} {{ c.ultimo_evento.hace }}</li>{% endif %}
+                            {% if c.lectura_error %}<li>error: {{ c.lectura_error|truncate(90) }}</li>{% endif %}
+                        </ul>
+                    </details>
+                {% endif %}
+                <a class="bb-tarjeta__link" href="{{ url_for('main.rescate_page') }}#c3">Ver C3</a>
             </div>
-            </a>
+            <div class="card-footer">{% if c.capital_hace %}lectura {{ c.capital_hace }}{% else %}sin lectura{% endif %}</div>
         </div>
         {% endif %}
     </div>
     {% if r.modo and not r.servicio_vivo %}
-        <div class="alert alert-danger rescate_aviso mt-2 mb-0" role="alert">El servicio rescate no late (último latido {{ r.latido_hace or 'desconocido' }}): los datos pueden estar viejos y nadie está vigilando el tope.</div>
+        <div class="alert alert-danger rescate_aviso mb-0" role="alert"><i class="fas fa-heartbeat me-1" aria-hidden="true"></i> El servicio rescate no late (último latido {{ r.latido_hace or 'desconocido' }}): los datos pueden estar viejos y nadie está vigilando el tope.</div>
     {% endif %}
     {% if r.sin_datos %}
-        <div class="alert alert-secondary rescate_aviso mt-2 mb-0" role="status">Sin datos del rescate. {{ r.como_activar }}</div>
+        <div class="alert alert-secondary rescate_aviso mb-0" role="status">Sin datos del rescate. {{ r.como_activar }}</div>
     {% elif r.lectura_error %}
-        <div class="alert alert-warning rescate_aviso mt-2 mb-0" role="status">Última lectura con error: {{ r.lectura_error|truncate(220) }}</div>
+        <div class="alert alert-warning rescate_aviso mb-0" role="status">Última lectura con error: {{ r.lectura_error|truncate(220) }}</div>
     {% endif %}
     {% if r.simulado %}
-        <div class="small text-muted mt-1">dry_run: los montos de préstamo son simulados (no se transfirió nada).</div>
+        <p class="bb-tarjeta__linea mb-0">dry_run: los montos de préstamo son simulados (no se transfirió nada).</p>
     {% endif %}
     {% for e in r.errores %}
-        <div class="alert alert-warning rescate_aviso mt-2 mb-0" role="alert">{{ e }}</div>
+        <div class="alert alert-warning rescate_aviso mb-0" role="alert">{{ e }}</div>
     {% endfor %}
     {% endif %}
-</div>
+</section>

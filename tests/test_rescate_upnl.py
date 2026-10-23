@@ -547,12 +547,12 @@ def test_panel_y_tarjeta_muestran_el_disparo(client, hd):  # noqa: F811
     assert status["limites"]["upnl_x_pct"] == ["10", "95"]
 
     html = client.get("/").get_data(as_text=True)
-    m = re.search(r'data-tarjeta="upnl".*?</div>\s*<div class="card-footer', html, re.S)
+    m = re.search(r'data-tarjeta="upnl".*?<div class="card-footer[^>]*>.*?</div>', html, re.S)
     assert m, "falta la tarjeta upnl"
     tarjeta = m.group(0)
-    assert 'data-upnl-estado="real"' in tarjeta and "$-7000.00" in tarjeta
-    assert "X 70% · paso $1000" in tarjeta and "próximo paso con uPnL ≤ $-8000.00" in tarjeta
-    assert "última inyección uPnL $1000.00" in tarjeta
+    assert 'data-upnl-estado="real"' in tarjeta and "\u2212$7.000,00" in tarjeta and 'data-value="-7000.00"' in tarjeta
+    assert "X 70\u00a0% · paso $1.000" in tarjeta and "próximo paso con uPnL ≤ \u2212$8.000,00" in tarjeta
+    assert "última inyección uPnL $1.000,00" in tarjeta
 
 
 def test_tarjeta_upnl_habilitado_sin_modo_en_el_servicio(client, hd):  # noqa: F811
@@ -643,7 +643,7 @@ def test_upnl_con_el_rescate_deshabilitado_queda_off(client, hd):  # noqa: F811
     assert up["habilitado"] is True and up["rescate_habilitado"] is False
     assert up["estado"] == "off" and up["eval"] is None
     html = client.get("/").get_data(as_text=True)
-    m = re.search(r'data-tarjeta="upnl".*?</div>\s*<div class="card-footer', html, re.S)
+    m = re.search(r'data-tarjeta="upnl".*?<div class="card-footer[^>]*>.*?</div>', html, re.S)
     assert m, "falta la tarjeta upnl"
     tarjeta = m.group(0)
     assert 'data-upnl-estado="off"' in tarjeta and "el rescate está deshabilitado" in tarjeta
