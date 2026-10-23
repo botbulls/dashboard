@@ -1766,6 +1766,7 @@ def rescate_page():
         custom=current_app.config["CUSTOM"],
         limites={k: [str(lo), str(hi)] for k, (lo, hi) in rescate.LIMITES.items()},
         aviso=rescate.AVISO,
+        retiro_recomendada=rescate.FRECUENCIA_RECOMENDADA,
         c3_limites={**{k: [str(lo), str(hi)] for k, (lo, hi) in c3.LIMITES.items()},
                     **{k: [str(lo), str(hi)] for k, (lo, hi) in c3.LIMITES_ENTEROS.items()}},
         c3_aviso=c3.AVISO,

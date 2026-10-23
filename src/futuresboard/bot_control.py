@@ -1113,6 +1113,7 @@ def _apply_and_restart(settings: Settings, store: Store, docker: DockerClient, i
                 f"{exc} Resultado incierto: la config de forager quedo escrita (backup {backup.name}); "
                 "revisar el estado del bot antes de reintentar."
             )
+            err.uncertain = True  # sigue siendo incierto (lo mira la aplicación de un perfil)
             raise err from exc
         try:
             restore_forager_config(path, backup)

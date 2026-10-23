@@ -147,6 +147,33 @@
             </a>
         </div>
         {% endif %}
+        {% if r.retiro %}
+        {% set rt = r.retiro %}
+        <div class="col-6 col-md-4 col-xl-2">
+            <a href="{{ url_for('main.rescate_page') }}" style="text-decoration: none;">
+            <div class="card text-center h-100" data-tarjeta="retiro" data-retiro-estado="{{ rt.estado }}">
+                <div class="card-body">
+                    <h5 class="card-title mb-1" style="color: {% if rt.vieja %}var(--text-secondary, #64748b){% else %}var(--success-color, #10b981){% endif %};">${{ rt.acumulado }}</h5>
+                    <p class="card-text mb-0">
+                        retirado a spot (acumulado)
+                        {% if rt.acumulado_simulado != '0.00' %}<br>simulado: ${{ rt.acumulado_simulado }}{% endif %}
+                        {% if rt.frecuencia == 'off' %}<br>retiro apagado
+                        {% elif rt.estado == 'off' %}<br>{{ rt.frecuencia }} en el panel; el servicio no lo ejecuta (FUTURESBOARD_RESCATE_RETIRO_MODE={{ rt.modo or 'off' }})
+                        {% else %}<br>{{ rt.frecuencia }}{% if rt.estado == 'simulado' %} (simulado){% endif %} · base ${{ rt.base }}
+                            {% if rt.vencido %}<br><strong>vencido</strong>{% if rt.motivo_espera %}: {{ rt.motivo_espera|truncate(90) }}{% endif %}
+                            {% elif rt.proximo %}<br>próximo retiro {{ rt.proximo[:10] }}{% endif %}
+                            {% if rt.excedente is not none %}<br>excedente hoy ${{ rt.excedente }}{% endif %}
+                        {% endif %}
+                        {% if rt.error %}<br>{{ rt.error|truncate(90) }}{% endif %}
+                        {% if rt.ultimo %}<br>último ${{ rt.ultimo.monto }} {{ rt.ultimo.hace }}{% if rt.ultimo.simulado %} (simulado){% endif %}{% endif %}
+                        {% if rt.vieja %}<br><strong>dato viejo ({{ r.motivo_vieja }})</strong>{% endif %}
+                    </p>
+                </div>
+                <div class="card-footer text-muted">Retiro de ganancias</div>
+            </div>
+            </a>
+        </div>
+        {% endif %}
         {% if r.c3 %}
         {% set c = r.c3 %}
         <div class="col-6 col-md-4 col-xl-2">

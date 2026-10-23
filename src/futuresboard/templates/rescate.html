@@ -46,6 +46,7 @@
                         <tbody>
                             <tr><th scope="row">Ratio margen / mantenimiento</th><td data-r="ratio">-</td></tr>
                             <tr><th scope="row">Disparo por uPnL</th><td data-r="upnl">-</td></tr>
+                            <tr><th scope="row">Retiro periódico de ganancias</th><td data-r="retiro">-</td></tr>
                             <tr><th scope="row">Posiciones abiertas</th><td data-r="posiciones">-</td></tr>
                             <tr><th scope="row">Préstamo pendiente</th><td data-r="prestamo">-</td></tr>
                             <tr><th scope="row">USDT libre en spot</th><td data-r="spot">-</td></tr>
@@ -108,6 +109,24 @@
                             <label class="form-label small" for="rescateUpnlPaso">Paso por inyección del disparo uPnL (USDT)</label>
                             <input class="form-control form-control-sm" type="number" id="rescateUpnlPaso" step="any" min="{{ limites['upnl_paso_usdt'][0] }}" max="{{ limites['upnl_paso_usdt'][1] }}">
                             <div class="form-text">No puede superar la reserva. Default 1000.</div>
+                        </div>
+                        <hr>
+                        <div class="mb-2">
+                            <label class="form-label small" for="rescateRetiroFrecuencia">Retiro periódico de ganancias (futuros → spot)</label>
+                            <select class="form-select form-select-sm" id="rescateRetiroFrecuencia">
+                                <option value="off">off</option>
+                                <option value="diaria">diaria</option>
+                                <option value="semanal">semanal (lunes)</option>
+                                <option value="mensual">mensual (día 1)</option>
+                                <option value="trimestral">trimestral (1 de ene/abr/jul/oct)</option>
+                                <option value="anual">anual (1 de enero)</option>
+                            </select>
+                            <div class="form-text">Al comienzo de cada período (UTC) pasa a spot lo que la wallet de futuros (realizada, sin el uPnL) tenga por encima de la base, sin préstamo pendiente ni tope en confirmación, limitado por <code>maxWithdrawAmount</code> y por las guardas (el ratio queda en el umbral de devolución o arriba; no dispara el disparo por uPnL). El primer retiro es al comienzo del próximo período. Solo actúa si el servicio corre con <code>FUTURESBOARD_RESCATE_RETIRO_MODE</code> en <code>dry_run</code> (simula) o <code>real</code>. Recomendada por el backtest: <span data-r="retiro-recomendada">{{ retiro_recomendada }}</span>. Los números de TWE 4 + rescate suponen retirar la ganancia: sin retiro, una caída profunda se lleva también la reserva.</div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label small" for="rescateRetiroBase">Base de futuros (USDT)</label>
+                            <input class="form-control form-control-sm" type="number" id="rescateRetiroBase" step="any" min="{{ limites['retiro_base_usdt'][0] }}" max="{{ limites['retiro_base_usdt'][1] }}">
+                            <div class="form-text">Lo que queda en futuros después de retirar ({{ limites['retiro_base_usdt'][0] }}–{{ limites['retiro_base_usdt'][1] }}). Default 10000.</div>
                         </div>
                         <button type="submit" class="btn btn-primary btn-sm" id="rescateGuardar">Guardar</button>
                         <span class="small ms-2" id="rescateRespuesta" role="status" aria-live="polite"></span>
@@ -240,7 +259,10 @@
              upnl_habilitado: document.getElementById('rescateUpnlHabilitado'),
              upnl_x_pct: document.getElementById('rescateUpnlX'),
              upnl_paso_usdt: document.getElementById('rescateUpnlPaso'),
+             retiro_frecuencia: document.getElementById('rescateRetiroFrecuencia'),
+             retiro_base_usdt: document.getElementById('rescateRetiroBase'),
          };
+         const RETIRO_ESTADOS = { simulado: 'simulado', real: 'real' };
          const UPNL_ESTADOS = { registra: 'solo registra (dry_run)', simulado: 'simulado (servicio en dry_run)', real: 'real' };
          const respuesta = document.getElementById('rescateRespuesta');
          const topeBox = document.getElementById('rescateTope');
@@ -382,6 +404,32 @@
              return t;
          }
 
+         function textoRetiro(r, svc) {
+             if (!r || r.frecuencia === 'off') {
+                 return `apagado${r && r.acumulado && r.acumulado.real !== '0.00' ? ` · retirado acumulado ${r.acumulado.real} USDT` : ''}`;
+             }
+             let t;
+             if (r.estado === 'off') {
+                 t = `${r.frecuencia} en el panel, pero el servicio no lo ejecuta (FUTURESBOARD_RESCATE_RETIRO_MODE=${r.modo || 'off'})`;
+             } else {
+                 const e = r.eval;
+                 t = `${RETIRO_ESTADOS[r.estado] || r.estado} · ${r.frecuencia} · base ${r.base} USDT`;
+                 if (e) {
+                     if (e.error) t += ` · ${e.error}`;
+                     if (e.excedente !== undefined) t += ` · excedente ${e.excedente} USDT (retirable ahora ${e.monto_posible}, lo limita: ${e.limite})`;
+                     t += e.vencido ? ` · VENCIDO (período ${e.periodo})${e.motivo_espera ? ': espera, ' + e.motivo_espera : ''}` : ` · próximo retiro ${e.proximo_en}`;
+                     t += ` · ${e.ts}`;
+                 } else {
+                     t += ' · sin evaluación todavía';
+                 }
+                 if (!svc.vivo) t += ' · dato viejo: el servicio no late';
+             }
+             const ac = r.acumulado || {};
+             t += ` · retirado acumulado ${ac.real || '0.00'} USDT${ac.dry_run && ac.dry_run !== '0.00' ? ` (simulado ${ac.dry_run})` : ''}`;
+             if (r.ultimo) t += ` · último ${r.ultimo.monto} USDT el ${r.ultimo.ts}${r.ultimo.modo === 'dry_run' ? ' (simulado)' : ''}`;
+             return t;
+         }
+
          function render(s) {
              renderC3(s.c3);
              const svc = s.servicio || {};
@@ -398,6 +446,7 @@
              set('ratio', u.ratio ? `${u.ratio} (inyecta debajo de ${cfg.umbral_ratio}; devuelve parcial desde ${cfg.umbral_devolucion_ratio})${sim}` : (u.posiciones === 0 ? 'sin posiciones' : '-'));
              set('posiciones', (u.posiciones === undefined || u.posiciones === null) ? '-' : String(u.posiciones));
              set('upnl', textoUpnl(s.upnl || {}, svc));
+             set('retiro', textoRetiro(s.retiro, svc));
              set('prestamo', `${usdt(s.prestamo)}${s.prestamo_modo === 'dry_run' ? ' (simulado)' : ''}`);
              set('spot', `${usdt(u.spot_usdt)}${sim}`);
              set('capital', usdt(u.capital));
@@ -444,6 +493,8 @@
                  inputs.upnl_habilitado.checked = !!cfg.upnl_habilitado;
                  inputs.upnl_x_pct.value = cfg.upnl_x_pct ?? '';
                  inputs.upnl_paso_usdt.value = cfg.upnl_paso_usdt ?? '';
+                 inputs.retiro_frecuencia.value = cfg.retiro_frecuencia || 'off';
+                 inputs.retiro_base_usdt.value = cfg.retiro_base_usdt ?? '';
              }
 
              const tbody = q('eventos');
@@ -497,6 +548,7 @@
          Object.values(inputs).forEach((el) => el.addEventListener('input', () => { editando = true; }));
          inputs.habilitado.addEventListener('change', () => { editando = true; });
          inputs.upnl_habilitado.addEventListener('change', () => { editando = true; });
+         inputs.retiro_frecuencia.addEventListener('change', () => { editando = true; });
 
          form.addEventListener('submit', (ev) => {
              ev.preventDefault();
@@ -510,6 +562,8 @@
                  upnl_habilitado: inputs.upnl_habilitado.checked,
                  upnl_x_pct: numero(inputs.upnl_x_pct),
                  upnl_paso_usdt: numero(inputs.upnl_paso_usdt),
+                 retiro_frecuencia: inputs.retiro_frecuencia.value,
+                 retiro_base_usdt: numero(inputs.retiro_base_usdt),
              };
              if (Object.values(body).some((v) => typeof v === 'number' && Number.isNaN(v))) {
                  respuesta.textContent = 'Hay valores que no son números.';

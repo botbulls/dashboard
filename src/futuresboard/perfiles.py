@@ -348,7 +348,9 @@ def aplicar(settings: bot_control.Settings, store: bot_control.Store, nombre: st
         out = bot_control.start_bot(settings, store, None, docker=docker, reporter=_SinValidar(rep),
                                     twe_long=perfil["twe_long"])
     except bot_control.BotControlError as exc:
-        if isinstance(exc, bot_control.DockerError) and exc.uncertain:
+        incierto = isinstance(exc, bot_control.DockerError) and (
+            exc.uncertain or bool(getattr(exc.__cause__, "uncertain", False)))
+        if incierto:
             nota = " La config del rescate del perfil quedó guardada, igual que la de forager."
         else:
             try:
@@ -359,7 +361,7 @@ def aplicar(settings: bot_control.Settings, store: bot_control.Store, nombre: st
                         "revisala en la sección Rescate.")
         if isinstance(exc, bot_control.DockerError):
             err: bot_control.BotControlError = bot_control.DockerError(f"{exc}{nota}", exc.payload)
-            err.uncertain = exc.uncertain
+            err.uncertain = incierto
         else:
             err = bot_control.BotControlError(f"{exc}{nota}", exc.payload)
         err.status_code = exc.status_code
