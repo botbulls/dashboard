@@ -1704,8 +1704,19 @@ def rescate_status():
 def rescate_config():
     body = request.get_json(silent=True)
     params = body if isinstance(body, dict) else {}
+    confirmar = False
+    if isinstance(body, dict) and "confirmar_inyeccion" in body:
+        body = dict(body)
+        confirmar = body.pop("confirmar_inyeccion")
     try:
+        if not isinstance(confirmar, bool):
+            raise ValueError("confirmar_inyeccion tiene que ser true o false.")
         parsed = rescate.validate_config_body(body)
+        aviso = None if confirmar else rescate.inyeccion_al_guardar(_bot_store().data_dir, parsed)
+        if aviso:
+            # Bajar X o prender el disparo U en plena pérdida inyecta ya (uno o varios pasos): el panel pide confirmarlo.
+            _rescate_audit("rescate_config", params, "requiere_confirmacion", aviso)
+            return _json_response({"ok": False, "requiere_confirmacion": True, "error": aviso}, 409)
         cfg = rescate.save_config(_bot_store().data_dir, parsed, session.get("username") or "?")
     except ValueError as exc:
         _rescate_audit("rescate_config", params, "rechazado", str(exc))

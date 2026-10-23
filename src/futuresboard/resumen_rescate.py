@@ -201,8 +201,35 @@ def _tarjetas(data_dir: pathlib.Path, now: float) -> Dict[str, Any]:
     out["tope"] = {"estado": tope_estado, "limite": status.get("limite_tope"), "pct": status.get("tope_pct"),
                    "start_bloqueado": status.get("start_bloqueado")}
     out["sin_datos"] = spot["usdt"] is None and not lectura_ok
+    out["upnl"] = _upnl(status, cfg, now, _vieja)
     out["c3"] = _c3(data_dir, now)
     return out
+
+
+def _upnl(status: Dict[str, Any], cfg: Dict[str, Any], now: float, vieja: Any) -> Optional[Dict[str, Any]]:
+    """Tarjeta del disparo anticipado por uPnL: solo si está habilitado en el panel."""
+    up = status.get("upnl") if isinstance(status.get("upnl"), dict) else {}
+    if not up.get("habilitado"):
+        return None
+    # En off no se muestra una evaluación que haya quedado de antes (p. ej. de antes de deshabilitar el rescate).
+    ev = up.get("eval") if isinstance(up.get("eval"), dict) and up.get("estado") != rescate.UPNL_OFF else {}
+    ok = bool(ev) and not ev.get("error")
+    ultima = up.get("ultima_inyeccion") if isinstance(up.get("ultima_inyeccion"), dict) else None
+    return {
+        "estado": up.get("estado"),
+        "rescate_habilitado": bool(up.get("rescate_habilitado")),
+        "modo": up.get("modo"),
+        "x_pct": cfg.get("upnl_x_pct"),
+        "paso": cfg.get("upnl_paso_usdt"),
+        "upnl": ev.get("upnl") if ok else None,
+        "upnl_dispara": ev.get("upnl_dispara") if ok else None,
+        "dispara": bool(ev.get("dispara")) if ok else False,
+        "error": ev.get("error") if ev else None,
+        "hace": antiguedad(ev.get("ts"), now) if ev else None,
+        "vieja": bool(ev) and vieja(ev.get("ts")),
+        "ultima": None if ultima is None else {"monto": ultima.get("monto"), "hace": antiguedad(ultima.get("ts"), now),
+                                               "simulada": ultima.get("modo") == rescate.MODE_DRY_RUN},
+    }
 
 
 def _c3(data_dir: pathlib.Path, now: float) -> Optional[Dict[str, Any]]:
