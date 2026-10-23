@@ -7,35 +7,6 @@ table.dataTable {
   color: var(--text-primary);
 }
 
-/* Home dashboard: keep chart cards aligned to the same height */
-.dashboard_charts_row .dashboard_chart_card {
-  display: flex;
-  flex-direction: column;
-  min-height: 0; /* Prevent stretching */
-}
-
-.dashboard_charts_row .dashboard_chart_header {
-  min-height: 52px;
-  gap: 0.75rem;
-}
-
-.dashboard_charts_row .dashboard_chart_title {
-  flex: 1 1 auto;
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.dashboard_charts_row .dashboard_chart_header_spacer {
-  width: 92px; /* approximate width of the Projection button to keep headers equal */
-}
-
-.dashboard_charts_row canvas {
-  display: block;
-  width: 100% !important;
-}
-
 table.dataTable thead th,
 table.dataTable thead td {
   border-bottom-color: var(--border-color) !important;

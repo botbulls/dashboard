@@ -404,6 +404,26 @@ body.bb {
   .bb-rescate { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
+/* ------------------------------------------------------------------ 9. Gráficos (un eje por gráfico) */
+.bb-seccion__sub { font-size: var(--bb-fs-14); font-weight: 400; color: var(--bb-text-2); }
+.bb-graficos { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--bb-s4); }
+.bb-graficos > * { min-width: 0; }
+.bb-graficos > .col-a { grid-column: span 5; } .bb-graficos > .col-b { grid-column: span 4; } .bb-graficos > .col-c { grid-column: span 3; }
+.bb-grafico .card-body { display: grid; gap: var(--bb-s2); align-content: start; }
+.bb-grafico h3 { font-size: var(--bb-fs-16); margin: 0; }
+.bb-grafico__sub { font-size: var(--bb-fs-13); color: var(--bb-text-2); margin: 0; }
+.bb-grafico__lienzo { position: relative; height: 240px; }
+.bb-grafico__lienzo canvas { max-width: 100%; }
+.bb-grafico .card-footer { font-size: var(--bb-fs-13); color: var(--bb-text-2); }
+.bb .is-gana { color: var(--bb-gain); } .bb .is-pierde { color: var(--bb-loss); }
+.bb-tabla-chica { width: 100%; margin-top: var(--bb-s2); border-collapse: collapse; font-size: var(--bb-fs-13); }
+.bb-tabla-chica th, .bb-tabla-chica td { padding: 4px var(--bb-s2) 4px 0; border-bottom: 1px solid var(--bb-border); }
+.bb-tabla-chica th { color: var(--bb-text-2); font-weight: 600; }
+.bb-tabla-chica .bb-n { text-align: right; padding-right: 0; font-weight: 600; }
+@media (max-width: 1199.98px) {
+  .bb-graficos > .col-a, .bb-graficos > .col-b { grid-column: span 6; } .bb-graficos > .col-c { grid-column: span 12; }
+}
+
 /* ------------------------------------------------------------------ 12. Pie */
 .bb-pie { padding: var(--bb-s5); padding-right: calc(var(--bb-s5) + 56px); border-top: 1px solid var(--bb-border); color: var(--bb-text-2); font-size: var(--bb-fs-13); display: grid; gap: var(--bb-s2); }
 .bb-pie p { margin: 0; max-width: 72ch; }
@@ -481,6 +501,10 @@ body.bb {
   .bb-tarjeta__valor { font-size: var(--bb-fs-16); }
   .bb-detalle summary, .bb-tarjeta__link { min-height: var(--bb-tap); display: inline-flex; align-items: center; }
   .bb-seccion__titulo a { display: inline-flex; align-items: center; min-height: var(--bb-tap); }
+  .bb-graficos { grid-template-columns: minmax(0, 1fr); gap: var(--bb-s3); }
+  .bb-graficos > * { grid-column: auto !important; }
+  .bb-grafico__lienzo { height: 220px; }
+  .bb-tabla-chica td a { display: inline-flex; align-items: center; min-height: var(--bb-tap); }
 }
 
 /* ------------------------------------------------------------------ 16. Neutralizar lo viejo mientras queden reglas de

@@ -122,40 +122,69 @@
         </div>
     </section>
     {% if rescate_resumen %}{% include "_rescate_tarjetas.html" %}{% endif %}
-    <br>
-    <div class="row g-3 align-items-stretch dashboard_charts_row">
-        <div class="col-md-6 d-flex">
-            <div class="card text-center flex-fill dashboard_chart_card">
-                <div class="card-header text-muted dashboard_chart_header d-flex justify-content-between align-items-center">
-                    <span class="dashboard_chart_title">Profit by day between {{ startdate }} and {{ enddate }}</span>
-                    <a class="btn btn-outline-secondary btn-sm" role="button" href="../../projection">Projection</a>
+    {# Gráficos del período: un eje por gráfico (antes ganancia y balance compartían dos escalas). Los datos son los
+       arrays crudos de Jinja; el formato es-AR va solo en ejes, tooltips y etiquetas (BB.fmt). #}
+    {% set period_profit = totals[9]|float %}
+    {% set wallet_balance = totals[7][1]|replace('$', '')|replace(',', '')|float %}
+    <section class="bb-seccion" aria-labelledby="bbTituloPeriodo">
+        <h2 class="bb-seccion__titulo" id="bbTituloPeriodo">Período <span class="bb-seccion__sub">del {{ startdate }} al {{ enddate }}</span>
+            <a class="bb-seccion__mas" href="{{ url_for('main.projection_page') }}">Proyección</a></h2>
+        <div class="bb-graficos">
+            <div class="card bb-grafico col-a">
+                <div class="card-body">
+                    <h3>Ganancia por día</h3>
+                    <p class="bb-grafico__sub">Verde suma, rojo resta. Tocá una barra para ver el monto.</p>
+                    <div class="bb-grafico__lienzo"><canvas id="graficoDiario" role="img" aria-label="Ganancia por día del {{ startdate }} al {{ enddate }}"></canvas></div>
+                    <details class="bb-detalle">
+                        <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Ver los números</summary>
+                        <table class="bb-tabla-chica">
+                            <thead><tr><th scope="col">Día</th><th scope="col" class="bb-n">Ganancia</th></tr></thead>
+                            <tbody>
+                                {% for v in data[0][0] %}
+                                    <tr><td>{{ data[0][1][loop.index0] }}</td><td class="bb-n is-{{ v|tendencia or 'cero' }}" data-value="{{ v }}">{{ v|usd(dec=2, signo=True) }}</td></tr>
+                                {% else %}
+                                    <tr><td colspan="2">Sin movimientos en el período.</td></tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </details>
                 </div>
-                <canvas id="lineChart" height="400"></canvas>
-				<div class="card-footer text-muted">
-					Profit over this period: {{ "$%.2f"|format(totals[9]) }}
-					{% set period_profit = totals[9]|float %}
-					{% set wallet_balance = totals[7][1]|replace('$', '')|replace(',', '')|float %}
-					{% if wallet_balance > 0 %}
-						({{ "%.2f"|format((period_profit / wallet_balance) * 100) }}%)
-					{% else %}
-						(-)
-					{% endif %}
-				</div>
+                <div class="card-footer">Ganancia del período: <strong class="bb-num is-{{ period_profit|tendencia or 'cero' }}" data-value="{{ totals[9] }}">{{ period_profit|usd(dec=2, signo=True) }}</strong>
+                    {% if wallet_balance > 0 %}({{ ((period_profit / wallet_balance) * 100)|pct(dec=2, signo=True) }}){% else %}(-){% endif %}</div>
+            </div>
+            <div class="card bb-grafico col-b">
+                <div class="card-body">
+                    <h3>Balance</h3>
+                    <p class="bb-grafico__sub">Al cierre de cada día.</p>
+                    <div class="bb-grafico__lienzo"><canvas id="lineChart" role="img" aria-label="Balance al cierre de cada día"></canvas></div>
+                </div>
+                <div class="card-footer">{% if data[2][0] %}Último: <strong class="bb-num" data-value="{{ data[2][0][-1] }}">{{ data[2][0][-1]|usd(dec=2) }}</strong>{% else %}Sin datos en el período.{% endif %}</div>
+            </div>
+            <div class="card bb-grafico col-c">
+                <div class="card-body">
+                    <h3>Ganancia por moneda</h3>
+                    <p class="bb-grafico__sub">Tocá una moneda para abrirla.</p>
+                    <div class="bb-grafico__lienzo" style="height: {{ [240, 56 + 34 * (data[1][0]|length)]|max }}px"><canvas id="barChart" role="img" aria-label="Ganancia por moneda en el período"></canvas></div>
+                    <details class="bb-detalle">
+                        <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Ver los números</summary>
+                        <table class="bb-tabla-chica">
+                            <thead><tr><th scope="col">Moneda</th><th scope="col" class="bb-n">Ganancia</th></tr></thead>
+                            <tbody>
+                                {% for moneda in data[1][0] %}
+                                    {% set v = data[1][1][loop.index0] %}
+                                    <tr><td><a href="{{ url_for('main.coin_page', coin=moneda) }}">{{ moneda }}</a></td><td class="bb-n is-{{ v|tendencia or 'cero' }}" data-value="{{ v }}">{{ v|usd(dec=2, signo=True) }}</td></tr>
+                                {% else %}
+                                    <tr><td colspan="2">Sin movimientos en el período.</td></tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </details>
+                </div>
+                <div class="card-footer">{{ totals[10] }} {{ 'moneda' if totals[10] == 1 else 'monedas' }} con movimiento</div>
             </div>
         </div>
-        <div class="col-md-6 d-flex">
-            <div class="card text-center flex-fill dashboard_chart_card">
-                <div class="card-header text-muted dashboard_chart_header d-flex justify-content-between align-items-center">
-                    <span class="dashboard_chart_title">Profit by coin between {{ startdate }} and {{ enddate }}</span>
-                    <span class="dashboard_chart_header_spacer" aria-hidden="true"></span>
-                </div>
-                <canvas id="barChart" height="400"></canvas>
-				<div class="card-footer text-muted">
-					Coins active over this period: {{ totals[10] }}
-				</div>
-            </div>
-        </div>
-    </div>
+    </section>
+
 
 <script>
     $('input[name="daterange"]').daterangepicker({
@@ -214,37 +243,14 @@
     });
 
 Chart.register(ChartDataLabels);
-const data = {
-  labels: {{ data[1][0] | safe }},
-  datasets: [{
-    axis: 'y',
-    label: 'Profit $',
-    data: {{ data[1][1] }},
-    fill: false,
-    borderWidth: 1
-  }]
-};
 
-const config = {
-  type: 'bar',
-  data: data,
-  options: {
-      onClick: graphClickEvent,
-      indexAxis: 'y',
-      plugins:{
-          legend: {
-              display: false
-        },
-      },
-	  scales: {
-		y: {
-			ticks: {
-				autoSkip: false,
-			}
-		}
-	  }
-  }
-};
+// Gráficos de la home: un eje por gráfico, colores leídos de los tokens (se recrean al cambiar el tema).
+const DIAS = {{ data[0][1] | safe }};
+const DIARIO = {{ data[0][0] }};        /* data[0][0]: ganancia por día, crudo */
+const BALANCE = {{ data[2][0] }};       /* data[2][0]: balance al cierre, crudo */
+const BALANCE_DIAS = {{ data[2][1] | safe }};
+const data = { labels: {{ data[1][0] | safe }} };   /* monedas: las usa graphClickEvent */
+const POR_MONEDA = {{ data[1][1] }};    /* data[1][1]: ganancia por moneda, crudo */
 
 function graphClickEvent(event, array){
     if(array[0]){
@@ -253,84 +259,89 @@ function graphClickEvent(event, array){
     }
 }
 
-var myChart = new Chart(
-    document.getElementById('barChart'),
-    config
-);
+(function () {
+    const f = window.BB.fmt;
+    const etiquetaDia = (d) => (typeof d === 'string' && d.length >= 10 ? d.slice(8, 10) + '/' + d.slice(5, 7) : d);
+    let graficos = [];
 
-const data2 = {
-  labels: {{ data[0][1] | safe }},
-  datasets: [
-	  {
-		label: 'Profit',
-		data: {{ data[0][0] }},
-		fill: false,
-		borderColor: 'rgb(75, 192, 192)',
-		tension: 0.1,
-		yAxisID: 'y',
-	  },
-	  {
-		label: 'Balance',
-		data: {{ data[2][0] }},
-		fill: true,
-		borderColor: 'rgba(240, 234, 151, 0.3)',
-		backgroundColor: 'rgba(240, 234, 151, 0.3)',
-		tension: 0.1,
-		yAxisID: 'y1',
-        datalabels: {
-            labels: {
-              title: null
-            }
-        }
-	  },
-  ]
-};
-const config2 = {
-  type: 'line',
-  data: data2,
-  options: {
-		responsive: true,
-        layout: {
-            padding: {
-                top: 20
-            }
-        },
-        plugins:{
-            datalabels: {
-                anchor: 'end',
-                align: 'top',
-                offset: 5,
-            },
-            legend: {
-                display: false
-            },
-        },
-		scales: {
-			y: {
-				type: 'linear',
-				display: true,
-				position: 'left',
-				beginAtZero: true,
-				ticks: {
-					autoSkip: false,
-				}
-			},
-			y1: {
-				type: 'linear',
-				display: true,
-				position: 'right',
-				grid: {
-				  drawOnChartArea: false, // only want the grid lines for one axis to show up
-				}
-			}
-		}
-	}
-};
+    function pintar() {
+        const T = f.token;
+        const texto = T('--bb-text'), texto2 = T('--bb-text-2'), texto3 = T('--bb-text-3');
+        const grilla = T('--bb-chart-grid'), eje = T('--bb-border-strong');
+        const gana = T('--bb-gain-mark'), pierde = T('--bb-loss-mark'), linea = T('--bb-chart-line');
+        Chart.defaults.font.family = '"IBM Plex Sans", system-ui, sans-serif';
+        Chart.defaults.font.size = 12;
+        graficos.forEach((g) => g.destroy());
+        graficos = [];
+        const cero = (ctx) => (ctx.tick && ctx.tick.value === 0 ? eje : grilla);
+        const tooltip = {
+            backgroundColor: T('--bb-surface'), titleColor: texto, bodyColor: texto, borderColor: T('--bb-border'),
+            borderWidth: 1, padding: 10, displayColors: false,
+        };
+        const porSigno = (vs) => vs.map((v) => (v < 0 ? pierde : gana));
 
-var myChart = new Chart(
-    document.getElementById('lineChart'),
-    config2
-);
+        graficos.push(new Chart(document.getElementById('graficoDiario'), {
+            type: 'bar',
+            data: { labels: DIAS.map(etiquetaDia), datasets: [{ label: 'Ganancia', data: DIARIO, backgroundColor: porSigno(DIARIO), borderRadius: 4, maxBarThickness: 40 }] },
+            options: {
+                maintainAspectRatio: false, animation: false,
+                plugins: {
+                    legend: { display: false }, datalabels: { display: false },
+                    tooltip: Object.assign({}, tooltip, { callbacks: { label: (c) => f.usd(c.raw, { dec: 2, signo: true }) } }),
+                },
+                scales: {
+                    x: { grid: { display: false }, ticks: { color: texto3 } },
+                    y: { grid: { color: cero, drawBorder: false }, ticks: { color: texto3, maxTicksLimit: 5, callback: (v) => f.usd(v, { dec: 0 }) } },
+                },
+            },
+        }));
+
+        graficos.push(new Chart(document.getElementById('lineChart'), {
+            type: 'line',
+            data: { labels: BALANCE_DIAS.map(etiquetaDia), datasets: [{ label: 'Balance', data: BALANCE, borderColor: linea, backgroundColor: linea, borderWidth: 2, pointRadius: 3, pointHoverRadius: 5, fill: false, tension: 0 }] },
+            options: {
+                maintainAspectRatio: false, animation: false,
+                layout: { padding: { top: 22, right: 48 } },
+                plugins: {
+                    legend: { display: false },
+                    datalabels: {
+                        display: (c) => c.dataIndex === BALANCE.length - 1, align: 'top', anchor: 'end', clamp: true,
+                        color: texto2, font: { weight: 600 }, formatter: (v) => f.usd(v, { dec: 2 }),
+                    },
+                    tooltip: Object.assign({}, tooltip, { callbacks: { label: (c) => f.usd(c.raw, { dec: 2 }) } }),
+                },
+                scales: {
+                    x: { grid: { display: false }, ticks: { color: texto3 } },
+                    y: { grid: { color: grilla, drawBorder: false }, ticks: { color: texto3, maxTicksLimit: 5, callback: (v) => f.usd(v, { dec: 0 }) } },
+                },
+            },
+        }));
+
+        graficos.push(new Chart(document.getElementById('barChart'), {
+            type: 'bar',
+            data: { labels: data.labels, datasets: [{ axis: 'y', label: 'Ganancia', data: POR_MONEDA, backgroundColor: porSigno(POR_MONEDA), borderRadius: 4, maxBarThickness: 22 }] },
+            options: {
+                indexAxis: 'y', maintainAspectRatio: false, animation: false,
+                onClick: graphClickEvent,
+                onHover: (e, el) => { if (e.native && e.native.target) e.native.target.style.cursor = el.length ? 'pointer' : 'default'; },
+                layout: { padding: { right: 64 } },
+                plugins: {
+                    legend: { display: false },
+                    datalabels: { anchor: 'end', align: 'end', color: texto2, font: { weight: 600 }, formatter: (v) => f.usd(v, { dec: 2, signo: true }) },
+                    tooltip: Object.assign({}, tooltip, { callbacks: { label: (c) => f.usd(c.raw, { dec: 2, signo: true }) } }),
+                },
+                scales: {
+                    x: { grace: '10%', grid: { color: cero, drawBorder: false }, ticks: { color: texto3, maxTicksLimit: 4, callback: (v) => f.usd(v, { dec: 0 }) } },
+                    y: { grid: { display: false }, ticks: { color: texto, autoSkip: false, font: { weight: 500 } } },
+                },
+            },
+        }));
+    }
+
+    pintar();
+    // fb-theme-changed también llega cuando cambia el tema del sistema en modo automático.
+    window.addEventListener('fb-theme-changed', pintar);
+})();
 
 // Bot status (passivbot) - no bloquea la carga de la pagina
 (function() {
