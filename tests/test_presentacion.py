@@ -122,6 +122,30 @@ def test_rescate_resultado_de_apagar_y_cierre_a_mercado_a_la_vista(client):  # n
     assert "ejecuta <strong>Apagar</strong>: detiene passivbot y cierra todo a mercado" in _sin_plegados(aviso)
 
 
+
+def test_tarjetas_de_la_home_con_errores_y_reinicio_de_c3_a_la_vista(app):  # noqa: F811
+    from flask import render_template
+
+    r = {"modo": "real", "testnet": False, "servicio_vivo": True, "habilitado": True,
+         "ratio": {"semaforo": "verde", "valor": None, "posiciones": 0},
+         "tope": {"estado": "armado", "limite": "4000.00"},
+         "capital": {"usdt": None}, "spot": {"usdt": None}, "prestamo": {"usdt": None},
+         "upnl": {"estado": "real", "upnl": "-5.00", "x_pct": "70", "paso": "1000", "error": "ERROR DEL UPNL",
+                  "upnl_dispara": "-7000.00"},
+         "retiro": {"estado": "real", "frecuencia": "anual", "acumulado": "0.00", "acumulado_simulado": "0.00",
+                    "base": "10000.00", "error": "ERROR DEL RETIRO"},
+         "c3": {"estado": "parado", "parado": True, "proximo_reinicio": "cuando el índice llegue a 2026-10-24",
+                "lectura_error": "ERROR DE C3", "ultimo_evento": {"tipo": "corte", "hace": "hace 5 min"}}}
+    with app.test_request_context("/"):
+        html = render_template("_rescate_tarjetas.html", rescate_resumen=r)
+    visible = _sin_plegados(html)
+    # Errores y estado del bot (cuándo reinicia C3) sin tocar nada; el resto del detalle sigue plegado.
+    for texto in ("ERROR DEL UPNL", "ERROR DEL RETIRO", "error: ERROR DE C3", "reinicio: cuando el índice llegue a 2026-10-24"):
+        assert texto in visible, texto
+    assert "próximo paso con uPnL" in html and "próximo paso con uPnL" not in visible
+    assert "último corte hace 5 min" in html and "último corte" not in visible
+
+
 # ---------------------------------------------------------------- hooks (restricción 3)
 
 PAGINAS = ["/", "/positions", "/history", "/projection", "/rescate", "/settings", "/coins/BTCUSDT"]

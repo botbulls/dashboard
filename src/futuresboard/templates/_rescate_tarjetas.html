@@ -125,12 +125,12 @@
                 </span>
                 {% if u.dispara %}<span class="bb-tarjeta__linea bb-tarjeta__aviso"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> <strong>condición cumplida</strong></span>{% endif %}
                 {% if u.vieja %}<span class="bb-tarjeta__linea bb-tarjeta__aviso"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> dato viejo ({{ r.motivo_vieja }})</span>{% endif %}
-                {% if u.upnl_dispara is not none or u.error or u.ultima %}
+                {% if u.error %}<span class="bb-tarjeta__linea bb-tarjeta__aviso"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> {{ u.error|truncate(110) }}</span>{% endif %}
+                {% if u.upnl_dispara is not none or u.ultima %}
                     <details class="bb-detalle">
                         <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Detalle</summary>
                         <ul>
                             {% if u.upnl_dispara is not none %}<li>próximo paso con uPnL ≤ {{ u.upnl_dispara|usd }}</li>{% endif %}
-                            {% if u.error %}<li>{{ u.error|truncate(110) }}</li>{% endif %}
                             {% if u.ultima %}<li>última inyección uPnL {{ u.ultima.monto|usd }} {{ u.ultima.hace }}{% if u.ultima.simulada %} (simulada){% endif %}</li>{% endif %}
                         </ul>
                     </details>
@@ -184,12 +184,12 @@
                     {% elif rt.proximo %}<span class="bb-tarjeta__linea">próximo retiro {{ rt.proximo[:10] }}</span>{% endif %}
                 {% endif %}
                 {% if rt.vieja %}<span class="bb-tarjeta__linea bb-tarjeta__aviso"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> dato viejo ({{ r.motivo_vieja }})</span>{% endif %}
+                {% if rt.error %}<span class="bb-tarjeta__linea bb-tarjeta__aviso"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> {{ rt.error|truncate(90) }}</span>{% endif %}
                 <details class="bb-detalle">
                     <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Detalle</summary>
                     <ul>
                         <li>retirado a spot (acumulado){% if rt.acumulado_simulado != '0.00' %}; simulado: {{ rt.acumulado_simulado|usd }}{% endif %}</li>
                         {% if rt.frecuencia != 'off' and rt.estado != 'off' and rt.excedente is not none %}<li>excedente hoy {{ rt.excedente|usd }}</li>{% endif %}
-                        {% if rt.error %}<li>{{ rt.error|truncate(90) }}</li>{% endif %}
                         {% if rt.ultimo %}<li>último {{ rt.ultimo.monto|usd }} {{ rt.ultimo.hace }}{% if rt.ultimo.simulado %} (simulado){% endif %}</li>{% endif %}
                     </ul>
                 </details>
@@ -213,13 +213,13 @@
                 {% if c.latido_suspendido %}<span class="bb-tarjeta__linea bb-tarjeta__aviso"><strong>latido C3 suspendido</strong>: {{ c.latido_suspendido|truncate(110) }}{% if c.latido_hace %} (último {{ c.latido_hace }}){% endif %}</span>
                 {% elif c.latido_error %}<span class="bb-tarjeta__linea bb-tarjeta__aviso"><strong>latido C3 con error</strong>: {{ c.latido_error }}</span>
                 {% elif c.latido_hace %}<span class="bb-tarjeta__linea">latido C3 {{ c.latido_hace }}{% if c.latido_modo and c.latido_modo != 'real' %} ({{ c.latido_modo }}){% endif %}</span>{% endif %}
-                {% if (c.parado and c.proximo_reinicio) or c.ultimo_evento or c.lectura_error %}
+                {% if c.parado and c.proximo_reinicio %}<span class="bb-tarjeta__linea">reinicio: {{ c.proximo_reinicio|truncate(90) }}</span>{% endif %}
+                {% if c.lectura_error %}<span class="bb-tarjeta__linea bb-tarjeta__aviso"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> error: {{ c.lectura_error|truncate(90) }}</span>{% endif %}
+                {% if c.ultimo_evento %}
                     <details class="bb-detalle">
                         <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Detalle</summary>
                         <ul>
-                            {% if c.parado and c.proximo_reinicio %}<li>reinicio: {{ c.proximo_reinicio|truncate(90) }}</li>{% endif %}
-                            {% if c.ultimo_evento %}<li>último {{ c.ultimo_evento.tipo|replace('_', ' ') }} {{ c.ultimo_evento.hace }}</li>{% endif %}
-                            {% if c.lectura_error %}<li>error: {{ c.lectura_error|truncate(90) }}</li>{% endif %}
+                            <li>último {{ c.ultimo_evento.tipo|replace('_', ' ') }} {{ c.ultimo_evento.hace }}</li>
                         </ul>
                     </details>
                 {% endif %}
