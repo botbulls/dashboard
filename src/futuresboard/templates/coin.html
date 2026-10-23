@@ -1,29 +1,15 @@
 {% extends "base.html" %}
 {% block autoreload %}<meta http-equiv="refresh" content="120">{% endblock %}
 {% block title %}{{ coin }}{% endblock %}
+{% block acciones %}
+    <form method="GET" name="daterangeform" class="bb-fecha">
+        <i class="far fa-calendar-alt" aria-hidden="true"></i>
+        <input type="text" class="form-control" name="daterange" size="22" aria-label="Período" />
+    </form>
+    <a class="bb-icono-btn" href="https://www.binance.com/en/futures/{{ coin }}" target="_blank" rel="noopener" aria-label="Ver {{ coin }} en Binance" title="Ver en Binance"><i class="fas fa-external-link-alt" aria-hidden="true"></i></a>
+{% endblock %}
 {% block content %}
-    <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
-        <h3 class="d-flex align-items-center">
-            <button class="navbar-toggler d-md-none hamburger-btn me-2" type="button" id="mobileMenuToggle" aria-label="Toggle navigation" title="Menú">
-                <i class="fas fa-bars"></i>
-            </button>
-            <i class="fas fa-coins"></i> {{ coin }}
-        </h3>
-        <span class="badge bg-secondary"><i class="far fa-clock"></i> LAST ORDER: {{ lastupdate }}</span>
-        <div class="btn-toolbar mb-2 mb-md-0">
-            <div class="btn-group me-2">
-                <form method="GET" name="daterangeform">
-                    <div class="input-group input-group-sm">
-                        <span class="input-group-text"><i class="far fa-calendar-alt"></i></span>
-                        <input type="text" class="form-control" name="daterange" size="22" />
-                    </div>
-                </form>
-            </div>
-            <a type="button" class="btn btn-sm btn-outline-secondary" href="https://www.binance.com/en/futures/{{ coin }}" target="_blank">
-                <i class="fas fa-external-link-alt"></i> View on Binance
-            </a>
-        </div>
-    </div>
+    <div><span class="badge bg-secondary"><i class="far fa-clock"></i> LAST ORDER: {{ lastupdate }}</span></div>
     <div class="row">
         <div class="col-sm-2">
             <a href="{{ url_for("main.coin_page_timeframe", coin=coin, start=timeranges[0][0], end=timeranges[0][1]) }}">

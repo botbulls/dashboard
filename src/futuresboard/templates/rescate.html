@@ -1,15 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Rescate (colchón){% endblock %}
 {% block content %}
-    <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
-        <h3 class="d-flex align-items-center">
-            <button class="navbar-toggler d-md-none hamburger-btn me-2" type="button" id="mobileMenuToggle" aria-label="Toggle navigation" title="Menú">
-                <i class="fas fa-bars"></i>
-            </button>
-            <i class="fas fa-life-ring me-2"></i> Rescate (colchón)
-        </h3>
-    </div>
-
     <div class="alert alert-warning" role="note">
         <strong>Importante.</strong> {{ aviso }}
         El bot dimensiona sobre el capital propio (wallet menos lo prestado); la reserva de spot solo se inyecta

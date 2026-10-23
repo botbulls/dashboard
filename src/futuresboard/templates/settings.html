@@ -1,15 +1,6 @@
 {% extends "base.html" %}
-{% block title %}Settings{% endblock %}
+{% block title %}Ajustes de la cuenta{% endblock %}
 {% block content %}
-  <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
-    <h3 class="mb-0 d-flex align-items-center" style="color: var(--text-primary); font-weight: 700;">
-      <button class="navbar-toggler d-md-none hamburger-btn me-2" type="button" id="mobileMenuToggle" aria-label="Toggle navigation" title="Menú">
-        <i class="fas fa-bars"></i>
-      </button>
-      <i class="fas fa-user-cog"></i> Settings
-    </h3>
-  </div>
-
   <div class="row justify-content-center">
     <div class="col-lg-6">
       {% with messages = get_flashed_messages(with_categories=true) %}
