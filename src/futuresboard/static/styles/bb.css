@@ -1,0 +1,246 @@
+/* bb.css: sistema de diseño de BotBulls sobre Bootstrap 5.1.3.
+   Se carga DESPUÉS de bootstrap.min.css y dashboard.css. No reemplaza Bootstrap: lo ajusta con tokens propios.
+   Reglas: el color significa algo o no está (verde ganancia/ok, rojo pérdida/peligro, ámbar aviso, azul
+   simulación/info), siempre con texto o ícono al lado; los números crudos no se tocan (formato es-AR solo en el
+   texto visible); hover solo con puntero fino. */
+
+/* ------------------------------------------------------------------ 1. Tokens: claro (default) */
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bb-bg: #F3F4F6;            /* fondo de página */
+  --bb-surface: #FFFFFF;       /* tarjetas, sidebar, paneles */
+  --bb-surface-2: #F7F8FA;     /* encabezados de tabla, pies, pozos */
+  --bb-surface-hover: #EEF0F3;
+  --bb-border: #DADDE3;        /* hairline */
+  --bb-border-strong: #848B97; /* bordes de controles: >= 3:1 */
+  --bb-text: #15171C;          /* 17,9:1 sobre surface */
+  --bb-text-2: #4A505B;        /* 8,1:1 */
+  --bb-text-3: #5C6370;        /* 6,0:1 (5,5:1 sobre bg) */
+  --bb-ink: #15171C;           /* acento de navegación: tinta, no color */
+  --bb-ink-soft: #E8EAEE;      /* fondo del ítem activo */
+  --bb-on-ink: #FFFFFF;
+  --bb-link: #2459D6;
+  --bb-focus: #2459D6;
+  --bb-gain: #0A7A3D;  --bb-gain-bg: #E2F3E8;  --bb-gain-mark: #37A862;   /* ganancia / ok */
+  --bb-loss: #C0282B;  --bb-loss-bg: #FBE6E6;  --bb-loss-mark: #B01E22;   /* pérdida / peligro */
+  --bb-warn: #8A5700;  --bb-warn-bg: #FDF0D3;  --bb-warn-mark: #F0A500;   /* aviso */
+  --bb-info: #1E5BB8;  --bb-info-bg: #E3EDFB;                            /* simulación / info */
+  --bb-neutral: #3B414B; --bb-neutral-bg: #E9EBEF;
+  --bb-solid-ok: #15803D; --bb-solid-stop: #C53030; --bb-solid-warn: #F0A500; --bb-on-solid: #FFFFFF; --bb-on-warn: #1A1300;
+  --bb-chart-grid: #E6E8EC;
+  --bb-chart-line: #4A505B;
+  --bb-logo-ink: #15171C;      /* el blanco del logo pasa a tinta en claro */
+  --bb-shadow-hover: 0 4px 12px rgba(21, 23, 28, .08);
+  --bb-shadow-float: 0 12px 32px rgba(21, 23, 28, .16), 0 2px 6px rgba(21, 23, 28, .08);
+  --bb-overlay: rgba(13, 15, 18, .45);
+}
+
+/* ------------------------------------------------------------------ 1b. Tokens: oscuro (OS en auto, o elegido)
+   Las dos copias tienen que quedar idénticas (tests/test_presentacion.py lo vigila). */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bb-bg: #0D0F12; --bb-surface: #15181D; --bb-surface-2: #1B1F25; --bb-surface-hover: #21262D;
+    --bb-border: #2B3139; --bb-border-strong: #6B7381;
+    --bb-text: #E7E9EC; --bb-text-2: #B3B9C3; --bb-text-3: #9097A3;
+    --bb-ink: #E7E9EC; --bb-ink-soft: #242A32; --bb-on-ink: #15181D;
+    --bb-link: #7AA7FF; --bb-focus: #7AA7FF;
+    --bb-gain: #4CC985; --bb-gain-bg: #10291B; --bb-gain-mark: #36A96B;
+    --bb-loss: #FF7B73; --bb-loss-bg: #341616; --bb-loss-mark: #CF3B36;
+    --bb-warn: #F2B544; --bb-warn-bg: #30250C; --bb-warn-mark: #F2B544;
+    --bb-info: #86B4FF; --bb-info-bg: #14243D;
+    --bb-neutral: #C7CCD4; --bb-neutral-bg: #252A31;
+    --bb-chart-grid: #262B33; --bb-chart-line: #B3B9C3;
+    --bb-logo-ink: #FFFFFF;
+    --bb-shadow-hover: 0 4px 12px rgba(0, 0, 0, .35);
+    --bb-shadow-float: 0 12px 32px rgba(0, 0, 0, .55), 0 2px 6px rgba(0, 0, 0, .4);
+    --bb-overlay: rgba(0, 0, 0, .6);
+  }
+}
+:root[data-theme="dark"] {
+    color-scheme: dark;
+    --bb-bg: #0D0F12; --bb-surface: #15181D; --bb-surface-2: #1B1F25; --bb-surface-hover: #21262D;
+    --bb-border: #2B3139; --bb-border-strong: #6B7381;
+    --bb-text: #E7E9EC; --bb-text-2: #B3B9C3; --bb-text-3: #9097A3;
+    --bb-ink: #E7E9EC; --bb-ink-soft: #242A32; --bb-on-ink: #15181D;
+    --bb-link: #7AA7FF; --bb-focus: #7AA7FF;
+    --bb-gain: #4CC985; --bb-gain-bg: #10291B; --bb-gain-mark: #36A96B;
+    --bb-loss: #FF7B73; --bb-loss-bg: #341616; --bb-loss-mark: #CF3B36;
+    --bb-warn: #F2B544; --bb-warn-bg: #30250C; --bb-warn-mark: #F2B544;
+    --bb-info: #86B4FF; --bb-info-bg: #14243D;
+    --bb-neutral: #C7CCD4; --bb-neutral-bg: #252A31;
+    --bb-chart-grid: #262B33; --bb-chart-line: #B3B9C3;
+    --bb-logo-ink: #FFFFFF;
+    --bb-shadow-hover: 0 4px 12px rgba(0, 0, 0, .35);
+    --bb-shadow-float: 0 12px 32px rgba(0, 0, 0, .55), 0 2px 6px rgba(0, 0, 0, .4);
+    --bb-overlay: rgba(0, 0, 0, .6);
+}
+
+/* ------------------------------------------------------------------ 1c. Escala y alias (no cambian con el tema)
+   Los alias apuntan a tokens --bb-*, que sí cambian con el tema. base.html (applyChartTheme) lee --chart-*:
+   no renombrar. */
+:root,
+:root[data-theme] {
+  --bb-font: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --bb-fs-12: 12px; --bb-fs-13: 13px; --bb-fs-14: 14px; --bb-fs-16: 16px; --bb-fs-20: 20px;
+  --bb-fs-24: 24px; --bb-fs-30: 30px; --bb-fs-40: 40px;
+  --bb-s1: 4px; --bb-s2: 8px; --bb-s3: 12px; --bb-s4: 16px; --bb-s5: 24px; --bb-s6: 32px; --bb-s7: 48px;
+  --bb-r-sm: 4px; --bb-r: 6px; --bb-r-lg: 10px; --bb-r-xl: 12px; --bb-r-pill: 999px;
+  --bb-sidebar-w: 256px; --bb-sidebar-w-min: 64px; --bb-topbar-h: 56px; --bb-tap: 44px;
+  --bb-ease: cubic-bezier(.2, .8, .2, 1);
+  --bb-dur: 160ms;
+
+  --chart-text: var(--bb-text-3);
+  --chart-grid: var(--bb-chart-grid);
+  --chart-border: var(--bb-border);
+  --text-primary: var(--bb-text);
+  --text-secondary: var(--bb-text-2);
+  --text-muted: var(--bb-text-3);
+  --bg-card: var(--bb-surface);
+  --bg-sidebar: var(--bb-surface);
+  --bg-primary: var(--bb-bg);
+  --bg-secondary: var(--bb-surface-2);
+  --bg-elevated: var(--bb-surface);
+  --border-color: var(--bb-border);
+  --app-bg: var(--bb-bg);
+  --success-color: var(--bb-gain);
+  --danger-color: var(--bb-loss);
+  --warning-color: var(--bb-warn);
+  --info-color: var(--bb-info);
+  --secondary-color: var(--bb-text-2);
+  --primary-color: var(--bb-link);
+  --primary-dark: var(--bb-link);
+  --input-bg: var(--bb-surface);
+  --input-text: var(--bb-text);
+  --input-placeholder: var(--bb-text-3);
+  --modal-bg: var(--bb-surface);
+  --table-row-hover-bg: var(--bb-surface-hover);
+  --card-header-bg: var(--bb-surface);
+  --card-footer-bg: transparent;
+  --shadow-lg: var(--bb-shadow-float);
+  --admin-menu-bg: var(--bb-surface);
+  --admin-menu-text: var(--bb-text);
+  --admin-menu-muted: var(--bb-text-2);
+  --admin-menu-border: var(--bb-border);
+  --admin-menu-button-bg: var(--bb-surface);
+  --admin-menu-button-border: var(--bb-border-strong);
+  --admin-menu-button-hover-bg: var(--bb-surface-hover);
+
+  /* Bootstrap 5.1.3: solo variables que existen en esa versión (verificado sobre bootstrap.min.css). */
+  --bs-font-sans-serif: var(--bb-font);
+  --bs-body-font-family: var(--bb-font);
+  --bs-body-font-size: var(--bb-fs-14);
+  --bs-body-line-height: 1.5;
+  --bs-body-color: var(--bb-text);
+  --bs-body-bg: var(--bb-bg);
+}
+
+/* ------------------------------------------------------------------ 2. Base */
+html { -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent; }
+body.bb {
+  background: var(--bb-bg);
+  color: var(--bb-text);
+  font-family: var(--bb-font);
+  font-size: var(--bb-fs-14);
+  line-height: 1.5;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+@media (max-width: 767.98px) { body.bb { font-size: var(--bb-fs-16); } }
+.bb-num, .bb table, .bb-tabular { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+.bb a { color: var(--bb-link); text-decoration: none; }
+.bb h1, .bb h2, .bb h3, .bb h4, .bb h5, .bb h6 { font-weight: 600; line-height: 1.2; letter-spacing: 0; color: var(--bb-text); }
+.bb :focus-visible { outline: 2px solid var(--bb-focus); outline-offset: 2px; box-shadow: none; }
+.bb button, .bb a, .bb summary, .bb [role="button"] { touch-action: manipulation; }
+.bb button, .bb .btn, .bb summary, .bb .badge, .bb [role="button"] { -webkit-user-select: none; user-select: none; }
+.bb-saltar { position: absolute; left: -9999px; }
+.bb-saltar:focus { left: var(--bb-s4); top: var(--bb-s2); z-index: 2000; background: var(--bb-surface); padding: var(--bb-s2) var(--bb-s3); border-radius: var(--bb-r); }
+.bb-sr { position: absolute !important; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* Logo: el SVG inline trae fill="#fff"; en claro pasa a tinta, la parte rosa queda igual. */
+.bb-logo { display: block; height: 28px; width: auto; }
+.bb-logo [fill="#fff"] { fill: var(--bb-logo-ink); }
+
+/* ------------------------------------------------------------------ 3. Mapeo de componentes de Bootstrap */
+.bb .card { background: var(--bb-surface); border: 1px solid var(--bb-border); border-radius: var(--bb-r-lg); box-shadow: none; color: var(--bb-text); }
+.bb .card-header { background: var(--bb-surface); border-bottom: 1px solid var(--bb-border); color: var(--bb-text); font-weight: 600; padding: var(--bb-s3) var(--bb-s4); }
+.bb .card-body { padding: var(--bb-s4); }
+.bb .card-footer { background: transparent; border-top: 1px solid var(--bb-border); color: var(--bb-text-3); font-size: var(--bb-fs-12); padding: var(--bb-s2) var(--bb-s4); }
+.bb .btn { border-radius: var(--bb-r); font-weight: 500; min-height: 40px; display: inline-flex; align-items: center; justify-content: center; gap: var(--bb-s2); transition: background-color var(--bb-dur) var(--bb-ease), border-color var(--bb-dur) var(--bb-ease); }
+.bb .btn-sm { min-height: 32px; }
+.bb .btn-primary { background: var(--bb-ink); border-color: var(--bb-ink); color: var(--bb-on-ink); }
+.bb .btn-outline-secondary, .bb .btn-light, .bb .btn-secondary, .bb .btn-outline-primary { background: var(--bb-surface); border: 1px solid var(--bb-border-strong); color: var(--bb-text); }
+.bb .btn-danger { background: var(--bb-solid-stop); border-color: var(--bb-solid-stop); color: var(--bb-on-solid); }
+.bb .btn-warning { background: var(--bb-solid-warn); border-color: var(--bb-solid-warn); color: var(--bb-on-warn); }
+.bb .btn:disabled, .bb .btn.disabled { opacity: .5; cursor: not-allowed; }
+.bb .form-control, .bb .form-select { background-color: var(--bb-surface); color: var(--bb-text); border: 1px solid var(--bb-border-strong); border-radius: var(--bb-r); min-height: 40px; }
+.bb .form-control::placeholder { color: var(--bb-text-3); }
+.bb .form-control:focus, .bb .form-select:focus { background-color: var(--bb-surface); color: var(--bb-text); border-color: var(--bb-focus); box-shadow: 0 0 0 3px color-mix(in srgb, var(--bb-focus) 30%, transparent); }
+.bb .form-control[readonly] { background-color: var(--bb-surface-2); }
+.bb .form-text, .bb .form-label { color: var(--bb-text-2); }
+.bb .form-label { font-weight: 500; }
+.bb .form-check-input { background-color: var(--bb-surface); border: 1px solid var(--bb-border-strong); }
+.bb .form-check-input:checked { background-color: var(--bb-ink); border-color: var(--bb-ink); }
+.bb .input-group-text { background: var(--bb-surface-2); color: var(--bb-text-2); border: 1px solid var(--bb-border-strong); }
+.bb .modal-content { background: var(--bb-surface); color: var(--bb-text); border: 1px solid var(--bb-border); border-radius: var(--bb-r-xl); box-shadow: var(--bb-shadow-float); }
+.bb .modal-header, .bb .modal-footer { border-color: var(--bb-border); }
+.bb .modal-title { font-size: var(--bb-fs-20); font-weight: 600; }
+.bb .btn-close { filter: none; }
+:root[data-theme="dark"] .bb .btn-close { filter: invert(1) grayscale(1) brightness(2); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .bb .btn-close { filter: invert(1) grayscale(1) brightness(2); } }
+.bb .bg-white { background-color: var(--bb-surface) !important; }
+.bb .link-dark { color: var(--bb-text) !important; }
+.bb code { color: var(--bb-text); background: var(--bb-surface-2); border-radius: var(--bb-r-sm); padding: 0 4px; }
+.bb hr { border-color: var(--bb-border); opacity: 1; }
+/* Utilidades de color: significado fijo (las usa el JS de los modales) */
+.bb .text-success { color: var(--bb-gain) !important; }
+.bb .text-danger { color: var(--bb-loss) !important; }
+.bb .text-warning { color: var(--bb-warn) !important; }
+.bb .text-info { color: var(--bb-info) !important; }
+.bb .text-muted { color: var(--bb-text-3) !important; }
+.bb .text-dark { color: inherit !important; }
+.bb .bg-success { background: var(--bb-solid-ok) !important; color: var(--bb-on-solid) !important; }
+.bb .bg-danger { background: var(--bb-solid-stop) !important; color: var(--bb-on-solid) !important; }
+.bb .bg-warning { background: var(--bb-solid-warn) !important; color: var(--bb-on-warn) !important; }
+.bb .bg-info { background: var(--bb-info-bg) !important; color: var(--bb-info) !important; }
+.bb .bg-secondary { background: var(--bb-neutral-bg) !important; color: var(--bb-neutral) !important; }
+.bb .badge { font-weight: 600; border-radius: var(--bb-r-sm); }
+.bb .alert { border-radius: var(--bb-r-lg); border: 1px solid transparent; }
+.bb .alert-warning { background: var(--bb-warn-bg); color: var(--bb-warn); border-color: color-mix(in srgb, var(--bb-warn) 30%, transparent); }
+.bb .alert-danger { background: var(--bb-loss-bg); color: var(--bb-loss); border-color: color-mix(in srgb, var(--bb-loss) 30%, transparent); }
+.bb .alert-success { background: var(--bb-gain-bg); color: var(--bb-gain); border-color: color-mix(in srgb, var(--bb-gain) 25%, transparent); }
+.bb .alert-secondary, .bb .alert-info { background: var(--bb-surface-2); color: var(--bb-text-2); border-color: var(--bb-border); }
+.bb .alert-heading { color: inherit; font-size: var(--bb-fs-16); }
+.bb .progress { background: var(--bb-surface-2); }
+.bb .progress-bar { background-color: var(--bb-ink); color: var(--bb-on-ink); }
+.bb .progress-bar.bg-success { background: var(--bb-solid-ok) !important; }
+.bb .progress-bar.bg-danger { background: var(--bb-solid-stop) !important; }
+
+/* Tablas: Bootstrap 5.1.3 no tiene --bs-table-color: el color se fija acá, también en las variantes. */
+.bb .table { --bs-table-bg: transparent; --bs-table-striped-bg: var(--bb-surface-2); --bs-table-hover-bg: var(--bb-surface-hover);
+  --bs-table-striped-color: var(--bb-text); --bs-table-hover-color: var(--bb-text); --bs-table-active-color: var(--bb-text);
+  color: var(--bb-text); border-color: var(--bb-border); font-size: var(--bb-fs-14); margin-bottom: 0; }
+.bb .table > :not(caption) > * > * { border-bottom-color: var(--bb-border); padding: var(--bb-s2) var(--bb-s3); }
+.bb .table thead th, .bb .table thead td { background: var(--bb-surface-2); color: var(--bb-text-2); font-weight: 600; font-size: var(--bb-fs-13); text-transform: none; letter-spacing: 0; white-space: nowrap; }
+.bb .table .table-success, .bb .table .table-danger, .bb .table .table-secondary, .bb .table .table-primary,
+.bb .table-success, .bb .table-danger, .bb .table-secondary, .bb .table-primary { --bs-table-bg: transparent; --bs-table-accent-bg: transparent; color: var(--bb-text); }
+.bb td.bb-n, .bb th.bb-n { text-align: right; }
+
+/* ------------------------------------------------------------------ 13. Hover solo con puntero fino; movimiento reducido */
+@media (hover: hover) and (pointer: fine) {
+  .bb a:hover { text-decoration: underline; }
+  .bb a.card:hover, .bb a.btn:hover { text-decoration: none; }
+  .bb .btn-outline-secondary:hover, .bb .btn-light:hover, .bb .btn-secondary:hover, .bb .btn-outline-primary:hover { background: var(--bb-surface-hover); color: var(--bb-text); border-color: var(--bb-border-strong); }
+  .bb .btn-primary:hover { background: var(--bb-ink); border-color: var(--bb-ink); color: var(--bb-on-ink); opacity: .9; }
+  .bb .table tbody tr:hover > * { background: var(--bb-surface-hover); }
+}
+.bb .btn-outline-secondary:active, .bb .btn-light:active, .bb .btn-secondary:active { background-color: var(--bb-surface-hover); color: var(--bb-text); }
+@media (prefers-reduced-motion: reduce) {
+  .bb *, .bb *::before, .bb *::after { transition-duration: 0ms !important; animation-duration: 0ms !important; scroll-behavior: auto !important; }
+}
+
+/* ------------------------------------------------------------------ 16. Neutralizar lo viejo mientras queden reglas de
+   dashboard.css/sidebars.css que mueven cosas al pasar el mouse. */
+.bb .card:hover, .bb .btn:hover, .bb .table tbody tr:hover, .bb .bot-status-badge:hover, .bb .last-order-badge:hover,
+.bb .list-unstyled li a.btn:hover, .bb .btn-toggle:hover, .bb .btn-toggle-nav a:hover { transform: none; }

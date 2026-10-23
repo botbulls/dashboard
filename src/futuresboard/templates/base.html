@@ -180,7 +180,8 @@
 
         <link rel="preconnect" href="https://fonts.googleapis.com">
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-        <link href="https://fonts.googleapis.com/css2?family=Roboto:ital,wght@0,100;0,300;0,400;0,500;0,700;0,900;1,100;1,300;1,400;1,500;1,700;1,900&display=swap" rel="stylesheet">
+        <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+        <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='styles/bb.css') }}">
 
     </head>
     <header class="navbar navbar-dark sticky-top {{ custom['NAVBAR_BG'] }} flex-md-nowrap p-0 shadow" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;">
@@ -231,7 +232,7 @@
         </button>
         -->
     </header>
-    <body class="d-flex flex-column h-100">
+    <body class="bb d-flex flex-column h-100">
         <div class="wrapper">
             <div class="container-fluid">
                 <div class="row">
@@ -567,13 +568,6 @@
         </script>
 
         <style>
-         * {
-             font-family: "Roboto", sans-serif;
-         }
-         body {
-             background: var(--app-bg);
-             color: var(--text-primary);
-         }
          .menu_admin {
              position: fixed;
              right: 3px;
