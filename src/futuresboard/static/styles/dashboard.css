@@ -1,128 +1,115 @@
-/* dashboard.css: tema del daterangepicker (tercero) con los tokens de bb.css.
-   El sistema de diseño (tokens, shell, componentes) está en bb.css, que se carga después. */
+/* dashboard.css: tema del daterangepicker (tercero) con los tokens de bb.css, en los tres temas.
+   El sistema de diseño (tokens, shell, componentes) está en bb.css, que se carga después.
+   El día y el rango elegidos van en tinta (como el ítem activo de la sidebar), no en el azul de los links:
+   blanco sobre el azul claro del tema oscuro no llegaba a 4,5:1. */
 
-/* DateRangePicker dark theme styling */
-html[data-theme="dark"] .daterangepicker,
-html[data-theme="auto"] .daterangepicker {
-  background-color: var(--bg-card) !important;
-  border-color: var(--border-color) !important;
-  box-shadow: var(--shadow-lg) !important;
+.bb .daterangepicker {
+  background-color: var(--bb-surface);
+  border: 1px solid var(--bb-border);
+  border-radius: var(--bb-r-lg);
+  box-shadow: var(--bb-shadow-float);
+  color: var(--bb-text);
+  font-family: var(--bb-font);
+  font-size: var(--bb-fs-14);
 }
 
-html[data-theme="dark"] .daterangepicker .calendar-table,
-html[data-theme="auto"] .daterangepicker .calendar-table {
-  background-color: var(--bg-card) !important;
-  color: var(--text-primary) !important;
+.bb .daterangepicker::before { border-bottom-color: var(--bb-border); }
+.bb .daterangepicker::after { border-bottom-color: var(--bb-surface); }
+
+.bb .daterangepicker .calendar-table {
+  background-color: var(--bb-surface);
+  border-color: var(--bb-surface);
+  color: var(--bb-text);
 }
 
-html[data-theme="dark"] .daterangepicker .calendar-table th,
-html[data-theme="auto"] .daterangepicker .calendar-table th {
-  color: var(--text-primary) !important;
-  background-color: var(--bg-card) !important;
+.bb .daterangepicker .calendar-table th,
+.bb .daterangepicker .calendar-table td {
+  color: var(--bb-text);
+  background-color: var(--bb-surface);
+  border-color: var(--bb-surface);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--bb-fs-13);
 }
 
-html[data-theme="dark"] .daterangepicker .calendar-table td,
-html[data-theme="auto"] .daterangepicker .calendar-table td {
-  color: var(--text-primary) !important;
-  background-color: var(--bg-card) !important;
+.bb .daterangepicker .calendar-table td.available:hover,
+.bb .daterangepicker .calendar-table th.available:hover {
+  background-color: var(--bb-surface-hover);
+  color: var(--bb-text);
 }
 
-html[data-theme="dark"] .daterangepicker .calendar-table td.available:hover,
-html[data-theme="auto"] .daterangepicker .calendar-table td.available:hover {
-  background-color: var(--table-row-hover-bg) !important;
-  color: var(--text-primary) !important;
+.bb .daterangepicker td.in-range {
+  background-color: var(--bb-ink-soft);
+  color: var(--bb-text);
 }
 
-html[data-theme="dark"] .daterangepicker .calendar-table td.in-range,
-html[data-theme="auto"] .daterangepicker .calendar-table td.in-range {
-  background-color: rgba(99, 102, 241, 0.2) !important;
-  color: var(--text-primary) !important;
+.bb .daterangepicker td.active,
+.bb .daterangepicker td.active:hover,
+.bb .daterangepicker td.start-date,
+.bb .daterangepicker td.end-date {
+  background-color: var(--bb-ink);
+  color: var(--bb-on-ink);
 }
 
-html[data-theme="dark"] .daterangepicker .calendar-table td.active,
-html[data-theme="auto"] .daterangepicker .calendar-table td.active,
-html[data-theme="dark"] .daterangepicker .calendar-table td.start-date,
-html[data-theme="auto"] .daterangepicker .calendar-table td.start-date,
-html[data-theme="dark"] .daterangepicker .calendar-table td.end-date,
-html[data-theme="auto"] .daterangepicker .calendar-table td.end-date {
-  background-color: var(--primary-color) !important;
-  color: #ffffff !important;
+.bb .daterangepicker td.off,
+.bb .daterangepicker td.off.in-range,
+.bb .daterangepicker td.off.start-date,
+.bb .daterangepicker td.off.end-date {
+  background-color: var(--bb-surface);
+  color: var(--bb-text-3);
 }
 
-html[data-theme="dark"] .daterangepicker .calendar-table td.off,
-html[data-theme="auto"] .daterangepicker .calendar-table td.off {
-  color: var(--text-muted) !important;
-  background-color: var(--bg-card) !important;
+.bb .daterangepicker .drp-selected { color: var(--bb-text-2); }
+
+.bb .daterangepicker .ranges li {
+  color: var(--bb-text);
+  background-color: transparent;
+  font-size: var(--bb-fs-13);
 }
 
-html[data-theme="dark"] .daterangepicker .drp-selected,
-html[data-theme="auto"] .daterangepicker .drp-selected {
-  color: var(--text-primary) !important;
+.bb .daterangepicker .ranges li:hover { background-color: var(--bb-surface-hover); }
+
+.bb .daterangepicker .ranges li.active {
+  background-color: var(--bb-ink);
+  color: var(--bb-on-ink);
 }
 
-html[data-theme="dark"] .daterangepicker .ranges li,
-html[data-theme="auto"] .daterangepicker .ranges li {
-  color: var(--text-primary) !important;
-  background-color: transparent !important;
+.bb .daterangepicker .drp-buttons { border-top-color: var(--bb-border); }
+
+.bb .daterangepicker .drp-buttons .btn {
+  background-color: var(--bb-surface);
+  color: var(--bb-text);
+  border: 1px solid var(--bb-border-strong);
 }
 
-html[data-theme="dark"] .daterangepicker .ranges li:hover,
-html[data-theme="auto"] .daterangepicker .ranges li:hover {
-  background-color: var(--table-row-hover-bg) !important;
-  color: var(--text-primary) !important;
+.bb .daterangepicker .drp-buttons .btn.btn-primary {
+  background-color: var(--bb-ink);
+  color: var(--bb-on-ink);
+  border-color: var(--bb-ink);
 }
 
-html[data-theme="dark"] .daterangepicker .ranges li.active,
-html[data-theme="auto"] .daterangepicker .ranges li.active {
-  background-color: var(--primary-color) !important;
-  color: #ffffff !important;
+.bb .daterangepicker select.monthselect,
+.bb .daterangepicker select.yearselect {
+  background-color: var(--bb-surface);
+  color: var(--bb-text);
+  border: 1px solid var(--bb-border-strong);
+  border-radius: var(--bb-r-sm);
 }
 
-html[data-theme="dark"] .daterangepicker .drp-buttons,
-html[data-theme="auto"] .daterangepicker .drp-buttons {
-  border-top-color: var(--border-color) !important;
-}
+.bb .daterangepicker .calendar-table .prev span,
+.bb .daterangepicker .calendar-table .next span { border-color: var(--bb-text); }
 
-html[data-theme="dark"] .daterangepicker .drp-buttons .btn,
-html[data-theme="auto"] .daterangepicker .drp-buttons .btn {
-  background-color: var(--input-bg) !important;
-  color: var(--text-primary) !important;
-  border-color: var(--border-color) !important;
-}
+.bb .daterangepicker .calendar-table .prev:hover,
+.bb .daterangepicker .calendar-table .next:hover { background-color: var(--bb-surface-hover); }
 
-html[data-theme="dark"] .daterangepicker .drp-buttons .btn:hover,
-html[data-theme="auto"] .daterangepicker .drp-buttons .btn:hover {
-  background-color: var(--table-row-hover-bg) !important;
-  color: var(--text-primary) !important;
-}
+.bb .daterangepicker.show-ranges.ltr .drp-calendar.left { border-left-color: var(--bb-border); }
 
-html[data-theme="dark"] .daterangepicker .drp-buttons .btn.btn-primary,
-html[data-theme="auto"] .daterangepicker .drp-buttons .btn.btn-primary {
-  background-color: var(--primary-color) !important;
-  color: #ffffff !important;
-  border-color: var(--primary-color) !important;
-}
-
-html[data-theme="dark"] .daterangepicker select.monthselect,
-html[data-theme="auto"] .daterangepicker select.monthselect,
-html[data-theme="dark"] .daterangepicker select.yearselect,
-html[data-theme="auto"] .daterangepicker select.yearselect {
-  background-color: var(--input-bg) !important;
-  color: var(--text-primary) !important;
-  border-color: var(--border-color) !important;
-}
-
-html[data-theme="dark"] .daterangepicker .calendar-table .prev,
-html[data-theme="auto"] .daterangepicker .calendar-table .prev,
-html[data-theme="dark"] .daterangepicker .calendar-table .next,
-html[data-theme="auto"] .daterangepicker .calendar-table .next {
-  color: var(--text-primary) !important;
-}
-
-html[data-theme="dark"] .daterangepicker .calendar-table .prev:hover,
-html[data-theme="auto"] .daterangepicker .calendar-table .prev:hover,
-html[data-theme="dark"] .daterangepicker .calendar-table .next:hover,
-html[data-theme="auto"] .daterangepicker .calendar-table .next:hover {
-  background-color: var(--table-row-hover-bg) !important;
-  color: var(--text-primary) !important;
+/* Celu: objetivos de 44 px y selects de 16 px (iOS no hace zoom). */
+@media (max-width: 767.98px) {
+  .bb .daterangepicker { width: 324px; max-width: calc(100vw - 16px); }
+  .bb .daterangepicker .drp-calendar { max-width: none; }
+  .bb .daterangepicker .calendar-table th,
+  .bb .daterangepicker .calendar-table td { min-width: 40px; width: 40px; height: 44px; line-height: 42px; font-size: var(--bb-fs-14); }
+  .bb .daterangepicker select.monthselect,
+  .bb .daterangepicker select.yearselect { font-size: var(--bb-fs-16); min-height: var(--bb-tap); }
+  .bb .daterangepicker .ranges li { padding: 12px; font-size: var(--bb-fs-14); }
 }
