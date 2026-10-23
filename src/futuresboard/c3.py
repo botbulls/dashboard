@@ -411,6 +411,37 @@ def piso_de(base_capital: Decimal, pct: Decimal) -> Decimal:
     return base_capital * (1 - pct / 100)
 
 
+def ajustar_base_por_retiro(state: Dict[str, Any], monto: Decimal, ts: float) -> Optional[str]:
+    """Un retiro periódico REAL confirmado (futuros -> spot, ver ``rescate._retiro``) baja la base de C3 en ``monto``.
+
+    C3 mira ``totalMarginBalance - préstamo``: el retiro baja el margen para siempre sin ser una pérdida. Sin bajar la
+    base, C3 lo vería como una caída igual al retiro y podría cortar (por ejemplo, base 20.000 con tope 30 % y un
+    retiro de 10.000 dejaría el capital en 10.000, debajo del piso 14.000). El piso sigue siendo el mismo % de la base
+    ajustada. Lo llama el servicio rescate dentro de su ciclo (mismo lock de estado). Devuelve el texto del ajuste, o
+    None si C3 no tiene base."""
+    c3 = state.get("c3")
+    if not isinstance(c3, dict):
+        return None
+    base = c3.get("base")
+    if not isinstance(base, dict) or base.get("capital") is None:
+        return None
+    try:
+        capital = dec(base["capital"])
+        previo = dec(base.get("retirado") or "0")
+    except ValueError:
+        return None
+    nueva = max(Decimal(0), capital - monto)
+    base["capital"] = money(nueva)
+    base["retirado"] = money(previo + monto)
+    texto = (f"Base de C3 ajustada por un retiro de ganancias de {money(monto)} USDT: {money(capital)} -> "
+             f"{money(nueva)} USDT (el retiro no es una pérdida).")
+    historial = c3.get("historial") if isinstance(c3.get("historial"), list) else []
+    historial.append({"ts": now_iso(ts), "tipo": "base_retiro", "modo": base.get("modo") or MODE_REAL, "texto": texto,
+                      "capital": money(nueva), "retiro": money(monto)})
+    c3["historial"] = historial[-MAX_HISTORIAL:]
+    return texto
+
+
 def _pct_txt(value: Decimal) -> str:
     return format(value.normalize(), "f")
 
