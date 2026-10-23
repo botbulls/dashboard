@@ -62,7 +62,8 @@ Browser ──(sesión + CSRF)──> dashboard (Flask)
 | Método | Ruta | Body | Efecto |
 |---|---|---|---|
 | GET | `/api/bot/status` | – | Estado del contenedor, preset de riesgo deducido (`bajo`/`medio`/`alto`/`personalizado`/`desconocido`), `twe_long`, `twe_short`, `long_mode`, `short_mode`, `enabled`, `modes_supported`, `config_pending`. |
-| POST | `/api/bot/start` | `{"riesgo": "bajo"\|"medio"\|"alto"}` | Escribe `twe_long`/`twe_short` del preset, `long_mode=normal`, `short_mode` (ver abajo); `start` si está detenido, `restart` si corre. |
+| POST | `/api/bot/start` | `{"riesgo": "bajo"\|"medio"\|"alto"}` o `{"twe_long": n}` (TWE manual, ver [perfiles.md](perfiles.md#twe-manual)) | Escribe `twe_long`/`twe_short` del preset (o la TWE manual), `long_mode=normal`, `short_mode` (ver abajo); `start` si está detenido, `restart` si corre. |
+| POST | `/api/bot/perfil` | `{"perfil": "conservador"\|"con_rescate"}` (+ `"confirmar": true`) | Perfil de riesgo: TWE de forager + rescate, disparo por uPnL y retiro en una sola acción (ver [perfiles.md](perfiles.md)). |
 | POST | `/api/bot/stop` | `{"modo": "graceful"\|"apagar"}` | `graceful`: `long_mode=short_mode=graceful_stop` + start o restart (requiere `FUTURESBOARD_FORAGER_SUPPORTS_MODES=1`, si no 409). `apagar`: `stop` del contenedor y después cancela **todas** las órdenes y cierra **todas** las posiciones de USDⓈ-M Futures a mercado (ver "Apagar" abajo); no toca la config. |
 
 Presets (históricos del guardian): bajo 4/1, medio 6/2, alto 8/3 (`twe_long`/`twe_short`).

@@ -69,7 +69,8 @@ def _arrancar(h, modo="real", retiro_mode="real", **kw):  # noqa: F811
     svc = _servicio(h, modo, retiro_mode)
     svc.tick()
     rs = h.state()["retiro"]
-    assert rs["periodo_cerrado"] == "2023-11-14" and rs["eval"]["vencido"] is False
+    frecuencia = (kw.get("retiro") or RETIRO_DIARIO)["retiro_frecuencia"]
+    assert rs["periodo_cerrado"] == rescate.retiro_periodo(h.clock.t, frecuencia) and rs["eval"]["vencido"] is False
     assert _retiros(h) == []
     return svc
 
@@ -229,6 +230,22 @@ def test_activar_no_retira_hasta_el_periodo_siguiente_y_despues_retira_el_excede
     rs = h.state()["retiro"]
     assert rs["periodo_cerrado"] == "2023-11-15" and rs["eval"]["vencido"] is False
     assert rs["eval"]["proximo_en"] == "2023-11-16T00:00:00+00:00"
+    assert _retiros(h) == ["2000.00"]
+
+
+@pytest.mark.parametrize("frecuencia,antes,limite", [
+    ("semanal", "2023-11-19 23:59:50", "2023-11-20 00:00:05"),
+    ("mensual", "2023-11-30 23:59:50", "2023-12-01 00:00:05"),
+    ("trimestral", "2023-12-31 23:59:50", "2024-01-01 00:00:05"),
+    ("anual", "2023-12-31 23:59:50", "2024-01-01 00:00:05"),
+])
+def test_retiro_por_frecuencia_al_comienzo_del_periodo(h, frecuencia, antes, limite):  # noqa: F811
+    svc = _arrancar(h, retiro={"retiro_frecuencia": frecuencia, "retiro_base_usdt": 10000})
+    _ir_a(h, antes)
+    svc.tick()
+    assert _retiros(h) == [] and h.state()["retiro"]["eval"]["proximo_en"] == limite[:10] + "T00:00:00+00:00"
+    _ir_a(h, limite)
+    svc.tick()
     assert _retiros(h) == ["2000.00"]
 
 
@@ -501,8 +518,20 @@ def test_retiro_simulado_no_transfiere_y_no_repite_el_excedente(h, modo, retiro_
     svc.tick()  # la wallet real no bajó, pero el excedente simulado ya se "retiró": no se cuenta dos veces
     st = h.state()
     assert st["retiro"]["acumulado"]["dry_run"] == "2000.00" and st["retiro"]["periodo_cerrado"] == "2023-11-16"
-    # El simulado no mueve la base de C3 ni el préstamo.
+    # El simulado no mueve el préstamo ni la base de C3.
     assert st["prestamo"] == {"real": "0.00", "dry_run": "0.00"}
+    assert "c3" not in st or not (st["c3"] or {}).get("base")
+
+
+def test_retiro_simulado_no_baja_la_base_de_c3(h):  # noqa: F811
+    svc = _arrancar(h, "dry_run", "real")
+    st = h.state()
+    st["c3"] = {"base": {"capital": "12000.00", "modo": "dry_run"}, "historial": []}
+    rescate.save_state(h.data_dir, st)
+    _ir_a(h, "2023-11-15 00:00:05")
+    svc.tick()
+    st = h.state()
+    assert st["retiro"]["acumulado"]["dry_run"] == "2000.00" and st["c3"]["base"]["capital"] == "12000.00"
 
 
 def test_cambio_de_modo_reancla_sin_retirar_en_el_momento(h):  # noqa: F811

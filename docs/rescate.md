@@ -199,6 +199,9 @@ Un ciclo cada `FUTURESBOARD_RESCATE_INTERVAL` segundos (default 15). En cada cic
      mínimo).
    - Sigue con el rescate deshabilitado (es plata prestada), pero **no** con el tope en confirmación o
      disparado: ahí no se mueve plata entre wallets.
+8. **Retiro periódico de ganancias** (futuros → spot, `UMFUTURE_MAIN`), opcional y apagado por default: al comienzo de
+   cada período pasa a spot lo que la wallet de futuros tenga por encima de la base. Último del ciclo y solo si no
+   hubo otra transferencia. Ver [Retiro periódico de ganancias](#retiro-periodico-de-ganancias).
 
 ## Disparo anticipado por uPnL
 
@@ -317,6 +320,92 @@ paso 1.000/2.500 × sin tope / tope 60 %. Con la regla fijada antes de correr, s
 Las mejoras de riesgo que se evaluaron después ([contratos.md](contratos.md#lo-que-no-se-introdujo-loan_state-v2-sizing_state))
 se midieron todas con este disparo (X 70 %, paso 1.000) como rescate de referencia.
 
+## Retiro periódico de ganancias
+
+!!! warning "Apagado por default. Herramienta, no asesor"
+    Lo pide el perfil [Con rescate](perfiles.md): los números de TWE 4 + rescate del backtest suponen **retirar la
+    ganancia** (cada ventana de 12 meses arranca de nuevo en 10.000). Sin retiro, el camino continuo compone y, con
+    mechas 1,5 % más profundas, se liquida en feb-26 y pierde también la reserva. Retirar no garantiza nada: corta
+    la composición (en el camino continuo rinde bastante menos que dejar componer) a cambio de no exponer la ganancia.
+
+**Regla.** Con la frecuencia del panel distinta de `off` y el servicio con `FUTURESBOARD_RESCATE_RETIRO_MODE` en
+`dry_run` o `real`:
+
+- **Períodos calendario UTC**: diaria; semanal (lunes); mensual (día 1); trimestral (1 de ene/abr/jul/oct); anual
+  (1 de enero). Al **activarse** (frecuencia nueva en el panel o cambio del estado efectivo off / simulado / real) el
+  período en curso se da por cerrado: el primer retiro es al comienzo del siguiente. Cada período nuevo deja el
+  retiro **vencido**. Si el servicio estuvo caído varios períodos, al volver hace **un** retiro, no uno por período.
+- Mientras está vencido, en cada ciclo **sin** préstamo pendiente (del modo activo, ni real pendiente), sin
+  transferencia en vuelo ni otra en el mismo ciclo, sin bloqueo de transferencias y sin el tope de pérdida disparado o
+  en confirmación:
+
+  ```
+  excedente = totalWalletBalance - base           (wallet realizada: sin el uPnL)
+  retiro    = min(excedente, maxWithdrawAmount, guarda de margen, guarda del disparo U)   en centavos hacia abajo
+  guarda de margen   = totalMarginBalance - umbral_devolucion_ratio × totalMaintMargin   (con posiciones)
+  guarda del disparo = (uPnL + X × wallet - upnl_paso_usdt) / X                       (con el disparo U prestando)
+  ```
+
+  - excedente menor a 10 USDT → el período se cierra sin retiro (evento, sin Telegram);
+  - retiro de 10 USDT o más → transfiere. El período se cierra cuando el excedente queda debajo de 10: lo que no se
+    pudo retirar (lo limitó `maxWithdrawAmount` o una guarda) se reintenta cada 10 min mientras siga vencido.
+- **Las guardas** evitan que el retiro solo dispare el rescate: después de retirar, el ratio margen/mantenimiento queda
+  en el umbral de devolución parcial (32) o arriba, el mismo criterio con el que se devuelve un préstamo, y la
+  pérdida queda al menos un paso arriba de la línea del disparo por uPnL. Con posiciones grandes eso puede dejar el
+  retiro vencido varios ciclos: se ve en el panel ("lo limita guarda de margen").
+- Lo retirado queda en spot, junto a la reserva, pero el rescate presta como mucho `reserva_max_usdt`: la ganancia
+  retirada no se presta.
+- La transferencia es como las demás: se persiste en vuelo antes del `POST`, sin reintentos a ciegas, conciliación con
+  el historial y con la variación del saldo spot (`+monto` en spot, como una devolución), rechazo claro = 5 min de
+  espera. Va al ledger con `"tipo": "retiro"` y **no** toca el préstamo ni `loan_state.json`: passivbot ve el retiro
+  solo en su wallet ([contratos.md](contratos.md#el-retiro-periodico-no-cambia-este-contrato)).
+- Cuenta en el **retirado acumulado** recién confirmado. Un retiro real confirmado **baja la base de C3** en el monto
+  (el retiro no es una pérdida: sin esto C3 lo vería como una caída y podría cortar; ver [c3.md](c3.md)). El tope de
+  pérdida total no cambia: mira futuros + spot y el retiro no mueve ese total. Con la lectura de spot caída, el
+  estimado del tope suma lo retirado después del último saldo leído (y un retiro en vuelo), igual que una devolución.
+- No hace falta otro permiso de la API key: usa el mismo tipo de transferencia que la devolución.
+
+### Modos (`FUTURESBOARD_RESCATE_RETIRO_MODE`)
+
+| Servicio | `RETIRO_MODE` | Estado | Qué hace |
+|---|---|---|---|
+| cualquiera | `off` (default) | off | No se evalúa. |
+| `off` | cualquiera | off | El rescate no opera. |
+| `dry_run` | `dry_run` o `real` | simulado | No transfiere. Registra lo que HARÍA (ledger `simulada`, `[SIMULACIÓN]` en Telegram) y lo descuenta de la wallet que mira el retiro, para no "retirar" el mismo excedente en cada período. El resto del rescate no lo ve. |
+| `real` | `dry_run` | simulado | Igual, con el rescate transfiriendo de verdad. |
+| `real` | `real` | real | Transfiere de verdad. |
+
+Además, la frecuencia del panel (`retiro_frecuencia`) tiene que ser distinta de `off`. Una config guardada antes de
+que existiera el retiro lo toma apagado: un deploy no mueve plata.
+
+### Por qué anual por default
+
+`FRECUENCIA_RECOMENDADA` (la que preselecciona el perfil "Con rescate") sale del backtest de retiro del lab
+(`botbulls-lab/multianual/retiro`, regla en `preregistro_retiro.json` fijada antes de correr): camino continuo
+2021-01-01 → 2026-10-21, TWE 4 + U70 paso 1.000 + rescate (reserva 10.000, umbral 8, devolución 32) + tope 60 %, la
+regla del servicio de arriba (guardas incluidas), escenarios base, demora de 5 min y mechas 1,5 % más profundas
+(`mark985`). Gates: sin retiro reproduce exactamente las corridas de `rescate_upnl`, y el barrido diario por el
+mismo camino reproduce exactamente `S_barrido`.
+
+| Frecuencia | Capital final (base / `mark985` / demora 5 min) | Retiros | Retirado a spot | Peor DD del total | eq/MM mínimo |
+|---|---|---|---|---|---|
+| sin retiro | 849.103 / **liquidada 2026-02-06** / 849.103 | – | – | 93,7 % | 2,04 |
+| semanal | 64.485 / 64.485 / 64.485 | 244 | 46.906 | 36,7 % | 3,41 |
+| mensual | 65.913 / 65.913 / 65.913 | 61 | 47.872 | 38,1 % | 3,50 |
+| trimestral | 73.131 / 73.131 / 73.131 | 20 | 54.607 | 43,9 % | 3,44 |
+| **anual** | **95.631 / 95.631 / 95.620** | 5 | 77.108 | 63,3 % | 3,43 |
+| diaria (`S_barrido`, con tope de dimensionamiento 10.000) | 64.345 / 64.345 / 64.345 | 1.432 | 46.875 | 36,3 % | 3,36 |
+
+Capital final = futuros + spot (reserva más lo retirado), desde 20.000. Ninguna corrida tuvo un retiro limitado por las
+guardas ni por `maxWithdrawAmount` (anual sin guardas da idéntico).
+
+- Ninguna frecuencia se liquida ni dispara el tope en ningún escenario; sin retiro, `mark985` se liquida.
+- Elegida por la regla (mayor capital final en `mark985` entre las que sobreviven): **anual**. Retirar más seguido
+  corta más la composición y termina con menos.
+- Es un solo camino: la elección depende de dónde caen las caídas respecto del 1 de enero. TWE 3 sin rescate ni
+  retiro, en el mismo camino continuo, compone y termina en 295.896 (sin liquidarse ni en base ni en `mark985`): el retiro
+  protege la ganancia ya hecha, no mejora el retorno.
+
 ### Préstamo y transferencias (sin idempotencia en Binance)
 
 `POST /sapi/v1/asset/transfer` no es idempotente: un reintento a ciegas puede duplicar la
@@ -355,13 +444,17 @@ con el rescate habilitado (o con un préstamo real pendiente).
 ## Panel
 
 El dashboard principal (`/`) muestra una fila **Rescate** con la billetera de rescate, el préstamo, el capital
-total vs la base, el ratio con semáforo y el estado (ver [c3.md](c3.md#dashboard-principal)). El stop con
+total vs la base, el ratio con semáforo y el estado (ver [c3.md](c3.md#dashboard-principal)). La tarjeta **Retiro de
+ganancias** aparece si el retiro tiene frecuencia o ya retiró algo: retirado acumulado (real y simulado), frecuencia,
+base, próximo retiro (o "vencido" con el motivo de la espera) y el último retiro. El stop con
 reinicio sobre futuros (C3) corre en este mismo servicio: ver [c3.md](c3.md).
 
 Sección **Rescate (colchón)** del menú lateral (`/rescate`, con login). Muestra modo y latido del
 servicio, ratio margen/mantenimiento vs los umbrales de inyección y de devolución, posiciones, préstamo
 pendiente, USDT libre en spot, capital total vs base y límite del tope, la transferencia en vuelo, el motivo de bloqueo y los últimos
-eventos. La fila **Disparo por uPnL** muestra su estado (off / registra / simulado / real), el uPnL, el uPnL en el
+eventos. La fila **Retiro periódico de ganancias** muestra el estado (off / simulado / real), la frecuencia, la base, el
+excedente y cuánto se puede retirar ahora (y qué lo limita), el próximo retiro o el motivo de la espera, el acumulado
+y el último retiro; en la configuración están la frecuencia y la base. La fila **Disparo por uPnL** muestra su estado (off / registra / simulado / real), el uPnL, el uPnL en el
 que sale el próximo paso, hasta cuánto deja devolver la guarda y la última inyección por uPnL; en la configuración
 están el interruptor, X y el paso. En el dashboard principal aparece la tarjeta **Disparo por uPnL** solo si está
 habilitado en el panel. Si hay un tope en confirmación, lo muestra con el capital del cruce, la última lectura y desde
@@ -372,7 +465,7 @@ botón para reconocerlo.
 | Método | Ruta | Body | Efecto |
 |---|---|---|---|
 | GET | `/api/rescate/status` | – | Estado para la UI (lee los archivos, no consulta Binance). |
-| POST | `/api/rescate/config` | `{"habilitado", "reserva_max_usdt", "paso_usdt", "umbral_ratio", "umbral_devolucion_ratio", "tope_perdida_pct"}` y, opcionales y juntos, `"upnl_habilitado", "upnl_x_pct", "upnl_paso_usdt"`; opcional `"confirmar_inyeccion": true` | Guarda la config. Habilitar (false → true) abre una generación nueva = base nueva. Sin los campos `upnl_*` se conservan los guardados. `409` con `"requiere_confirmacion": true` si el disparo por uPnL inyectaría ya (uno o varios pasos) ([Confirmación al guardar](#modos-futuresboard_rescate_upnl_mode)); se reenvía con `"confirmar_inyeccion": true`. |
+| POST | `/api/rescate/config` | `{"habilitado", "reserva_max_usdt", "paso_usdt", "umbral_ratio", "umbral_devolucion_ratio", "tope_perdida_pct"}` y, opcionales y juntos, `"upnl_habilitado", "upnl_x_pct", "upnl_paso_usdt"`; opcionales y juntos, `"retiro_frecuencia", "retiro_base_usdt"`; opcional `"confirmar_inyeccion": true` | Guarda la config. Habilitar (false → true) abre una generación nueva = base nueva. Sin los campos `upnl_*` se conservan los guardados. `409` con `"requiere_confirmacion": true` si el disparo por uPnL inyectaría ya (uno o varios pasos) ([Confirmación al guardar](#modos-futuresboard_rescate_upnl_mode)); se reenvía con `"confirmar_inyeccion": true`. |
 | POST | `/api/rescate/reconocer-tope` | `{"id": "<id del tope>"}` | Desbloquea START y deshabilita el rescate. |
 
 Todos los POST exigen sesión, `X-CSRF-Token` y JSON (igual que el panel de passivbot) y quedan en
@@ -391,6 +484,13 @@ Validación estricta (400 si no se cumple): todos los campos presentes y ninguno
 | `upnl_habilitado` | booleano | `false` |
 | `upnl_x_pct` | 10 – 95 (% del capital propio de futuros) | 70 |
 | `upnl_paso_usdt` | 10 – 1.000.000 y ≤ reserva (también con los guardados) | 1000 |
+| `retiro_frecuencia` | `off`, `diaria`, `semanal`, `mensual`, `trimestral`, `anual` | `off` |
+| `retiro_base_usdt` | 10 – 1.000.000 | 10000 |
+
+Los dos campos del retiro van juntos o no van (sin ellos se conservan los guardados). Cambiar la frecuencia guarda
+`retiro_desde` (re-ancla el retiro: el primero es al comienzo del período siguiente); cambiar solo la base no. Un
+valor de retiro inválido en el archivo invalida la config entera, como cualquier otro campo. Un guardado del panel
+borra la marca `perfil` (último perfil aplicado, ver [perfiles.md](perfiles.md)).
 
 Los tres campos `upnl_*` van juntos o no van: si falta alguno, 400. Sin ninguno se conservan los guardados, así una
 pestaña abierta antes del deploy no puede prender ni apagar el disparo por uPnL. Una config guardada antes de que
@@ -421,6 +521,7 @@ Todas fail-closed: un valor inválido nunca habilita más de lo pedido.
 | `FUTURESBOARD_RESCATE_DEVOLUCION_MIN_USDT` | `100` | Mínimo por devolución parcial (1–1.000.000). Vacío, no entero o menor que 1 = 100. |
 | `FUTURESBOARD_RESCATE_DEVOLUCION_COOLDOWN_SECONDS` | `600` | Espera entre devoluciones parciales (0–86.400). Vacío, no entero o negativo = 600. |
 | `FUTURESBOARD_RESCATE_UPNL_MODE` | `off` | Disparo anticipado por uPnL: `off` \| `dry_run` (solo registra, con el servicio en `dry_run` o `real`) \| `real` (sigue el modo del servicio: con el servicio en `dry_run`, simulado). Cualquier otro valor = `off` + error en el log. Ver [Modos](#modos-futuresboard_rescate_upnl_mode). |
+| `FUTURESBOARD_RESCATE_RETIRO_MODE` | `off` | Retiro periódico de ganancias: `off` \| `dry_run` (simula) \| `real` (transfiere con el servicio en `real`; con el servicio en `dry_run`, simula). Cualquier otro valor = `off` + error en el log. Ver [Modos](#modos-futuresboard_rescate_retiro_mode). |
 | `FUTURESBOARD_RESCATE_UPNL_COOLDOWN_SECONDS` | `60` | Espera entre inyecciones del disparo por uPnL (0–3.600). Vacío, no entero o negativo = 60; más de 3.600 = 3.600. |
 | `FUTURESBOARD_RESCATE_TOPE_CONFIRM_SECONDS` | `60` | Confirmación del tope (0–600). `0` = disparo inmediato. Vacío, no entero o negativo = 60; más de 600 = 600. Espera máxima sin lecturas: `max(5 × valor, 300)` s. |
 | `FUTURESBOARD_RESCATE_SPOT_URL` | `https://api.binance.com` (`https://demo-api.binance.com` con testnet) | Base de spot y `/sapi`. |
@@ -429,7 +530,7 @@ Todas fail-closed: un valor inválido nunca habilita más de lo pedido.
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `TELEGRAM_PREFIX` | (vacías) | Avisos (ver [notificaciones.md](notificaciones.md)). |
 | `FUTURESBOARD_CONFIG_DIR` | `./config` | Directorio de `config.json` (API key/secret, `EXCHANGE`, testnet). El estado y el lock van junto a la DB. |
 
-Telegram: un aviso por inyección (de margen o por uPnL, con el motivo), devolución (total o parcial, con el ratio antes y después),
+Telegram: un aviso por inyección (de margen o por uPnL, con el motivo), devolución (total o parcial, con el ratio antes y después), retiro de ganancias (real o simulado, con el acumulado) y activación del retiro,
 transferencia rechazada o incierta, tope en confirmación,
 confirmación cancelada, disparo del tope y resultado del Apagar, y por cambios de estado (lectura caída / recuperada, bloqueo, reserva agotada),
 sin repetir el mismo aviso cada ciclo. En `dry_run` todos llevan `[SIMULACIÓN]`.
@@ -456,6 +557,7 @@ services:
       FUTURESBOARD_RESCATE_INTERVAL: "15"
       FUTURESBOARD_RESCATE_TOPE_CONFIRM_SECONDS: "60"   # 0 = tope sin confirmación (Apagar inmediato)
       FUTURESBOARD_RESCATE_UPNL_MODE: "off"         # disparo por uPnL: off | dry_run (solo registra, no presta) | real (sigue el modo de arriba)
+      FUTURESBOARD_RESCATE_RETIRO_MODE: "off"       # retiro periódico de ganancias: off | dry_run (simula) | real (sigue el modo de arriba)
       FUTURESBOARD_RESCATE_LOAN_STATE: /rescate/loan_state.json
       FUTURESBOARD_DOCKER_URL: http://docker-proxy:2375
       FUTURESBOARD_PASSIVBOT_CONTAINER: client17-passivbot
