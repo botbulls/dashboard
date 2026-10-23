@@ -115,38 +115,36 @@
                     <span class="float-end"><i class="fas fa-tag"></i> {{ markprice }}</span>
                 </div>
 
-                <table id="orders" class='table table-sm table-bordered text-center'>
-                    <thead class="thead-dark">
+                <div class="bb-tabla-scroll">
+                <table id="orders" class="table">
+                    <thead>
                         <tr>
-                            <th>Type</th>
-                            <th>Volume</th>
-                            <th>Price</th>
-                            <th>Date</th>
+                            <th scope="col">Tipo</th>
+                            <th scope="col" class="bb-n">Cantidad</th>
+                            <th scope="col" class="bb-n">Precio</th>
+                            <th scope="col">Fecha</th>
                         </tr>
                     </thead>
                     <tbody>
                     {% for position in orders[0] %}
-                        <tr class="table-primary">
-                            <td>{{position[5]}} {{position[3]}}x</td>
-                            <td>{{position[6]}}</td>
-                            <td>{{position[4]}}</td>
+                        <tr class="bb-fila-destacada">
+                            <td>Posición {{position[5]}} {{position[3]}}x</td>
+                            <td class="bb-n" data-order="{{position[6]}}">{{position[6]|num}}</td>
+                            <td class="bb-n" data-order="{{position[4]}}">{{position[4]|num}}</td>
                             <td></td>
                         </tr>
                     {% endfor %}
                     {% for order in orders[1] %}
-                        {% if order[3] == "BUY" %}
-                            <tr class="table-success">
-                        {% else %}
-                            <tr class="table-danger">
-                        {% endif %}
-                        <td>{{order[3]}} {{order[8]}} {{order[4]}}</td>
-
-                        <td>{{order[1]}}</td>
-                        <td>{{order[2]}}</td>
-                        <td>{{ order[7] }}</td>
+                        <tr>
+                            <td>{{ {'BUY': 'Compra', 'SELL': 'Venta'}.get(order[3], order[3]) }} {{order[8]}} {{order[4]}}</td>
+                            <td class="bb-n" data-order="{{order[1]}}">{{order[1]|num}}</td>
+                            <td class="bb-n" data-order="{{order[2]}}">{{order[2]|num}}</td>
+                            <td>{{ order[7] }}</td>
                         </tr>
                     {% endfor %}
+                    </tbody>
                 </table>
+                </div>
             </div>
         </div>
     </div>
@@ -245,51 +243,51 @@
                 </div>
                     {% if coin in coin_list['active'] %}
                         {% if coin_list['active'][coin][1] > 0 %}
-                            <table class='table table-sm table-bordered text-center'>
-                                <thead class="thead-dark">
+                            <table class="table bb-calculadora">
+                                <thead>
                                     <tr>
-                                        <td>Type</td>
-                                        <td>Volume</td>
-                                        <td>$</td>
+                                        <th scope="col"></th>
+                                        <th scope="col">Cantidad</th>
+                                        <th scope="col">Precio</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     {% for position in orders[0] %}
-                                        <tr class="table-secondary">
-                                            <td>Position</td>
-                                            <td><input class="form-control form-control-sm" id="positionsize" value="{{position[6]}}" readonly></td>
-                                            <td><input class="form-control form-control-sm" id="positionvalue" value="{{position[4]}}" readonly></td>
+                                        <tr>
+                                            <th scope="row">Posición</th>
+                                            <td><input class="form-control" id="positionsize" value="{{position[6]}}" readonly aria-label="Cantidad de la posición"></td>
+                                            <td><input class="form-control" id="positionvalue" value="{{position[4]}}" readonly aria-label="Precio de entrada"></td>
                                         </tr>
                                     {% endfor %}
                                     <tr>
-                                        <td>Custom</td>
-                                        <td><input type="number" class="form-control form-control-sm" id="customsize" onchange="averageDown()" min="0" step="any"></td>
-                                        <td><input type="number" class="form-control form-control-sm" id="customvalue" onchange="averageDown()" min="0" step="any"></td>
+                                        <th scope="row">A sumar</th>
+                                        <td><input type="number" class="form-control" id="customsize" onchange="averageDown()" min="0" step="any" inputmode="decimal" aria-label="Cantidad a sumar"></td>
+                                        <td><input type="number" class="form-control" id="customvalue" onchange="averageDown()" min="0" step="any" inputmode="decimal" aria-label="Precio de la compra"></td>
                                     </tr>
-                                    <tr class="table-secondary">
-                                        <td>Averaged</td>
-                                        <td><input class="form-control form-control-sm" id="averagesize" readonly></td>
-                                        <td><input class="form-control form-control-sm" id="averagevalue" readonly></td>
+                                    <tr>
+                                        <th scope="row">Promedio</th>
+                                        <td><input class="form-control" id="averagesize" readonly aria-label="Cantidad promediada"></td>
+                                        <td><input class="form-control" id="averagevalue" readonly aria-label="Precio promediado"></td>
                                     </tr>
-                                    <tr class="table-secondary">
-                                        <td>0.1% away</td>
-                                        <td>{{ target[0] }}</td>
-                                        <td>{{ markprice }}</td>
+                                    <tr>
+                                        <th scope="row">A 0,1 %</th>
+                                        <td data-value="{{ target[0] }}">{{ target[0]|num }}</td>
+                                        <td data-value="{{ markprice }}">{{ markprice|num }}</td>
                                     </tr>
-                                    <tr class="table-secondary">
-                                        <td>0.5% away</td>
-                                        <td>{{ target[1] }}</td>
-                                        <td>{{ markprice }}</td>
+                                    <tr>
+                                        <th scope="row">A 0,5 %</th>
+                                        <td data-value="{{ target[1] }}">{{ target[1]|num }}</td>
+                                        <td data-value="{{ markprice }}">{{ markprice|num }}</td>
                                     </tr>
-                                    <tr class="table-secondary">
-                                        <td>1% away</td>
-                                        <td>{{ target[2] }}</td>
-                                        <td>{{ markprice }}</td>
+                                    <tr>
+                                        <th scope="row">A 1 %</th>
+                                        <td data-value="{{ target[2] }}">{{ target[2]|num }}</td>
+                                        <td data-value="{{ markprice }}">{{ markprice|num }}</td>
                                     </tr>
-                                    <tr class="">
-                                        <td><input type="number" class="form-control form-control-sm" id="customaway" onchange="calcTarget()" min="0" step="any"></td>
-                                        <td><input class="form-control form-control-sm" id="averageTarget" readonly></td>
-                                        <td>{{ markprice }}</td>
+                                    <tr>
+                                        <td><input type="number" class="form-control" id="customaway" onchange="calcTarget()" min="0" step="any" inputmode="decimal" aria-label="Distancia en %"></td>
+                                        <td><input class="form-control" id="averageTarget" readonly aria-label="Cantidad para esa distancia"></td>
+                                        <td data-value="{{ markprice }}">{{ markprice|num }}</td>
                                     </tr>
                                 </tbody>
                             </table>
@@ -395,6 +393,7 @@
                     "searching": false,
                     "order": [],
                     "info": false,
+                    "language": window.BB.dataTablesEs,
                 });
             } );
 

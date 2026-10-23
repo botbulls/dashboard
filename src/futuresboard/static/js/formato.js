@@ -64,4 +64,11 @@
     /* Colores de gráficos leídos de los tokens (se recalculan al cambiar el tema) */
     token: function (nombre) { return getComputedStyle(document.documentElement).getPropertyValue(nombre).trim(); },
   };
+  /* Textos de DataTables en español (solo la interfaz: el orden usa los crudos de data-order). */
+  window.BB.dataTablesEs = {
+    search: 'Buscar:', lengthMenu: 'Mostrar _MENU_', info: 'Mostrando _START_ a _END_ de _TOTAL_',
+    infoEmpty: 'Sin filas', infoFiltered: '(de _MAX_)', zeroRecords: 'No hay coincidencias', emptyTable: 'Sin datos',
+    paginate: { first: 'Primera', last: 'Última', next: 'Siguiente', previous: 'Anterior' },
+    aria: { sortAscending: ': ordenar de menor a mayor', sortDescending: ': ordenar de mayor a menor' },
+  };
 })();

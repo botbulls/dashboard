@@ -1,69 +1,63 @@
 {% extends "base.html" %}
 {% block autoreload %}{% endblock %}
 {% block title %}Historial{% endblock %}
+{% block bajada %}<p>Registros de ingresos de Binance por período y por tipo. Guardá un período como CSV para bajarlo.</p>{% endblock %}
 {% block content %}
-    <div class="row">
-        <div class="col-md-12">
-            {% if filename != "-" %}
-                <div class="alert alert-info" role="alert"><i class="fas fa-file-download"></i> Your file has been saved to <code>{{ fname }}</code> which can be downloaded by clicking <a href= "{{ url_for('static', filename=fname) }}">here</a></div><br>
-            {% endif %}
-            <div class="card">
-                <table id="orders" class='table table-sm table-bordered text-center'>
-                    <thead class="thead-dark">
-                        <tr>
-                            <th>Download</th>
-                            <th>Time period</th>
-                            <th>Total records</th>
-                            {% for col in history["columns"] %}
-                                <th>{{ col }}</th>
-                            {% endfor %}
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for timeframe in history %}
-                            {% if timeframe != "columns" %}
-                                <tr>
-                                    <td><a class="btn btn-outline-primary btn-sm" href="{{ url_for("main.history_page_timeframe", start=history[timeframe]["start"], end=history[timeframe]["end"]) }}" role="button">Save to file</a></td>
-                                    <td>{{ timeframe }}</td>
-                                    <td>{{ history[timeframe]["total"] }}</td>
-                                    {% for col in history["columns"] %}
-                                        <td>{{ history[timeframe][col] }}</td>
-                                    {% endfor %}
-                                </tr>
-                            {% endif %}
+    {% if filename != "-" %}
+        <div class="alert alert-success mb-0" role="status"><i class="fas fa-file-download me-1" aria-hidden="true"></i> Se guardó <code>{{ fname }}</code>. <a href="{{ url_for('static', filename=fname) }}">Descargar el archivo</a></div>
+    {% endif %}
+    <section class="bb-seccion" aria-labelledby="bbTituloPeriodos">
+        <h2 class="bb-seccion__titulo" id="bbTituloPeriodos">Por período</h2>
+        <div class="card bb-tabla-card">
+            <table id="orders" class="table">
+                <thead>
+                    <tr>
+                        <th scope="col">Archivo</th>
+                        <th scope="col">Período</th>
+                        <th scope="col" class="bb-n">Registros</th>
+                        {% for col in history["columns"] %}
+                            <th scope="col" class="bb-n">{{ col }}</th>
                         {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </div>
-    <br><hr><br>
-    <div class="row">
-        <div class="col-md-7">
-            <div class="card">
-                <table id="oldfiles" class='table table-sm table-bordered text-center'>
-                    <thead class="thead-dark">
-                        <tr>
-                            <th>Download</th>
-                            <th>Filename</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for file in files %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for timeframe in history %}
+                        {% if timeframe != "columns" %}
                             <tr>
-                                <td><a class="btn btn-outline-primary btn-sm" href="{{ url_for('static', filename=file) }}" role="button">Download</a></td>
-                                <td>{{ file }}</td>
+                                <td><a class="btn btn-outline-secondary btn-sm" href="{{ url_for("main.history_page_timeframe", start=history[timeframe]["start"], end=history[timeframe]["end"]) }}" role="button"><i class="fas fa-file-csv" aria-hidden="true"></i> Guardar CSV</a></td>
+                                <td>{{ timeframe }}</td>
+                                <td class="bb-n" data-order="{{ history[timeframe]["total"] }}">{{ history[timeframe]["total"]|num }}</td>
+                                {% for col in history["columns"] %}
+                                    <td class="bb-n" data-order="{{ history[timeframe][col] }}">{{ history[timeframe][col]|num }}</td>
+                                {% endfor %}
                             </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
+                        {% endif %}
+                    {% endfor %}
+                </tbody>
+            </table>
         </div>
-    </div>
-
-
-
-
+    </section>
+    <section class="bb-seccion bb-seccion--angosta" aria-labelledby="bbTituloArchivos">
+        <h2 class="bb-seccion__titulo" id="bbTituloArchivos">Archivos guardados</h2>
+        <div class="card bb-tabla-card">
+            <table id="oldfiles" class="table">
+                <thead>
+                    <tr>
+                        <th scope="col">Bajar</th>
+                        <th scope="col">Archivo</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for file in files %}
+                        <tr>
+                            <td><a class="btn btn-outline-secondary btn-sm" href="{{ url_for('static', filename=file) }}" role="button"><i class="fas fa-download" aria-hidden="true"></i> Descargar</a></td>
+                            <td>{{ file }}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
 
     <script>
         $(document).ready( function () {
@@ -72,12 +66,16 @@
                 "searching": false,
                 "order": [],
                 "info": false,
+                "dom": '<"bb-tabla-scroll"t>',
+                "language": window.BB.dataTablesEs,
             });
             $('#oldfiles').DataTable({
                 "paging": true,
                 "searching": true,
                 "order": [[ 1, 'desc' ]],
                 "info": true,
+                "dom": '<"bb-dt-arriba"lf><"bb-tabla-scroll"t><"bb-dt-abajo"ip>',
+                "language": window.BB.dataTablesEs,
             });
         } );
     </script>
