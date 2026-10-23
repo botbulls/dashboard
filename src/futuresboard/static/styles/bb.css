@@ -236,6 +236,7 @@ body.bb {
 .bb-contenido { flex: 1 0 auto; padding: var(--bb-s5); padding-right: calc(var(--bb-s5) + 56px); display: grid; gap: var(--bb-s5); align-content: start; }
 .bb-contenido__cuerpo { display: grid; gap: var(--bb-s5); min-width: 0; align-content: start; }
 .bb-contenido__cuerpo > * { min-width: 0; }
+.bb-modales { display: contents; }
 
 .bb-sidebar { position: sticky; top: 0; z-index: 1031; height: 100vh; height: 100dvh; overflow-y: auto; overscroll-behavior: contain;
   background: var(--bb-surface); border-right: 1px solid var(--bb-border); display: flex; flex-direction: column; padding: var(--bb-s4) var(--bb-s3); gap: var(--bb-s4); }
@@ -316,6 +317,30 @@ body.bb {
 .bb .bb-fecha input { height: 40px; min-height: 40px; padding: 0 var(--bb-s3) 0 36px; width: 15.5em; border-radius: var(--bb-r); cursor: pointer; font-variant-numeric: tabular-nums; }
 .bb-topbar { display: none; }
 
+/* ------------------------------------------------------------------ 6. Franja de estado (lo memorable: siempre primero) */
+.bb-franja { display: flex; flex-wrap: wrap; align-items: center; gap: var(--bb-s2) var(--bb-s3); padding: var(--bb-s3); background: var(--bb-surface); border: 1px solid var(--bb-border); border-radius: var(--bb-r-lg); }
+.bb-franja__sep { width: 1px; align-self: stretch; background: var(--bb-border); }
+.bb-franja__nota { margin: 0 0 0 auto; font-size: var(--bb-fs-13); color: var(--bb-text-2); }
+.bb .bot-status-badge { display: inline-flex; align-items: center; gap: var(--bb-s2); min-height: 36px; padding: 0 var(--bb-s3); border-radius: var(--bb-r-pill); font-size: var(--bb-fs-14); font-weight: 600; line-height: 1.2; border: 0; cursor: pointer; white-space: nowrap; }
+.bb .bot-status-badge i { font-size: 14px; }
+.bb .last-order-badge { display: inline-flex; align-items: center; gap: var(--bb-s2); min-height: 36px; padding: 0 var(--bb-s3); border-radius: var(--bb-r-pill); border: 1px solid var(--bb-border); background: var(--bb-surface-2); color: var(--bb-text); font-size: var(--bb-fs-14); cursor: pointer; white-space: nowrap; }
+.bb .last-order-badge .bb-hora { font-weight: 600; font-variant-numeric: tabular-nums; }
+.bb-solo-celu { display: none; }
+
+/* Badges de modo: texto explícito + color fijo. Nunca solo color. */
+.bb .bb-badge { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 10px; border-radius: var(--bb-r); font-size: var(--bb-fs-13); font-weight: 600; line-height: 1; border: 1px solid transparent; white-space: nowrap; }
+.bb .bb-badge--sim { background: var(--bb-info-bg); color: var(--bb-info); border-color: color-mix(in srgb, var(--bb-info) 35%, transparent); }
+.bb .bb-badge--testnet { background: var(--bb-warn-bg); color: var(--bb-warn); border-color: color-mix(in srgb, var(--bb-warn) 40%, transparent); }
+.bb .bb-badge--real { background: var(--bb-ink); color: var(--bb-on-ink); }
+.bb .bb-badge--neutro { background: var(--bb-neutral-bg); color: var(--bb-neutral); }
+.bb .bb-badge--peligro { background: var(--bb-loss-bg); color: var(--bb-loss); border-color: color-mix(in srgb, var(--bb-loss) 35%, transparent); }
+
+/* Detalle del último pedido (modal) */
+.bb-detalle-pedido { display: grid; grid-template-columns: 1fr 1fr; gap: var(--bb-s3) var(--bb-s4); margin: 0; }
+.bb-detalle-pedido dt { font-size: var(--bb-fs-13); font-weight: 500; color: var(--bb-text-2); }
+.bb-detalle-pedido dd { margin: 0; font-variant-numeric: tabular-nums; }
+.bb-detalle-pedido__ancho { grid-column: 1 / -1; }
+
 /* ------------------------------------------------------------------ 12. Pie */
 .bb-pie { padding: var(--bb-s5); padding-right: calc(var(--bb-s5) + 56px); border-top: 1px solid var(--bb-border); color: var(--bb-text-2); font-size: var(--bb-fs-13); display: grid; gap: var(--bb-s2); }
 .bb-pie p { margin: 0; max-width: 72ch; }
@@ -331,6 +356,8 @@ body.bb {
   .bb-nav__item[aria-current="page"]:hover { background: var(--bb-ink-soft); }
   .bb-icono-btn:hover, .bb-segmento button:hover { background: var(--bb-surface-hover); color: var(--bb-text); }
   .bb-monedas td:first-child a:hover, .bb-inactivas li a:hover { color: var(--bb-link); }
+  .bb .last-order-badge:hover { background: var(--bb-surface-hover); }
+  .bb .bot-status-badge:hover { filter: brightness(.95); }
 }
 .bb .btn-outline-secondary:active, .bb .btn-light:active, .bb .btn-secondary:active, .bb-icono-btn:active, .bb-nav__item:active { background-color: var(--bb-surface-hover); color: var(--bb-text); }
 @media (prefers-reduced-motion: reduce) {
@@ -373,6 +400,12 @@ body.bb {
   .bb-monedas td:first-child a { min-height: var(--bb-tap); min-width: var(--bb-tap); display: inline-flex; align-items: center; padding: 0; }
   .bb-inactivas li a { min-height: var(--bb-tap); display: flex; align-items: center; padding: 0 var(--bb-s1); }
   .bb-sidebar__titulo { min-height: var(--bb-tap); }
+  .bb-franja { padding: var(--bb-s2) var(--bb-s3); gap: var(--bb-s2); }
+  .bb-franja__sep { display: none; }
+  .bb-franja__nota { margin: 0; flex-basis: 100%; }
+  .bb-franja .bot-status-badge, .bb-franja .last-order-badge { min-height: var(--bb-tap); }
+  .bb .bb-franja .bb-badge { min-height: 30px; }
+  .bb-solo-celu { display: inline; }
 }
 
 /* ------------------------------------------------------------------ 16. Neutralizar lo viejo mientras queden reglas de

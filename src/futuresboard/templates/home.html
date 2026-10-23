@@ -1,7 +1,6 @@
 {% extends "base.html" %}
 {% block autoreload %}<meta http-equiv="refresh" content="60">{% endblock %}
 {% block title %}Inicio{% endblock %}
-{% block bajada %}<p>{% if session.get('username') %}{{ session.get('username') }} · {% endif %}del {{ startdate }} al {{ enddate }}</p>{% endblock %}
 {% block acciones %}
     <form method="GET" name="daterangeform" class="bb-fecha">
         <i class="far fa-calendar-alt" aria-hidden="true"></i>
@@ -10,31 +9,52 @@
     <a class="bb-icono-btn" href="https://www.binance.com/en/futures/{{ coin }}" target="_blank" rel="noopener" aria-label="Ver en Binance" title="Ver en Binance"><i class="fas fa-external-link-alt" aria-hidden="true"></i></a>
 {% endblock %}
 {% block content %}
-    <div>
-        <div class="d-flex flex-wrap align-items-center gap-2">
-            <span class="badge bg-secondary last-order-badge" style="font-size: 0.875rem; padding: 0.625rem 1rem; cursor: pointer;" data-bs-toggle="modal" data-bs-target="#lastOrderModal" title="Click para ver detalles">
-                <i class="far fa-clock"></i> 
-                <span class="last-order-text">LAST ORDER: {{ lastupdate }}</span>
-                <span class="last-order-short d-none">{{ lastupdate }}</span>
-            </span>
-            <span id="botStatus" class="badge bot-status-badge" style="font-size: 0.875rem; padding: 0.625rem 1rem; cursor: pointer;" data-bs-toggle="modal" data-bs-target="#botStatusModal" title="Click para ver detalles">
-                <i class="fas fa-circle-notch fa-spin"></i> <span class="bot-status-text">Loading...</span>
-            </span>
-        </div>
-        
+    {# Franja de estado: lo primero que se ve, también a 390 px (bot, último pedido, modo de la plata, descargo). #}
+    {% set r = rescate_resumen %}
+    <section class="bb-franja" aria-label="Estado del bot y modo de la cuenta">
+        <button id="botStatus" type="button" class="badge bot-status-badge bg-secondary" data-bs-toggle="modal" data-bs-target="#botStatusModal" title="Ver el estado del bot">
+            <i class="fas fa-circle-notch fa-spin" aria-hidden="true"></i> <span class="bot-status-text">Cargando…</span>
+        </button>
+        <button type="button" class="last-order-badge" data-bs-toggle="modal" data-bs-target="#lastOrderModal" title="Ver el último pedido">
+            <i class="far fa-clock" aria-hidden="true"></i>
+            <span class="last-order-text"><span class="bb-solo-escritorio">Último pedido</span><span class="bb-solo-celu">Últ. pedido</span>
+            {%- if lastupdate|length == 19 %} <span class="bb-hora">{{ lastupdate[11:] }}</span> · {{ lastupdate[8:10] }}/{{ lastupdate[5:7] }}{% else %} {{ lastupdate }}{% endif %}</span>
+        </button>
+        <span class="bb-franja__sep" aria-hidden="true"></span>
+        {% if not r or r.error %}
+            <span class="badge bb-badge bb-badge--neutro"><i class="fas fa-question-circle" aria-hidden="true"></i> Rescate sin datos</span>
+        {% elif r.modo == 'dry_run' %}
+            <span class="badge bb-badge bb-badge--sim" title="El servicio rescate está en dry_run: no transfiere nada"><i class="fas fa-flask" aria-hidden="true"></i> <span>Rescate: <span class="bb-solo-escritorio">simulación (dry_run)</span><span class="bb-solo-celu">dry_run</span></span></span>
+        {% elif r.modo == 'real' %}
+            <span class="badge bb-badge bb-badge--real"><i class="fas fa-bolt" aria-hidden="true"></i> Rescate: real</span>
+        {% elif r.modo == 'off' %}
+            <span class="badge bb-badge bb-badge--neutro"><i class="fas fa-power-off" aria-hidden="true"></i> Rescate apagado</span>
+        {% else %}
+            <span class="badge bb-badge bb-badge--neutro"><i class="fas fa-question-circle" aria-hidden="true"></i> Rescate sin datos</span>
+        {% endif %}
+        {% if (r and r.testnet) or config.get('BINANCE_TESTNET') %}
+            <span class="badge bb-badge bb-badge--testnet" title="Cuenta de Binance testnet/Demo: no es plata real"><i class="fas fa-vial" aria-hidden="true"></i> testnet/Demo</span>
+        {% endif %}
+        {% if r and not r.error and r.modo and not r.servicio_vivo %}
+            <span class="badge bb-badge bb-badge--peligro"><i class="fas fa-heartbeat" aria-hidden="true"></i> el servicio no late</span>
+        {% endif %}
+        <p class="bb-franja__nota" role="note">Herramienta, no asesor: no garantiza resultados. <a href="#pie">Leer más</a></p>
+    </section>
+    <div class="bb-modales">
+
         <!-- Last Order Modal -->
         <div class="modal fade" id="lastOrderModal" tabindex="-1" aria-labelledby="lastOrderModalLabel" aria-hidden="true">
             <div class="modal-dialog modal-dialog-centered">
                 <div class="modal-content">
                     <div class="modal-header">
-                        <h5 class="modal-title" id="lastOrderModalLabel">Detalles de la Última Orden</h5>
-                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                        <h2 class="modal-title" id="lastOrderModalLabel">Último pedido</h2>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
                     </div>
                     <div class="modal-body" id="lastOrderModalBody">
-                        <p>Cargando información...</p>
+                        <p>Cargando…</p>
                     </div>
                     <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cerrar</button>
+                        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cerrar</button>
                     </div>
                 </div>
             </div>
@@ -45,14 +65,14 @@
             <div class="modal-dialog modal-dialog-centered">
                 <div class="modal-content">
                     <div class="modal-header">
-                        <h5 class="modal-title" id="botStatusModalLabel">Estado del Bot</h5>
-                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                        <h2 class="modal-title" id="botStatusModalLabel">Estado del bot</h2>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
                     </div>
                     <div class="modal-body" id="botStatusModalBody">
-                        <p>Cargando información...</p>
+                        <p>Cargando…</p>
                     </div>
                     <div class="modal-footer">
-                        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cerrar</button>
+                        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cerrar</button>
                     </div>
                 </div>
             </div>
@@ -365,6 +385,8 @@ var myChart = new Chart(
         return d.innerHTML;
     }
 
+    const fmtNum = (v) => (window.BB && window.BB.fmt ? window.BB.fmt.num(v) : v);
+
     function setBadge(text, cls, iconClass) {
         const botStatusEl = document.getElementById('botStatus');
         const botStatusText = botStatusEl?.querySelector('.bot-status-text');
@@ -382,14 +404,14 @@ var myChart = new Chart(
         if (modalBody) {
             modalBody.innerHTML = html + `
                 <div class="mt-3">
-                    <small class="text-muted">Última actualización: ${new Date().toLocaleTimeString()}</small>
+                    <small class="text-muted">Actualizado a las ${new Date().toLocaleTimeString('es-AR')}</small>
                 </div>`;
         }
     }
 
     function render(data) {
         if (!data.enabled) {
-            setBadge('BOT: N/D', 'bg-secondary', 'fas fa-question-circle');
+            setBadge('Sin panel', 'bg-secondary', 'fas fa-question-circle');
             setModal(`<p class="text-muted mb-0">${esc(data.message || 'Control del bot no configurado.')}</p>`);
             return;
         }
@@ -405,14 +427,14 @@ var myChart = new Chart(
             : '<span class="text-muted">n/a (forager no los lee)</span>';
         let title, text, cls, iconClass;
         if (running && graceful) {
-            text = 'BOT: Graceful stop'; cls = 'bg-warning'; iconClass = 'fas fa-exclamation-triangle';
-            title = '<h6 class="text-warning"><i class="fas fa-exclamation-triangle"></i> Graceful stop</h6><p class="text-muted small mb-2">No abre nuevas posiciones; gestiona las abiertas.</p>';
+            text = 'Parada gradual'; cls = 'bg-warning'; iconClass = 'fas fa-exclamation-triangle';
+            title = '<h6 class="text-warning"><i class="fas fa-exclamation-triangle"></i> Parada gradual (graceful stop)</h6><p class="text-muted small mb-2">No abre nuevas posiciones; gestiona las abiertas.</p>';
         } else if (running) {
-            text = 'BOT: Running'; cls = 'bg-success'; iconClass = 'fas fa-check-circle';
-            title = '<h6 class="text-success"><i class="fas fa-check-circle"></i> Bot en ejecución</h6>';
+            text = 'Operando'; cls = 'bg-success'; iconClass = 'fas fa-check-circle';
+            title = '<h6 class="text-success"><i class="fas fa-check-circle"></i> Operando</h6>';
         } else {
-            text = 'BOT: Stopped'; cls = 'bg-danger'; iconClass = 'fas fa-times-circle';
-            title = '<h6 class="text-danger"><i class="fas fa-times-circle"></i> Bot detenido</h6><p class="text-muted small mb-2">Si hay posiciones u órdenes abiertas, quedan en el exchange sin gestión.</p>';
+            text = 'Detenido'; cls = 'bg-danger'; iconClass = 'fas fa-times-circle';
+            title = '<h6 class="text-danger"><i class="fas fa-times-circle"></i> Detenido</h6><p class="text-muted small mb-2">Si hay posiciones u órdenes abiertas, quedan en el exchange sin gestión.</p>';
         }
         setBadge(text, cls, iconClass);
         setModal(`
@@ -420,7 +442,7 @@ var myChart = new Chart(
                 ${title}
                 <ul class="list-unstyled ms-3 mb-0">
                     <li><i class="fas ${running ? 'fa-check text-success' : 'fa-times text-danger'}"></i> ${esc(c.name || 'passivbot')}: <strong>${esc(c.status || 'desconocido')}</strong></li>
-                    <li><i class="fas fa-sliders-h"></i> Riesgo: <strong>${esc(data.riesgo)}</strong> <span class="text-muted small">(TWE long ${esc(data.twe_long)} / short ${esc(data.twe_short)})</span>${pendiente}</li>
+                    <li><i class="fas fa-sliders-h"></i> Riesgo: <strong>${esc(data.riesgo)}</strong> <span class="text-muted small">(TWE long ${esc(fmtNum(data.twe_long))} / short ${esc(fmtNum(data.twe_short))})</span>${pendiente}</li>
                     <li><i class="fas fa-random"></i> Modos: ${modos}</li>
                     ${data.config_pending === true ? '<li class="text-warning small">La config cambió después del último arranque de passivbot: lo que se ve arriba todavía no está en efecto.</li>' : ''}
                 </ul>
@@ -441,11 +463,12 @@ var myChart = new Chart(
             .then(({ ok, d }) => {
                 if (!ok && d.enabled !== false) throw new Error(d.error || 'Error');
                 render(d);
+                if (window.BB && window.BB.perfilSidebar) window.BB.perfilSidebar(d);
             })
             .catch(error => {
                 console.error('Error fetching bot status:', error);
-                setBadge('BOT: Unknown', 'bg-secondary', 'fas fa-question-circle');
-                setModal('<p class="text-danger">Error al obtener el estado del bot. Por favor, intente más tarde.</p>');
+                setBadge('Sin datos', 'bg-secondary', 'fas fa-question-circle');
+                setModal('<p class="text-danger">No se pudo leer el estado del bot. Se reintenta en 30 s.</p>');
             })
             .finally(() => {
                 clearTimeout(timeoutId);
@@ -490,59 +513,33 @@ var myChart = new Chart(
                 return response.json();
             })
             .then(data => {
-                // Format the order details
-                const sideClass = data.side === 'BUY' ? 'text-success' : 'text-danger';
+                // Formato es-AR solo para mostrar; el JSON de /api/last-order no se toca.
+                const f = window.BB.fmt;
+                const LADOS = { BUY: 'Compra', SELL: 'Venta' };
+                const lado = LADOS[data.side] || data.side || 'N/D';
                 const sideIcon = data.side === 'BUY' ? 'fa-arrow-up' : 'fa-arrow-down';
-                const positionSideBadge = data.positionSide === 'LONG' ? 'bg-info' : 'bg-warning';
-                
+                const posicion = data.positionSide ? data.positionSide.charAt(0) + data.positionSide.slice(1).toLowerCase() : 'N/D';
                 modalBody.innerHTML = `
-                    <div class="row">
-                        <div class="col-12 mb-3">
-                            <h6><i class="fas fa-coins"></i> Símbolo</h6>
-                            <p class="mb-0"><strong>${data.symbol || 'N/A'}</strong></p>
-                        </div>
-                        <div class="col-6 mb-3">
-                            <h6><i class="fas ${sideIcon} ${sideClass}"></i> Lado</h6>
-                            <p class="mb-0"><span class="badge ${sideClass === 'text-success' ? 'bg-success' : 'bg-danger'}">${data.side || 'N/A'}</span></p>
-                        </div>
-                        <div class="col-6 mb-3">
-                            <h6><i class="fas fa-exchange-alt"></i> Posición</h6>
-                            <p class="mb-0"><span class="badge ${positionSideBadge}">${data.positionSide || 'N/A'}</span></p>
-                        </div>
-                        <div class="col-6 mb-3">
-                            <h6><i class="fas fa-sort-numeric-up"></i> Cantidad</h6>
-                            <p class="mb-0"><strong>${data.origQty ? data.origQty.toLocaleString('en-US', {maximumFractionDigits: 8}) : 'N/A'}</strong></p>
-                        </div>
-                        <div class="col-6 mb-3">
-                            <h6><i class="fas fa-dollar-sign"></i> Precio</h6>
-                            <p class="mb-0"><strong>${data.price ? data.price.toLocaleString('en-US', {maximumFractionDigits: 8}) : 'N/A'}</strong></p>
-                        </div>
-                        <div class="col-6 mb-3">
-                            <h6><i class="fas fa-tag"></i> Tipo</h6>
-                            <p class="mb-0"><strong>${data.type || 'N/A'}</strong></p>
-                        </div>
-                        <div class="col-6 mb-3">
-                            <h6><i class="fas fa-info-circle"></i> Estado</h6>
-                            <p class="mb-0"><span class="badge bg-secondary">${data.status || 'N/A'}</span></p>
-                        </div>
-                        <div class="col-12 mb-3">
-                            <h6><i class="far fa-clock"></i> Fecha y Hora</h6>
-                            <p class="mb-0"><strong>${data.formatted_time || 'N/A'}</strong></p>
-                        </div>
+                    <dl class="bb-detalle-pedido">
+                        <div class="bb-detalle-pedido__ancho"><dt>Par</dt><dd><strong>${data.symbol || 'N/D'}</strong></dd></div>
+                        <div><dt>Lado</dt><dd><i class="fas ${sideIcon}" aria-hidden="true"></i> ${lado}</dd></div>
+                        <div><dt>Posición</dt><dd>${posicion}</dd></div>
+                        <div><dt>Cantidad</dt><dd class="bb-num" data-value="${data.origQty}">${data.origQty ? f.num(data.origQty) : 'N/D'}</dd></div>
+                        <div><dt>Precio</dt><dd class="bb-num" data-value="${data.price}">${data.price ? f.num(data.price) : 'N/D'}</dd></div>
+                        <div><dt>Tipo</dt><dd>${data.type || 'N/D'}</dd></div>
+                        <div><dt>Estado</dt><dd>${data.status || 'N/D'}</dd></div>
+                        <div class="bb-detalle-pedido__ancho"><dt>Fecha y hora</dt><dd>${data.formatted_time || 'N/D'}</dd></div>
                         ${data.price && data.origQty ? `
-                        <div class="col-12 mb-3">
-                            <h6><i class="fas fa-calculator"></i> Valor Total</h6>
-                            <p class="mb-0"><strong>$${(data.price * data.origQty).toLocaleString('en-US', {maximumFractionDigits: 2})}</strong></p>
-                        </div>
+                        <div class="bb-detalle-pedido__ancho"><dt>Valor total</dt><dd class="bb-num"><strong>${f.usd(data.price * data.origQty, { dec: 2 })}</strong></dd></div>
                         ` : ''}
-                    </div>
+                    </dl>
                 `;
             })
             .catch(error => {
                 console.error('Error fetching last order:', error);
                 const modalBody = document.getElementById('lastOrderModalBody');
                 if (modalBody) {
-                    modalBody.innerHTML = '<p class="text-danger">Error al obtener los detalles de la última orden. Por favor, intente más tarde.</p>';
+                    modalBody.innerHTML = '<p class="text-danger">No se pudo leer el último pedido. Probá de nuevo en un rato.</p>';
                 }
             });
     }
