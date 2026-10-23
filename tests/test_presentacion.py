@@ -107,6 +107,21 @@ def test_advertencia_de_twe_conserva_las_clases_que_togglea_el_js(client):  # no
     assert "#botTweAdvertencia.text-warning" in css and "#botTweAdvertencia.text-danger" in css
 
 
+
+def _sin_plegados(html):
+    return re.sub(r"<details\b.*?</details>", "", html, flags=re.S)
+
+
+def test_rescate_resultado_de_apagar_y_cierre_a_mercado_a_la_vista(client):  # noqa: F811
+    html = _get(client, "/rescate")
+    tope = html.split('id="rescateTope"', 1)[1].split('id="rescateConfirmacion"', 1)[0]
+    # Lo que hizo Apagar (por ejemplo, un error con posiciones abiertas) se ve antes de la casilla de reconocer.
+    assert "<details" not in tope
+    assert tope.index('data-r="tope-apagar"') < tope.index('id="rescateTopeCheck"') < tope.index('id="rescateTopeAck"')
+    aviso = html.split('class="bb-alerta bb-alerta--aviso" role="note"', 1)[1].split("</div>\n    </div>", 1)[0]
+    assert "ejecuta <strong>Apagar</strong>: detiene passivbot y cierra todo a mercado" in _sin_plegados(aviso)
+
+
 # ---------------------------------------------------------------- hooks (restricción 3)
 
 PAGINAS = ["/", "/positions", "/history", "/projection", "/rescate", "/settings", "/coins/BTCUSDT"]

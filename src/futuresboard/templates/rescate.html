@@ -7,15 +7,12 @@
     <div class="alert alert-danger d-none bb-alerta-accion" id="rescateTope" role="alert" aria-live="assertive">
         <h2 class="alert-heading"><i class="fas fa-exclamation-triangle me-2" aria-hidden="true"></i>Tope de pérdida disparado</h2>
         <p class="mb-2" data-r="tope-texto"></p>
+        <p class="mb-2 fw-bold" data-r="tope-apagar"></p>
         <div class="form-check mb-2">
             <input class="form-check-input" type="checkbox" id="rescateTopeCheck">
             <label class="form-check-label" for="rescateTopeCheck">Revisé el estado en Binance. Al reconocerlo se desbloquea START y el rescate queda deshabilitado (habilitarlo de nuevo fija una base nueva).</label>
         </div>
         <button type="button" class="btn btn-danger" id="rescateTopeAck" disabled>Reconocer tope</button>
-        <details class="bb-detalle mt-2">
-            <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Qué hizo Apagar</summary>
-            <p class="mb-0 mt-1" data-r="tope-apagar"></p>
-        </details>
     </div>
 
     <div class="alert alert-warning d-none bb-alerta-accion" id="rescateConfirmacion" role="status" aria-live="polite">
@@ -40,13 +37,13 @@
         <i class="fas fa-exclamation-triangle" aria-hidden="true"></i>
         <div>
             <p class="mb-0"><strong>Importante.</strong> {{ aviso }}</p>
+            <p class="mb-0">Si se confirma el tope de pérdida total, se ejecuta <strong>Apagar</strong>: detiene passivbot y cierra todo a mercado.</p>
             <details class="bb-detalle">
                 <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Cómo funciona</summary>
                 <p class="mb-0 mt-1">El bot dimensiona sobre el capital propio (wallet menos lo prestado); la reserva de spot solo se inyecta
                 cerca de la liquidación. Se devuelve sola cuando no hay posiciones y, en partes, con posiciones abiertas
-                si el margen está sano (ratio en o arriba del umbral de devolución). El tope de pérdida total ejecuta
-                <strong>Apagar</strong> (detiene passivbot y cierra todo a mercado) cuando se confirma: al primer cruce
-                queda en confirmación y se ejecuta si una lectura posterior (por defecto 60 s después) sigue debajo del límite.</p>
+                si el margen está sano (ratio en o arriba del umbral de devolución). El tope se confirma así: al primer cruce
+                queda en confirmación y se ejecuta Apagar si una lectura posterior (por defecto 60 s después) sigue debajo del límite.</p>
             </details>
         </div>
     </div>
