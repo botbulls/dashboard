@@ -2653,10 +2653,11 @@ def build_service(settings: RescateSettings, config: Any) -> RescateService:
     from futuresboard import c3
     from futuresboard import logs
     from futuresboard.config import BINANCE_FUTURES_MAINNET_URL
+    from futuresboard.config import state_dir
 
     logs.register_secret(config.API_KEY)
     logs.register_secret(config.API_SECRET)
-    data_dir = pathlib.Path(config.DATABASE).parent
+    data_dir = state_dir(config)
     exchange = getattr(config.EXCHANGE, "value", config.EXCHANGE) or ""
     testnet = bool(config.BINANCE_TESTNET)
     binance = RescateBinance(config.API_BASE_URL or "", spot_base_url(testnet, settings.spot_url_override),
@@ -2717,7 +2718,9 @@ def _simular(settings: RescateSettings, config: Any, tipo: str, monto: Optional[
         if amount <= 0 or amount > LIMITES["reserva_max_usdt"][1]:
             print(f"El monto tiene que ser mayor que 0 y como máximo {LIMITES['reserva_max_usdt'][1]}.")
             return 2
-    data_dir = pathlib.Path(config.DATABASE).parent
+    from futuresboard.config import state_dir
+
+    data_dir = state_dir(config)
     with file_lock(data_dir / STATE_LOCK_NAME):
         state, err = load_state(data_dir)
         if err:

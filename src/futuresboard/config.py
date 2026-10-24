@@ -38,6 +38,23 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
+# Mueven solo la DB / el intervalo del scraper, por servicio y sin editar config.json (que tiene las
+# API keys). Ver docs/produccion.md, "Scraper en su propio contenedor y SQLite en WAL".
+ENV_DATABASE = "FUTURESBOARD_DATABASE"
+ENV_AUTO_SCRAPE_INTERVAL = "FUTURESBOARD_AUTO_SCRAPE_INTERVAL"
+
+
+def state_dir(config) -> pathlib.Path:
+    """Directorio de los archivos de estado del panel, rescate, C3 y jobs.
+
+    Acepta un ``Config`` o el ``app.config`` de Flask. Si no trae ``STATE_DIR`` (configs armadas a
+    mano) es, como siempre, el directorio de la DB.
+    """
+    get = config.get if hasattr(config, "get") else (lambda key: getattr(config, key, None))
+    value = get("STATE_DIR")
+    return pathlib.Path(value) if value else pathlib.Path(get("DATABASE")).parent
+
+
 class Exchanges(enum.Enum):
     BINANCE = "binance"
     BYBIT = "bybit"
@@ -66,6 +83,9 @@ class Custom(BaseModel):
 class Config(BaseModel):
     CONFIG_DIR: DirectoryPath = pathlib.Path.cwd()
     DATABASE: Optional[pathlib.Path]
+    # Estado del panel/rescate/C3/jobs. Default: el directorio de DATABASE tal como sale de
+    # config.json (o CONFIG_DIR), ANTES de FUTURESBOARD_DATABASE: mover la DB por env no mueve el estado.
+    STATE_DIR: Optional[pathlib.Path] = None
     EXCHANGE: Optional[Exchanges] = Exchanges.BINANCE
     TEST_MODE: Optional[bool] = False
     BINANCE_TESTNET: bool = False
@@ -85,6 +105,24 @@ class Config(BaseModel):
         if not value:
             value = values["CONFIG_DIR"] / "futures.db"
         return value.resolve()
+
+    @validator("STATE_DIR", always=True)
+    @classmethod
+    def _validate_state_dir(cls, value, values):
+        if value:
+            return value.resolve()
+        database = values.get("DATABASE")
+        return database.parent if database else None
+
+    @root_validator(skip_on_failure=True)
+    @classmethod
+    def _database_from_env(cls, values):
+        # Corre después de STATE_DIR: solo se mueven la DB y lo que vive junto a ella
+        # (-wal/-shm, scrape_state.json, latido del scraper).
+        raw = os.environ.get(ENV_DATABASE, "").strip()
+        if raw:
+            values["DATABASE"] = pathlib.Path(raw).resolve()
+        return values
 
     @validator("DISABLE_AUTO_SCRAPE", always=True)
     @classmethod
@@ -123,6 +161,13 @@ class Config(BaseModel):
                 else:
                     value = "https://api.bybit.com"
         return value
+
+    @validator("AUTO_SCRAPE_INTERVAL", pre=True, always=True)
+    @classmethod
+    def _auto_scrape_interval_from_env(cls, value):
+        # El env gana sobre config.json; el rango 60-3600 lo valida el validador de abajo.
+        raw = os.environ.get(ENV_AUTO_SCRAPE_INTERVAL, "").strip()
+        return raw if raw else value
 
     @validator("AUTO_SCRAPE_INTERVAL")
     @classmethod

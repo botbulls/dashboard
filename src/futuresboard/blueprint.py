@@ -32,6 +32,7 @@ from futuresboard import resumen_rescate
 from futuresboard import telegram_notify
 from futuresboard import db
 from futuresboard.config import BINANCE_FUTURES_MAINNET_URL
+from futuresboard.config import state_dir
 
 app = Blueprint("main", __name__)
 
@@ -280,7 +281,7 @@ def timeranges():
 
 def _rescate_resumen():
     """Tarjetas del rescate para el dashboard principal: solo lee archivos (nunca Binance) y nunca lanza."""
-    return resumen_rescate.tarjetas(pathlib.Path(current_app.config["DATABASE"]).parent)
+    return resumen_rescate.tarjetas(state_dir(current_app.config))
 
 
 @app.route("/", methods=["GET"])
@@ -1537,7 +1538,7 @@ def csrf_protect(view):
 
 
 def _bot_store() -> bot_control.Store:
-    return bot_control.Store(pathlib.Path(current_app.config["DATABASE"]).parent)
+    return bot_control.Store(state_dir(current_app.config))
 
 
 JOBS_EXTENSION = "futuresboard_bot_jobs"
@@ -1546,7 +1547,7 @@ JOBS_EXTENSION = "futuresboard_bot_jobs"
 @app.record_once
 def _init_bot_jobs(state) -> None:
     """Registro de jobs del panel (uno por app/proceso). Recupera un job cortado por un reinicio."""
-    store = bot_control.Store(pathlib.Path(state.app.config["DATABASE"]).parent)
+    store = bot_control.Store(state_dir(state.app.config))
     registry = jobs.JobRegistry(store)
     state.app.extensions[JOBS_EXTENSION] = registry
     jobs.recover_interrupted(registry, state.app.logger)
