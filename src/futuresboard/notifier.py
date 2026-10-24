@@ -3,11 +3,13 @@
 Uso: ``python -m futuresboard.notifier [--db RUTA_DB] [--state RUTA_ESTADO] [--once]``
 
 No carga ``Config`` ni ``config.json`` (que tienen las API keys de Binance): la DB se indica con ``--db`` o
-``NOTIFIER_DB_PATH`` (default ``./config/futures.db``) y se abre en solo lectura.
+``NOTIFIER_DB_PATH`` (default ``./config/futures.db``) y se abre en solo lectura (``mode=ro``).
+Con la DB en WAL el notifier tiene que ver ``futures.db-wal``/``-shm``: en Docker se monta el
+directorio de la DB (no el archivo solo, y no ``:ro``; ver docs/produccion.md).
 
 Cada ``NOTIFIER_INTERVAL`` segundos:
 - chequea el contenedor de passivbot via docker-socket-proxy (si FUTURESBOARD_DOCKER_URL está configurado),
-- la edad del último scrape (mtime del archivo de la DB) y, opcionalmente, la del último trade/income,
+- la edad del último scrape (mtime de la DB o de su ``-wal``, el más nuevo) y, opcionalmente, la del último trade/income,
 - avisa al pasar a caído (tras ``NOTIFIER_FAIL_THRESHOLD`` chequeos fallidos seguidos) y al recuperarse.
   Solo avisa en las transiciones: un estado caído persistente no se repite cada ciclo.
 - una vez por día, a ``NOTIFIER_DAILY_SUMMARY`` (HH:MM, hora de Buenos Aires), manda el resumen de PnL.
@@ -34,6 +36,7 @@ from typing import Optional
 from typing import Tuple
 
 from futuresboard import bot_control
+from futuresboard import db
 from futuresboard import telegram_notify
 from futuresboard.telegram_notify import esc
 
@@ -104,7 +107,7 @@ def _fmt_age(seconds: float) -> str:
 
 
 def _connect_ro(db_path: pathlib.Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+    conn = db.connect(db_path, readonly=True)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -128,10 +131,21 @@ def check_passivbot(docker: bot_control.DockerClient, container: str) -> Tuple[b
     return True, f"{container} corriendo"
 
 
+def _last_write_mtime(db_path: pathlib.Path) -> float:
+    """mtime de la última escritura. En WAL los commits van a ``<db>-wal`` y el archivo principal
+    solo cambia en los checkpoints, así que se toma el más nuevo de los dos."""
+    mtime = db_path.stat().st_mtime
+    try:
+        mtime = max(mtime, db_path.with_name(db_path.name + "-wal").stat().st_mtime)
+    except OSError:
+        pass
+    return mtime
+
+
 def check_scrape(db_path: pathlib.Path, max_age: int, now: float) -> Tuple[bool, str]:
     """Proxy del último scrape: mtime de la DB (el scraper escribe positions/account en cada ciclo)."""
     try:
-        age = now - db_path.stat().st_mtime
+        age = now - _last_write_mtime(db_path)
     except OSError:
         return False, f"no se encuentra la DB ({db_path.name})"
     if age > max_age:

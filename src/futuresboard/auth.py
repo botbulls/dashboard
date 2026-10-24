@@ -23,6 +23,7 @@ from werkzeug.security import check_password_hash
 from werkzeug.security import generate_password_hash
 
 from futuresboard.blueprint import get_coins
+from futuresboard.db import connect as db_connect
 
 
 auth = Blueprint("auth", __name__)
@@ -52,7 +53,7 @@ def validate_new_password(password: str) -> str | None:
 
 def set_user_password(database_path: str, username: str, password: str) -> bool:
     """Crea el usuario o le cambia la contraseña. Devuelve True si lo creó."""
-    with sqlite3.connect(database_path) as conn:
+    with db_connect(database_path) as conn:
         cur = conn.execute(
             "UPDATE users SET password_hash = ? WHERE username = ?",
             (generate_password_hash(password), username),
@@ -93,7 +94,7 @@ def _bootstrap_admin_from_env(conn: sqlite3.Connection) -> None:
 
 
 def _warn_blocked_default_passwords(database_path: str) -> None:
-    with sqlite3.connect(database_path) as conn:
+    with db_connect(database_path) as conn:
         rows = conn.execute("SELECT username, password_hash FROM users").fetchall()
     for username, password_hash in rows:
         if check_password_hash(password_hash, BLOCKED_DEFAULT_PASSWORD):
@@ -213,7 +214,7 @@ def _ensure_database_schema(database_path: str) -> None:
     Ensure the minimal database schema exists for both the dashboard and login.
     This keeps first-run behavior working with an empty DB.
     """
-    with sqlite3.connect(database_path) as conn:
+    with db_connect(database_path) as conn:
         conn.execute(
             """ CREATE TABLE IF NOT EXISTS income (
                     IID integer PRIMARY KEY AUTOINCREMENT,
@@ -313,7 +314,7 @@ def login_page():
             flash("Too many failed attempts. Try again in a few minutes.", "error")
             return _render(429)
 
-        with sqlite3.connect(current_app.config["DATABASE"]) as conn:
+        with db_connect(current_app.config["DATABASE"]) as conn:
             conn.row_factory = sqlite3.Row
             row = conn.execute(
                 "SELECT username, password_hash, theme_default FROM users WHERE username = ?",
@@ -369,7 +370,7 @@ def settings_page():
 
     current_username = session["username"]
 
-    with sqlite3.connect(current_app.config["DATABASE"]) as conn:
+    with db_connect(current_app.config["DATABASE"]) as conn:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT username, password_hash, theme_default FROM users WHERE username = ?",
@@ -477,7 +478,7 @@ def _session_is_current() -> bool:
     fingerprint = session.get(SESSION_FINGERPRINT_KEY)
     if not fingerprint:
         return False
-    with sqlite3.connect(current_app.config["DATABASE"]) as conn:
+    with db_connect(current_app.config["DATABASE"]) as conn:
         row = conn.execute(
             "SELECT password_hash FROM users WHERE username = ?", (session["username"],)
         ).fetchone()

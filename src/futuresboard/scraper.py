@@ -6,7 +6,6 @@ import json
 import os
 import pathlib
 import re
-import sqlite3
 import tempfile
 import threading
 import time
@@ -17,6 +16,8 @@ from urllib.parse import urlencode
 
 import requests  # type: ignore
 from flask import current_app
+
+from futuresboard import db
 
 
 _SIGNATURE_RE = re.compile(r"(signature=)[^&\s'\"]+")
@@ -206,7 +207,7 @@ def send_public_request(url_path, payload={}):
 def create_connection(db_file):
     conn = None
     try:
-        conn = sqlite3.connect(db_file)
+        conn = db.connect(db_file)
     except Error as e:
         print(e)
 
