@@ -107,6 +107,11 @@ def test_hedge_mismo_simbolo_long_y_short(armar, hedge):
     assert coins["totals"]["active"] == 3
     assert coins["totals"]["pbr_long"] == "0.06"
     assert coins["totals"]["pbr_short"] == "0.05"
+    # La fila "Total" cuenta las órdenes de BTC una sola vez aunque BTC venga en dos filas (LONG y SHORT).
+    assert coins["totals"]["buys_long"] == 1 + 2 + 1
+    assert coins["totals"]["sells_long"] == 1 + 1 + 1
+    assert coins["totals"]["buys_short"] == 1
+    assert coins["totals"]["sells_short"] == 3
 
 
 @pytest.mark.parametrize("nocionales", list(itertools.permutations([10, 30, 40])))

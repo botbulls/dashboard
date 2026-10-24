@@ -159,7 +159,8 @@ def get_coins():
         )
 
         # En hedge mode el mismo símbolo llega en dos filas (LONG y SHORT): se inicializa una sola vez y se acumula.
-        if position[0] not in coins["active"]:
+        primera_fila = position[0] not in coins["active"]
+        if primera_fila:
             coins["active"][position[0]] = [0, 0, 0.0, 0, 0, 0.0]
         if position[2] == 'LONG':
             pbr_long = round(calc_pbr(position[3], position[1], position[2], float(balance[0])), 2)
@@ -185,11 +186,13 @@ def get_coins():
         coins["active"][position[0]][3] = buy_short
         coins["active"][position[0]][4] = sell_short
         coins["active"][position[0]][5] += pbr_short
-        coins["totals"]["buys_long"] += buy_long
-        coins["totals"]["sells_long"] += sell_long
+        # Las órdenes se cuentan por símbolo (no por lado): al total entran una vez, en la primera fila del símbolo.
+        if primera_fila:
+            coins["totals"]["buys_long"] += buy_long
+            coins["totals"]["sells_long"] += sell_long
+            coins["totals"]["buys_short"] += buy_short
+            coins["totals"]["sells_short"] += sell_short
         coins["totals"]["pbr_long"] += pbr_long
-        coins["totals"]["buys_short"] += buy_short
-        coins["totals"]["sells_short"] += sell_short
         coins["totals"]["pbr_short"] += pbr_short
         coins["active"][position[0]][2] = round(coins["active"][position[0]][2],2)
         coins["active"][position[0]][5] = round(coins["active"][position[0]][5],2)
