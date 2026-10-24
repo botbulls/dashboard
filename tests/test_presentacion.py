@@ -308,3 +308,9 @@ def test_cdns_con_version_fija(client):  # noqa: F811
         for u in externos:
             assert "latest" not in u, u
             assert re.search(r"[@/]\d+\.\d+\.\d+", u), u
+
+
+@pytest.mark.parametrize("url", ["/", "/positions", "/coins/BTCUSDT"])
+def test_sin_recarga_automatica_de_la_pagina(client, con_datos, url):  # noqa: F811
+    # La página no se recarga entera cada X segundos (molestaba y cerraba lo que estuvieras mirando).
+    assert 'http-equiv="refresh"' not in _get(client, url)
