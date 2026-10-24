@@ -99,6 +99,13 @@ def calc_pbr(volume, price, side, balance):
     return 0.0
 
 
+def _sumar_pbr(acumulado, pbr):
+    """Suma exposiciones; si una es desconocida (None: sin balance para calcular), el resultado también."""
+    if acumulado is None or pbr is None:
+        return None
+    return acumulado + pbr
+
+
 def average_down_target(posprice, posqty, currentprice, targetprice):
     return (posqty * (posprice - targetprice)) / (targetprice - currentprice)
 
@@ -123,9 +130,10 @@ def get_coins():
     )
 
     balance = db.query("SELECT totalWalletBalance FROM account WHERE AID = 1", one=True)
+    # Con balance 0, NULL o sin fila de account la exposición no se puede calcular: queda None y el menú muestra "—".
+    saldo = float(balance[0]) if balance is not None and balance[0] else None
 
     active_symbols = []
-    pbr_long, pbr_short = 0.0, 0.0
 
     for position in all_active_positions:
         if position[0] not in active_symbols:
@@ -133,6 +141,7 @@ def get_coins():
         active_symbols.append(position[0])
 
         buy_long, sell_long, buy_short, sell_short,  = 0, 0, 0, 0
+        pbr_long, pbr_short = 0.0, 0.0
 
         buyorders_long = db.query(
             'SELECT COUNT(OID) FROM orders WHERE symbol = ? AND side = "BUY" AND positionSide = "LONG"',
@@ -158,12 +167,15 @@ def get_coins():
             one=True,
         )
 
-        coins["active"][position[0]] = [buy_long, sell_long, pbr_long, buy_short, sell_short, pbr_short]
+        # En hedge mode el mismo símbolo llega en dos filas (LONG y SHORT): se inicializa una sola vez y se acumula.
+        primera_fila = position[0] not in coins["active"]
+        if primera_fila:
+            coins["active"][position[0]] = [0, 0, 0.0, 0, 0, 0.0]
         if position[2] == 'LONG':
-            pbr_long = round(calc_pbr(position[3], position[1], position[2], float(balance[0])), 2)
+            pbr_long = round(calc_pbr(position[3], position[1], position[2], saldo), 2) if saldo else None
             pbr_short = 0.0
         if position[2] == 'SHORT':
-            pbr_short = round(calc_pbr(position[3], position[1], position[2], float(balance[0])), 2)
+            pbr_short = round(calc_pbr(position[3], position[1], position[2], saldo), 2) if saldo else None
             pbr_long = 0.0
 
         if buyorders_long is not None:
@@ -179,26 +191,32 @@ def get_coins():
 
         coins["active"][position[0]][0] = buy_long
         coins["active"][position[0]][1] = sell_long
-        coins["active"][position[0]][2] += pbr_long
+        coins["active"][position[0]][2] = _sumar_pbr(coins["active"][position[0]][2], pbr_long)
         coins["active"][position[0]][3] = buy_short
         coins["active"][position[0]][4] = sell_short
-        coins["active"][position[0]][5] += pbr_short
-        coins["totals"]["buys_long"] += buy_long
-        coins["totals"]["sells_long"] += sell_long
-        coins["totals"]["pbr_long"] += pbr_long
-        coins["totals"]["buys_short"] += buy_short
-        coins["totals"]["sells_short"] += sell_short
-        coins["totals"]["pbr_short"] += pbr_short
-        coins["active"][position[0]][2] = round(coins["active"][position[0]][2],2)
-        coins["active"][position[0]][5] = round(coins["active"][position[0]][5],2)
+        coins["active"][position[0]][5] = _sumar_pbr(coins["active"][position[0]][5], pbr_short)
+        # Las órdenes se cuentan por símbolo (no por lado): al total entran una vez, en la primera fila del símbolo.
+        if primera_fila:
+            coins["totals"]["buys_long"] += buy_long
+            coins["totals"]["sells_long"] += sell_long
+            coins["totals"]["buys_short"] += buy_short
+            coins["totals"]["sells_short"] += sell_short
+        coins["totals"]["pbr_long"] = _sumar_pbr(coins["totals"]["pbr_long"], pbr_long)
+        coins["totals"]["pbr_short"] = _sumar_pbr(coins["totals"]["pbr_short"], pbr_short)
+        if coins["active"][position[0]][2] is not None:
+            coins["active"][position[0]][2] = round(coins["active"][position[0]][2],2)
+        if coins["active"][position[0]][5] is not None:
+            coins["active"][position[0]][5] = round(coins["active"][position[0]][5],2)
 
     for symbol in all_symbols_with_pnl:
         if symbol[0] not in active_symbols:
             coins["inactive"].append(symbol[0])
             coins["totals"]["inactive"] += 1
     
-    coins["totals"]["pbr_long"] = format_dp(coins["totals"]["pbr_long"])
-    coins["totals"]["pbr_short"] = format_dp(coins["totals"]["pbr_short"])
+    if coins["totals"]["pbr_long"] is not None:
+        coins["totals"]["pbr_long"] = format_dp(coins["totals"]["pbr_long"])
+    if coins["totals"]["pbr_short"] is not None:
+        coins["totals"]["pbr_short"] = format_dp(coins["totals"]["pbr_short"])
     return coins
 
 
@@ -377,7 +395,8 @@ def index_page():
 
     fees = {"USDT": 0, "BNB": 0}
 
-    balance = float(balance[0])
+    # Sin fila de account o con balance NULL se muestra como balance 0 (los % quedan en "-").
+    balance = float(balance[0]) if balance is not None and balance[0] is not None else 0.0
 
     temptotal: tuple[list[float], list[float]] = ([], [])
     profit_period = balance - zero_value(week[0])
@@ -554,7 +573,8 @@ def dashboard_page(start, end):
 
     fees = {"USDT": 0, "BNB": 0}
 
-    balance = float(balance[0])
+    # Sin fila de account o con balance NULL se muestra como balance 0 (los % quedan en "-").
+    balance = float(balance[0]) if balance is not None and balance[0] is not None else 0.0
 
     temptotal: tuple[list[float], list[float]] = ([], [])
 
@@ -766,6 +786,10 @@ def coin_page(coin):
                 pass
 
     balance = db.query("SELECT totalWalletBalance FROM account WHERE AID = 1", one=True)
+    # Sin fila de account o con balance NULL la moneda se muestra como con balance 0 (los % quedan en "-").
+    # Por eso la rama de None de abajo ya no se alcanza: no definía lo que usa el render y daba 500.
+    if balance is None or balance[0] is None:
+        balance = (0.0,)
     if balance[0] is None:
         totals = ["-", "-", "-", "-", "-", {"USDT": 0, "BNB": 0}, ["-", "-", "-", "-"]]
     else:
@@ -1056,6 +1080,10 @@ def coin_page_timeframe(coin, start, end):
     )
 
     balance = db.query("SELECT totalWalletBalance FROM account WHERE AID = 1", one=True)
+    # Sin fila de account o con balance NULL la moneda se muestra como con balance 0 (los % quedan en "-").
+    # Por eso la rama de None de abajo ya no se alcanza: no definía lo que usa el render y daba 500.
+    if balance is None or balance[0] is None:
+        balance = (0.0,)
     if balance[0] is None:
         totals = ["-", "-", "-", "-", "-", {"USDT": 0, "BNB": 0}, ["-", "-", "-", "-"]]
     else:
@@ -1408,7 +1436,8 @@ def projection_page():
         "pcustom": [],
         "pcustom_value": 0.0,
     }
-    if balance[0] is not None:
+    # Sin balance (0, NULL o sin fila de account) no hay nada que proyectar; con 0 dividía por cero.
+    if balance is not None and balance[0]:
 
         ranges = timeranges()
 

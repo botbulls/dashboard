@@ -15,6 +15,7 @@ import futuresboard.scraper
 from futuresboard import auth
 from futuresboard import blueprint
 from futuresboard import db
+from futuresboard import formato
 from futuresboard import health
 from futuresboard import logs
 from futuresboard import telegram_notify
@@ -92,6 +93,7 @@ def init_app(config: Config | None = None):
     app.before_request(clear_trailing)
     auth.init_app(app)
     app.register_blueprint(blueprint.app)
+    formato.registrar(app)  # filtros de presentación es-AR (num, usd, pct, tendencia, mes_es)
     app.register_blueprint(health.ops)
 
     _register_log_secrets(app, config)

@@ -1,10 +1,10 @@
 {% extends "base.html" %}
-{% block title %}404{% endblock %}
+{% block title %}Página no encontrada{% endblock %}
 {% block content %}
-    <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
-        <h3><i class="fas fa-exclamation-circle"></i> Error 404</h3>
+    <div class="card">
+        <div class="card-body">
+            <p class="mb-2">No existe esa página o esa moneda no tiene movimientos en esta cuenta (error 404).</p>
+            <a class="btn btn-outline-secondary" href="{{ url_for('main.index_page') }}">Volver al inicio</a>
+        </div>
     </div>
-    <p class="important">
-        Page not found
-    </p>
 {% endblock %}

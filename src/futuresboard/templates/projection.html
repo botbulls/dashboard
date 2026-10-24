@@ -1,65 +1,55 @@
 {% extends "base.html" %}
-{% block title %}Projection{% endblock %}
+{% block title %}Proyección{% endblock %}
+{% block bajada %}<p>Cómo crecería el balance con una ganancia diaria fija, compuesta. Es aritmética, no una predicción.</p>{% endblock %}
 {% block content %}
-    <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
-        <h3><i class="fas fa-chart-line"></i> Projection</h3>
-    </div>
-    <div class="row">
-        <div class="col-md-12">
-            <div class="card text-center">
-                <div class="card-header text-muted">
-                    Balance projection visualised
-                </div>
-                <canvas id="lineChart" height="400"></canvas>
+    <section class="bb-seccion" aria-labelledby="bbTituloProyeccion">
+        <div class="card bb-grafico">
+            <div class="card-body">
+                <h2 class="bb-grafico__titulo" id="bbTituloProyeccion">Proyección del balance</h2>
+                <p class="bb-grafico__sub">Más oscuro, más ganancia diaria. La línea gruesa usa el promedio de los últimos 7 días.</p>
+                <div class="bb-grafico__lienzo bb-grafico__lienzo--alto"><canvas id="lineChart" role="img" aria-label="Proyección del balance a 365 días para cada ganancia diaria"></canvas></div>
             </div>
         </div>
-    </div>
-    <br>
+    </section>
 
-    <div class="row">
-        <div class="col-md-12">
-            <div class="card text-center">
-                <div class="card-header text-muted">
-                    Balance projection breakdown
-                </div>
-                <table id="hype" class='table table-sm table-bordered text-center'>
-                    <thead class="thead-dark">
-                        <tr>
-                            <th>Daily %</th>
-                            <th>30 days</th>
-                            <th>60 days</th>
-                            <th>90 days</th>
-                            <th>120 days</th>
-                            <th>240 days</th>
-                            <th>365 days</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for value in data["proj"] %}
-                        <tr>
-                            <td>{{ ((value - 1) * 100)|round(2) }}%</td>
-                            <td>{{ data["proj"][value][30]|round(2) }}</td>
-                            <td>{{ data["proj"][value][60]|round(2) }}</td>
-                            <td>{{ data["proj"][value][90]|round(2) }}</td>
-                            <td>{{ data["proj"][value][120]|round(2) }}</td>
-                            <td>{{ data["proj"][value][240]|round(2) }}</td>
-                            <td>{{ data["proj"][value][-1]|round(2) }}</td>
-                        </tr>
+    <section class="bb-seccion" aria-labelledby="bbTituloDetalle">
+        <h2 class="bb-seccion__titulo" id="bbTituloDetalle">Detalle por ganancia diaria</h2>
+        <div class="card bb-tabla-card">
+            <table id="hype" class="table">
+                <thead>
+                    <tr>
+                        <th scope="col">% diario</th>
+                        <th scope="col" class="bb-n">30 días</th>
+                        <th scope="col" class="bb-n">60 días</th>
+                        <th scope="col" class="bb-n">90 días</th>
+                        <th scope="col" class="bb-n">120 días</th>
+                        <th scope="col" class="bb-n">240 días</th>
+                        <th scope="col" class="bb-n">365 días</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for value in data["proj"] %}
+                    {% set serie = data["proj"][value] %}
+                    {% set diario = ((value - 1) * 100)|round(2) %}
+                    <tr>
+                        <td data-order="{{ diario }}">{{ diario|pct }}</td>
+                        {% for i in (30, 60, 90, 120, 240, -1) %}
+                            <td class="bb-n" data-order="{{ serie[i] }}">{{ serie[i]|num(dec=2) }}</td>
                         {% endfor %}
-                        <tr>
-                            <td>{{ data["pcustom_value"] }}% (avg past 7 days)</td>
-                            <td>{{ data["pcustom"][30]|round(2) }}</td>
-                            <td>{{ data["pcustom"][60]|round(2) }}</td>
-                            <td>{{ data["pcustom"][90]|round(2) }}</td>
-                            <td>{{ data["pcustom"][120]|round(2) }}</td>
-                            <td>{{ data["pcustom"][240]|round(2) }}</td>
-                            <td>{{ data["pcustom"][-1]|round(2) }}</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
+                    </tr>
+                    {% endfor %}
+                    {% if data["pcustom"] %}
+                    <tr class="bb-fila-destacada">
+                        <td data-order="{{ data["pcustom_value"] }}">{{ data["pcustom_value"]|pct }} <span class="bb-tabla-nota">(promedio de los últimos 7 días)</span></td>
+                        {% for i in (30, 60, 90, 120, 240, -1) %}
+                            <td class="bb-n" data-order="{{ data["pcustom"][i] }}">{{ data["pcustom"][i]|num(dec=2) }}</td>
+                        {% endfor %}
+                    </tr>
+                    {% endif %}
+                </tbody>
+            </table>
         </div>
-    </div>
+    </section>
 
     <script>
 
@@ -69,67 +59,69 @@
                 "searching": false,
                 "order": [],
                 "info": false,
+                "dom": '<"bb-tabla-scroll"t>',
+                "language": window.BB.dataTablesEs,
             });
         } );
 
         Chart.register(ChartDataLabels);
 
-        const flat_colours = [
-            "rgba(46, 204, 113, 0.3)", "rgba(52, 152, 219, 0.3)", "rgba(155, 89, 182, 0.3)", "rgba(52, 73, 94, 0.3)", "rgba(241, 196, 15, 0.3)", 
-            "rgba(230, 126, 34, 0.3)", "rgba(231, 76, 60, 0.3)", "rgba(127, 140, 141, 0.3)", "rgba(44, 62, 80, 0.3)", "rgba(26, 188, 156, 0.3)",
-            
-        ]
-        
-        const data = {
-            labels: {{ data["dates"] | safe }},
-            datasets: [
-                {% for value in data["proj"] %}
-                {
-                    label: '{{ ((value - 1) * 100)|round(2) }}%',
-                    data: {{ data["proj"][value] }},
-                    fill: false,
-                    borderColor: flat_colours[Math.floor(Math.random()*flat_colours.length)],
-                    tension: 0.1,
-                },
-                {% endfor %}
-                {
-                    label: '{{ data["pcustom_value"] }}%',
-                    data: {{ data["pcustom"] }},
-                    fill: false,
-                    borderColor: 'rgba(75, 192, 192, 0.3)',
-                    tension: 0.1,
-                },
-            ]
-        };
-        const config2 = {
-            type: 'line',
-            data: data,
-            options: {
-                responsive: true,
-                layout: {
-                    padding: {
-                        top: 20
-                    }
-                },
-                plugins:{
-                    datalabels: {
-                        display: false
-                    },
-                },
-                scales: {
-                    y: {
-                        type: 'linear',
-                        ticks: {
-                            autoSkip: false,
-                        }
-                    }
-                }
-            }
-        };
+        // Series en orden fijo (antes: colores al azar en cada recarga). Las tasas son ordinales: una sola tinta,
+        // de clara (menos ganancia diaria) a oscura (más); el promedio de 7 días va en tinta neutra y más gruesa.
+        const FECHAS = {{ data["dates"] | safe }};
+        const SERIES = [
+            {% for value in data["proj"] %}
+            { label: '{{ ((value - 1) * 100)|round(2)|pct }} diario', data: {{ data["proj"][value] }} },
+            {% endfor %}
+        ];
+        const PROMEDIO = { label: '{{ data["pcustom_value"]|pct }} diario (promedio de 7 días)', data: {{ data["pcustom"] }} };
 
-        var myChart = new Chart(
-            document.getElementById('lineChart'),
-            config2
-        );
+        (function () {
+            const f = window.BB.fmt;
+            let grafico = null;
+            const hex = (h) => { const n = parseInt(h.replace('#', ''), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+            const mezcla = (a, b, t) => { const x = hex(a), y = hex(b); return 'rgb(' + x.map((v, i) => Math.round(v + (y[i] - v) * t)).join(',') + ')'; };
+
+            function pintar() {
+                const T = f.token;
+                const ini = T('--bb-rampa-ini'), fin = T('--bb-rampa-fin');
+                const texto2 = T('--bb-text-2'), texto3 = T('--bb-text-3'), grilla = T('--bb-chart-grid');
+                if (grafico) grafico.destroy();
+                const n = SERIES.length;
+                const datasets = SERIES.map((s, i) => {
+                    const c = mezcla(ini, fin, n > 1 ? i / (n - 1) : 1);
+                    return { label: s.label, data: s.data, borderColor: c, backgroundColor: c, borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, fill: false, tension: 0 };
+                });
+                if (PROMEDIO.data.length) {
+                    const c = T('--bb-chart-line');
+                    datasets.push({ label: PROMEDIO.label, data: PROMEDIO.data, borderColor: c, backgroundColor: c, borderWidth: 3, pointRadius: 0, pointHoverRadius: 4, fill: false, tension: 0 });
+                }
+                grafico = new Chart(document.getElementById('lineChart'), {
+                    type: 'line',
+                    data: { labels: f.dias(FECHAS), datasets },
+                    options: {
+                        maintainAspectRatio: false, animation: false,
+                        interaction: { mode: 'index', intersect: false },
+                        layout: { padding: { top: 8 } },
+                        plugins: {
+                            datalabels: { display: false },
+                            legend: { position: 'bottom', labels: { color: texto2, usePointStyle: true, pointStyle: 'line', boxWidth: 24 } },
+                            tooltip: {
+                                backgroundColor: T('--bb-surface'), titleColor: T('--bb-text'), bodyColor: T('--bb-text'),
+                                borderColor: T('--bb-border'), borderWidth: 1, padding: 10,
+                                callbacks: { title: (it) => (it.length ? f.fecha(FECHAS[it[0].dataIndex]) : ''), label: (c) => `${c.dataset.label}: ${f.usd(c.raw, { dec: 2 })}` },
+                            },
+                        },
+                        scales: {
+                            x: { grid: { display: false }, ticks: { color: texto3, maxTicksLimit: 8, maxRotation: 0 } },
+                            y: { grid: { color: grilla, drawBorder: false }, ticks: { color: texto3, maxTicksLimit: 6, callback: f.usdEje } },
+                        },
+                    },
+                });
+            }
+
+            pintar();
+            window.addEventListener('fb-theme-changed', pintar);
+        })();
     </script>
 {% endblock %}
