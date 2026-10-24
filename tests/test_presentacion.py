@@ -266,7 +266,7 @@ def test_posiciones_ordenan_por_el_crudo(client, con_datos):  # noqa: F811
     assert 'data-order="0.0022">0,0022<' in filas                # cantidad con su precisión
     assert 'data-order="82372.0">82.372,0<' in filas
     # Toda celda numérica lleva data-order (incluida la que no tiene dato: "-").
-    for fila in re.findall(r"<tr>(.*?)</tr>", filas, re.S):
+    for fila in re.findall(r"<tr[^>]*>(.*?)</tr>", filas, re.S):
         celdas = re.findall(r"<td[^>]*>", fila)
         assert len(celdas) == 15 and all("data-order=" in c for c in celdas[2:])
 

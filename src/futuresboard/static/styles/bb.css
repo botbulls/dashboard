@@ -670,3 +670,7 @@ a.bb-moneda { transition: background-color var(--bb-dur) var(--bb-ease); }
    dashboard.css/sidebars.css que mueven cosas al pasar el mouse. */
 .bb .card:hover, .bb .btn:hover, .bb .table tbody tr:hover, .bb .bot-status-badge:hover, .bb .last-order-badge:hover,
 .bb .list-unstyled li a.btn:hover, .bb .btn-toggle:hover, .bb .btn-toggle-nav a:hover { transform: none; }
+
+/* ------------------------------------------------------------------ 17. Envoltura de los bloques que se reemplazan
+   enteros (data-vivo-bloque): display: contents, la grilla o el flex de alrededor no cambia. */
+.bb-vivo-envoltura { display: contents; }
