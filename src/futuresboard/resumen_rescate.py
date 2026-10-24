@@ -32,6 +32,9 @@ log = logging.getLogger("futuresboard.resumen_rescate")
 # Banda amarilla del semáforo: hasta umbral × este factor.
 FACTOR_AMARILLO = Decimal("1.5")
 
+# Edad máxima de la lectura de cuenta del rescate para que Inicio la use en vez de la base (lectura_cuenta).
+LECTURA_FRESCA_S = 60
+
 COMO_ACTIVAR = ("Para ver el saldo de la billetera de rescate, levantá el servicio rescate con "
                 "FUTURESBOARD_RESCATE_MODE=dry_run (no transfiere nada) o real. Ver docs/rescate.md.")
 
@@ -205,6 +208,55 @@ def _tarjetas(data_dir: pathlib.Path, now: float) -> Dict[str, Any]:
     out["retiro"] = _retiro(status, now, _vieja)
     out["c3"] = _c3(data_dir, now)
     return out
+
+
+def lectura_cuenta(data_dir: pathlib.Path, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    """Balance de la billetera y uPnL de la última lectura del servicio rescate, solo si es **fresca**; si no, None.
+
+    La usa Inicio (página y ``/api/vivo/inicio``) en vez de la base: el rescate lee la cuenta cada 15 s y el scraper
+    cada 60 s. Fresca: el servicio late (el mismo criterio que el panel: ``3 × intervalo + 30`` s), no está en ``off``,
+    la lectura no tiene error y tiene menos de ``LECTURA_FRESCA_S``.
+
+    En ``dry_run`` el ``wallet_balance`` de la lectura incluye el préstamo **simulado** (es ``wallet_eff``): ahí la
+    wallet real sale de ``margin_balance − upnl``, que son los reales (``totalMarginBalance = totalWalletBalance +
+    totalUnrealizedProfit`` en una cuenta USDT-M de un solo activo, el mismo supuesto del disparo por uPnL).
+    Solo lee archivos y nunca lanza.
+    """
+    now = time.time() if now is None else now
+    try:
+        state, err = rescate.load_state(pathlib.Path(data_dir))
+        if err:
+            return None
+        servicio = state.get("servicio") if isinstance(state.get("servicio"), dict) else {}
+        if servicio.get("modo") not in (rescate.MODE_DRY_RUN, rescate.MODE_REAL):
+            return None
+        latido = _parse_ts(servicio.get("heartbeat"))
+        limite = 3 * int(servicio.get("intervalo") or rescate.DEFAULT_INTERVAL) + 30
+        if latido is None or now - latido > limite:
+            return None
+        ultimo = state.get("ultimo") if isinstance(state.get("ultimo"), dict) else {}
+        ts = _parse_ts(ultimo.get("ts"))
+        if ultimo.get("error") or ts is None or not -5 <= now - ts < LECTURA_FRESCA_S:
+            return None
+        upnl = _dec(ultimo["upnl"]) if ultimo.get("upnl") is not None else None
+        simulado = bool(ultimo.get("simulado"))
+        if simulado:
+            margin = _dec(ultimo["margin_balance"]) if ultimo.get("margin_balance") is not None else None
+            wallet = margin - upnl if margin is not None and upnl is not None else None
+        else:
+            wallet = _dec(ultimo["wallet_balance"]) if ultimo.get("wallet_balance") is not None else None
+        if wallet is None and upnl is None:
+            return None
+        return {
+            "wallet": None if wallet is None else rescate.money(wallet),
+            "upnl": None if upnl is None else rescate.money(upnl),
+            "wallet_derivada": simulado and wallet is not None,
+            "at": ts,
+            "edad_segundos": max(0, int(now - ts)),
+        }
+    except Exception:  # defensivo: sin lectura del rescate, Inicio usa la base
+        log.exception("No se pudo leer la lectura de cuenta del rescate")
+        return None
 
 
 def _retiro(status: Dict[str, Any], now: float, vieja: Any) -> Optional[Dict[str, Any]]:

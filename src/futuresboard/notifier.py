@@ -3,11 +3,18 @@
 Uso: ``python -m futuresboard.notifier [--db RUTA_DB] [--state RUTA_ESTADO] [--once]``
 
 No carga ``Config`` ni ``config.json`` (que tienen las API keys de Binance): la DB se indica con ``--db`` o
-``NOTIFIER_DB_PATH`` (default ``./config/futures.db``) y se abre en solo lectura.
+``NOTIFIER_DB_PATH`` (default ``./config/futures.db``) y se abre en solo lectura (``mode=ro``).
+Con la DB en WAL el notifier tiene que ver ``futures.db-wal``/``-shm`` junto a la DB: en Docker se monta
+el directorio de DATOS (``./data``: DB, ``-wal``/``-shm``, ``scrape_state.json`` y latido del scraper),
+nunca el de config (``config.json`` tiene las API keys) ni el archivo suelto. Va sin ``:ro`` porque, si no
+hay otra conexión abierta, SQLite tiene que crear el ``-shm``; el código igual abre con ``mode=ro``. Costo
+(docs/notificaciones.md): un notifier comprometido podría escribir ese directorio, o sea reescribir la tabla
+``users`` de la DB (hashes del login del panel) o pisar el latido para callar su propia alerta. No ve las keys.
 
 Cada ``NOTIFIER_INTERVAL`` segundos:
 - chequea el contenedor de passivbot via docker-socket-proxy (si FUTURESBOARD_DOCKER_URL está configurado),
-- la edad del último scrape (mtime del archivo de la DB) y, opcionalmente, la del último trade/income,
+- la edad del último scrape (latido del scraper / ``scrape_state.json``; sin ellos, mtime de la DB) y,
+  opcionalmente, la del último trade/income,
 - avisa al pasar a caído (tras ``NOTIFIER_FAIL_THRESHOLD`` chequeos fallidos seguidos) y al recuperarse.
   Solo avisa en las transiciones: un estado caído persistente no se repite cada ciclo.
 - una vez por día, a ``NOTIFIER_DAILY_SUMMARY`` (HH:MM, hora de Buenos Aires), manda el resumen de PnL.
@@ -34,6 +41,8 @@ from typing import Optional
 from typing import Tuple
 
 from futuresboard import bot_control
+from futuresboard import db
+from futuresboard import scraper
 from futuresboard import telegram_notify
 from futuresboard.telegram_notify import esc
 
@@ -104,7 +113,7 @@ def _fmt_age(seconds: float) -> str:
 
 
 def _connect_ro(db_path: pathlib.Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+    conn = db.connect(db_path, readonly=True)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -129,7 +138,22 @@ def check_passivbot(docker: bot_control.DockerClient, container: str) -> Tuple[b
 
 
 def check_scrape(db_path: pathlib.Path, max_age: int, now: float) -> Tuple[bool, str]:
-    """Proxy del último scrape: mtime de la DB (el scraper escribe positions/account en cada ciclo)."""
+    """Edad del último scrape OK.
+
+    Con el directorio de datos montado (DB en WAL) usa el latido del scraper y ``scrape_state.json``, que
+    solo escribe el scraper. El mtime de ``futures.db-wal`` no sirve: cualquier conexión (el web, o el
+    propio notifier en ``mode=ro``) lo crea al abrir la DB, y daría "fresco" con el scraper caído.
+    Sin esos JSON (layout viejo: solo el archivo de la DB montado, journal DELETE) se usa el mtime de la
+    DB (el scraper escribe positions/account en cada ciclo).
+    """
+    if scraper.latido_path(db_path).exists() or scraper.scrape_state_path(db_path).exists():
+        at = scraper.frescura(db_path, now)["at"]
+        if at is None:
+            return False, "sin scrape exitoso registrado"
+        age = now - at
+        if age > max_age:
+            return False, f"sin scrape OK hace {_fmt_age(age)} (máx {_fmt_age(max_age)})"
+        return True, f"último scrape OK hace {_fmt_age(age)}"
     try:
         age = now - db_path.stat().st_mtime
     except OSError:

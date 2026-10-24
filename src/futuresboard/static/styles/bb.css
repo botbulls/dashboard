@@ -373,6 +373,7 @@ a.bb-moneda { transition: background-color var(--bb-dur) var(--bb-ease); }
 .bb-hero .bb-kpi__valor { font-size: var(--bb-fs-40); letter-spacing: -0.01em; }
 .bb-hero__upnl { display: flex; align-items: baseline; gap: var(--bb-s2); flex-wrap: wrap; margin-top: var(--bb-s2); padding-top: var(--bb-s2); border-top: 1px solid var(--bb-border); }
 .bb-hero__upnl .bb-num { font-weight: 600; }
+.bb-hero__fuente { display: block; margin-top: var(--bb-s1); font-size: var(--bb-fs-12); color: var(--bb-text-3); }
 @media (max-width: 1199.98px) {
   .bb-kpi { grid-column: span 3; }
   .bb-kpi.bb-hero { grid-column: span 12; }
@@ -670,3 +671,19 @@ a.bb-moneda { transition: background-color var(--bb-dur) var(--bb-ease); }
    dashboard.css/sidebars.css que mueven cosas al pasar el mouse. */
 .bb .card:hover, .bb .btn:hover, .bb .table tbody tr:hover, .bb .bot-status-badge:hover, .bb .last-order-badge:hover,
 .bb .list-unstyled li a.btn:hover, .bb .btn-toggle:hover, .bb .btn-toggle-nav a:hover { transform: none; }
+
+/* ------------------------------------------------------------------ 17. En vivo (static/js/en_vivo.js): estado de la
+   actualización debajo del título, aviso de conexión o sesión, envolturas de los bloques que reemplaza y el resaltado
+   suave de un número que cambió (sin animación con prefers-reduced-motion). */
+.bb-encabezado .bb-vivo { display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--bb-s1); margin: var(--bb-s1) 0 0; font-size: var(--bb-fs-13); color: var(--bb-text-3); font-variant-numeric: tabular-nums; }
+.bb-vivo__punto { width: 8px; height: 8px; border-radius: 50%; background: var(--bb-gain-mark); flex: none; margin-right: 2px; }
+.bb-vivo.is-error .bb-vivo__punto, .bb-vivo.is-viejo .bb-vivo__punto { background: var(--bb-warn-mark); }
+.bb-vivo.is-sesion .bb-vivo__punto { background: var(--bb-loss-mark); }
+.bb-vivo.is-viejo [data-vivo-datos] { color: var(--bb-warn); font-weight: 600; }
+.bb-vivo__aviso { font-size: var(--bb-fs-13); font-weight: 600; color: var(--bb-warn); }
+.bb-vivo__aviso:not(:empty) { margin-top: var(--bb-s1); }
+.bb-vivo.is-sesion + .bb-vivo__aviso { color: var(--bb-loss); }
+.bb-vivo-envoltura { display: contents; }
+@keyframes bbVivoCambio { from { background-color: var(--bb-info-bg); } to { background-color: transparent; } }
+.bb-vivo-cambio { animation: bbVivoCambio 1.6s ease-out; border-radius: 4px; }
+@media (prefers-reduced-motion: reduce) { .bb-vivo-cambio { animation: none; } }

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_moneda.html" as m %}
 {% block title %}{{ coin }}{% endblock %}
 {% block acciones %}
     <form method="GET" name="daterangeform" class="bb-fecha">
@@ -7,7 +8,7 @@
     </form>
     <a class="bb-icono-btn" href="https://www.binance.com/en/futures/{{ coin }}" target="_blank" rel="noopener" aria-label="Ver {{ coin }} en Binance" title="Ver en Binance"><i class="fas fa-external-link-alt" aria-hidden="true"></i></a>
 {% endblock %}
-{% block bajada %}<p>Último pedido: {{ lastupdate }}{% if markprice != '-' %} · precio actual <span class="bb-num" data-value="{{ markprice }}">{{ markprice|num }}</span>{% endif %}</p>{% endblock %}
+{% block bajada %}{{ m.bajada(lastupdate, markprice) }}{% endblock %}
 {% block content %}
     {% macro kpi(etiqueta, valor, porcentaje, url) %}
         {% set t = valor|tendencia %}
@@ -32,7 +33,7 @@
             <a class="card bb-kpi" href="{{ url_for("main.positions_page") }}">
                 <div class="card-body">
                     <span class="bb-kpi__etiqueta">PnL no realizado</span>
-                    <div class="bb-kpi__valor bb-num is-{{ totals[7][0]|tendencia or 'cero' }}" data-value="{{ totals[7][0] }}">{{ totals[7][0]|usd(signo=True) }}</div>
+                    <div data-vivo="upnl_moneda" data-vivo-tono class="bb-kpi__valor bb-num is-{{ totals[7][0]|tendencia or 'cero' }}" data-value="{{ totals[7][0] }}">{{ totals[7][0]|usd(signo=True) }}</div>
                 </div>
             </a>
             <div class="card bb-kpi">
@@ -56,7 +57,7 @@
                 {% if wallet_balance > 0 %}({{ ((period_profit / wallet_balance) * 100)|pct(dec=2, signo=True) }}){% else %}(-){% endif %}</div>
         </div>
         <div class="card">
-            <div class="card-header"><h2 class="bb-card-titulo">Posición y órdenes</h2>{% if markprice != '-' %} <span class="bb-card-sub"><i class="fas fa-tag" aria-hidden="true"></i> {{ markprice|num }}</span>{% endif %}</div>
+            <div class="card-header"><h2 class="bb-card-titulo">Posición y órdenes</h2>{{ m.precio_tag(markprice) }}</div>
                 <div class="bb-tabla-scroll">
                 <table id="orders" class="table">
                     <thead>
@@ -68,22 +69,7 @@
                         </tr>
                     </thead>
                     <tbody>
-                    {% for position in orders[0] %}
-                        <tr class="bb-fila-destacada">
-                            <td>Posición {{position[5]}} {{position[3]}}x</td>
-                            <td class="bb-n" data-order="{{position[6]}}">{{position[6]|num}}</td>
-                            <td class="bb-n" data-order="{{position[4]}}">{{position[4]|num}}</td>
-                            <td></td>
-                        </tr>
-                    {% endfor %}
-                    {% for order in orders[1] %}
-                        <tr>
-                            <td>{{ {'BUY': 'Compra', 'SELL': 'Venta'}.get(order[3], order[3]) }} {{order[8]}} {{order[4]}}</td>
-                            <td class="bb-n" data-order="{{order[1]}}">{{order[1]|num}}</td>
-                            <td class="bb-n" data-order="{{order[2]}}">{{order[2]|num}}</td>
-                            <td>{{ order[7] }}</td>
-                        </tr>
-                    {% endfor %}
+                    {{ m.filas_ordenes(orders[0], orders[1]) }}
                     </tbody>
                 </table>
                 </div>
@@ -191,8 +177,8 @@
                                     {% for position in orders[0] %}
                                         <tr>
                                             <th scope="row">Posición</th>
-                                            <td><input class="form-control" id="positionsize" value="{{position[6]}}" readonly aria-label="Cantidad de la posición"></td>
-                                            <td><input class="form-control" id="positionvalue" value="{{position[4]}}" readonly aria-label="Precio de entrada"></td>
+                                            <td><input data-vivo="pos_cantidad_{{ loop.index0 }}" class="form-control" id="positionsize" value="{{position[6]}}" readonly aria-label="Cantidad de la posición"></td>
+                                            <td><input data-vivo="pos_precio_{{ loop.index0 }}" class="form-control" id="positionvalue" value="{{position[4]}}" readonly aria-label="Precio de entrada"></td>
                                         </tr>
                                     {% endfor %}
                                     <tr>
@@ -207,23 +193,23 @@
                                     </tr>
                                     <tr>
                                         <th scope="row">A 0,1 %</th>
-                                        <td data-value="{{ target[0] }}">{{ target[0]|num }}</td>
-                                        <td data-value="{{ markprice }}">{{ markprice|num }}</td>
+                                        <td data-vivo="objetivo_0" data-value="{{ target[0] }}">{{ target[0]|num }}</td>
+                                        <td data-vivo="precio" data-value="{{ markprice }}">{{ markprice|num }}</td>
                                     </tr>
                                     <tr>
                                         <th scope="row">A 0,5 %</th>
-                                        <td data-value="{{ target[1] }}">{{ target[1]|num }}</td>
-                                        <td data-value="{{ markprice }}">{{ markprice|num }}</td>
+                                        <td data-vivo="objetivo_1" data-value="{{ target[1] }}">{{ target[1]|num }}</td>
+                                        <td data-vivo="precio" data-value="{{ markprice }}">{{ markprice|num }}</td>
                                     </tr>
                                     <tr>
                                         <th scope="row">A 1 %</th>
-                                        <td data-value="{{ target[2] }}">{{ target[2]|num }}</td>
-                                        <td data-value="{{ markprice }}">{{ markprice|num }}</td>
+                                        <td data-vivo="objetivo_2" data-value="{{ target[2] }}">{{ target[2]|num }}</td>
+                                        <td data-vivo="precio" data-value="{{ markprice }}">{{ markprice|num }}</td>
                                     </tr>
                                     <tr>
                                         <td><input type="number" class="form-control" id="customaway" onchange="calcTarget()" min="0" step="any" inputmode="decimal" aria-label="Distancia en %"></td>
                                         <td><input class="form-control" id="averageTarget" readonly aria-label="Cantidad para esa distancia"></td>
-                                        <td data-value="{{ markprice }}">{{ markprice|num }}</td>
+                                        <td data-vivo="precio" data-value="{{ markprice }}">{{ markprice|num }}</td>
                                     </tr>
                                 </tbody>
                             </table>
@@ -280,7 +266,8 @@
                 var positionvalue = document.getElementById("positionvalue").value;
                 var customaway = document.getElementById("customaway").value;
                 if (customaway.length > 0){
-                    var markprice = {{ markprice }};
+                    // El precio actual de la tabla (lo actualiza en_vivo.js), no el del momento en que cargó la página.
+                    var markprice = document.querySelector('[data-vivo="precio"]').getAttribute('data-value');
                     positionsize = parseFloat(positionsize);
                     positionvalue = parseFloat(positionvalue);
                     markprice = parseFloat(markprice);
@@ -306,6 +293,15 @@
                 }
             }
 
+            // en_vivo.js actualiza la posición y el precio sin recargar: el promedio y la cantidad para la distancia
+            // se recalculan con los valores nuevos (solo si ya se habían cargado los campos).
+            window.addEventListener('fb-vivo-aplicado', function () {
+                if (document.getElementById("positionsize")) {
+                    averageDown();
+                    calcTarget();
+                }
+            });
+
             $(document).ready( function () {
                 $('#orders').DataTable({
                     "paging": false,
@@ -313,6 +309,8 @@
                     "order": [],
                     "info": false,
                     "language": window.BB.dataTablesEs,
+                    // Cantidad y precio ordenan por el crudo también con filas que llegan después (en_vivo.js).
+                    "columnDefs": window.BB.columnasDataOrder(1, 2),
                 });
             } );
 

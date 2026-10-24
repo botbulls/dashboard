@@ -333,6 +333,16 @@ def bot_health():
                     headers={"Cache-Control": "no-store"})
 
 
+@ops.route("/api/scraper/latido", methods=["GET"])
+def scraper_latido():
+    # "Datos de hace X s". Liviano para consultarlo seguido: lee dos JSON chicos junto a la DB
+    # (latido del loop y scrape_state.json); no toca la DB, Docker ni el exchange. Requiere login.
+    data = scraper.frescura_web(current_app.config)
+    data["at"] = _iso(data["at"])
+    return Response(json.dumps(data), status=200, mimetype="application/json",
+                    headers={"Cache-Control": "no-store"})
+
+
 @ops.route("/metrics", methods=["GET"])
 def metrics():
     return Response(render_metrics(collect_health()), status=200, mimetype=None,

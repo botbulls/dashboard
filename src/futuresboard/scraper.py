@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import hmac
 import json
 import os
 import pathlib
 import re
-import sqlite3
+import signal
 import tempfile
 import threading
 import time
@@ -17,11 +18,20 @@ from urllib.parse import urlencode
 
 import requests  # type: ignore
 from flask import current_app
+from flask import Flask
+
+from futuresboard import db
 
 
 _SIGNATURE_RE = re.compile(r"(signature=)[^&\s'\"]+")
 
 SCRAPE_STATE_FILE = "scrape_state.json"
+# Latido del loop dedicado (python -m futuresboard.scraper): junto a la DB, en el directorio de datos.
+LATIDO_FILE = "scraper_latido.json"
+
+# Lo setea SIGTERM/SIGINT en el loop dedicado. En el hilo del web nunca se setea: ahí las esperas
+# por peso de API son un sleep común.
+_DETENER = threading.Event()
 
 
 def redact_url(url) -> str:
@@ -78,6 +88,71 @@ def _record_scrape(**fields) -> None:
     finally:
         if tmp_name and os.path.exists(tmp_name):
             os.unlink(tmp_name)
+
+
+def latido_path(database) -> pathlib.Path:
+    return pathlib.Path(database).parent / LATIDO_FILE
+
+
+def read_latido(database) -> dict:
+    """Última vuelta OK del loop dedicado (``{}`` si no hay latido o está corrupto)."""
+    try:
+        data = json.loads(latido_path(database).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) and isinstance(data.get("at"), (int, float)) else {}
+
+
+def _write_latido(database, data: dict) -> None:
+    path = latido_path(database)
+    tmp_name = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        os.replace(tmp_name, path)
+        tmp_name = None
+    except OSError as exc:
+        current_app.logger.warning("No se pudo escribir el latido del scraper: %s", exc)
+    finally:
+        if tmp_name and os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
+def frescura(database, now: float | None = None, intervalo_defecto: int | None = None) -> dict:
+    """Edad de los datos para el web ("datos de hace X s").
+
+    Toma lo más nuevo entre el latido del loop dedicado y el último scrape OK de
+    ``scrape_state.json`` (este último cubre el scraper como hilo del web o por cron). ``fuente`` e
+    ``intervalo_segundos`` son los de esa marca más nueva: el intervalo sale del latido; si gana
+    ``scrape_state.json`` (o no hay latido) es ``intervalo_defecto`` (ver ``frescura_web``).
+    """
+    now = time.time() if now is None else now
+    latido = read_latido(database)
+    ok = read_scrape_state(database).get("last_success_at")
+    marcas = [(float(latido["at"]), "latido")] if latido else []
+    if isinstance(ok, (int, float)):
+        marcas.append((float(ok), "scrape_state"))
+    if not marcas:
+        return {"fuente": None, "at": None, "edad_segundos": None, "intervalo_segundos": None}
+    at, fuente = max(marcas, key=lambda m: m[0])  # empate: el latido (va primero)
+    intervalo = latido.get("intervalo") if fuente == "latido" else None
+    if not isinstance(intervalo, int):
+        intervalo = intervalo_defecto if isinstance(intervalo_defecto, int) else None
+    return {
+        "fuente": fuente,
+        "at": at,
+        "edad_segundos": max(0, int(now - at)),
+        "intervalo_segundos": intervalo,
+    }
+
+
+def frescura_web(config, now: float | None = None) -> dict:
+    """``frescura`` para el web (``app.config``): sin un latido más nuevo y con el hilo del web prendido
+    (compose sin servicio scraper), el intervalo es el ``AUTO_SCRAPE_INTERVAL`` del web. Sin eso el indicador
+    "en vivo" usaría el umbral de 180 s y se pondría amarillo entre dos vueltas de 300 s del hilo."""
+    defecto = None if config.get("DISABLE_AUTO_SCRAPE") else config.get("AUTO_SCRAPE_INTERVAL")
+    return frescura(config["DATABASE"], now=now, intervalo_defecto=defecto)
 
 
 def auto_scrape(app):
@@ -206,7 +281,7 @@ def send_public_request(url_path, payload={}):
 def create_connection(db_file):
     conn = None
     try:
-        conn = sqlite3.connect(db_file)
+        conn = db.connect(db_file)
     except Error as e:
         print(e)
 
@@ -315,10 +390,11 @@ def update_position(conn, position):
 
 
 def delete_all_positions(conn):
+    # Sin commit: el borrado y los inserts nuevos van en la misma transacción (commitea el
+    # llamador), así un lector concurrente nunca ve la tabla vacía a mitad del reemplazo.
     sql = """ DELETE FROM positions """
     cur = conn.cursor()
     cur.execute(sql)
-    conn.commit()
 
 
 def select_position(conn, symbol):
@@ -354,10 +430,10 @@ def select_account(conn):
 
 # orders interactions
 def delete_all_orders(conn):
+    # Sin commit, por lo mismo que delete_all_positions.
     sql = """ DELETE FROM orders """
     cur = conn.cursor()
     cur.execute(sql)
-    conn.commit()
 
 
 def create_orders(conn, orders):
@@ -366,22 +442,31 @@ def create_orders(conn, orders):
     cur.execute(sql, orders)
 
 
-def scrape(app=None):
+def scrape(app=None) -> bool:
+    """Una pasada. Devuelve True si terminó bien (False ante un error HTTP del exchange, o si la cuenta y las
+    posiciones no se pudieron actualizar: esa pasada no cuenta como scrape OK ni deja latido)."""
     _record_scrape(last_started_at=time.time())
     try:
-        _scrape(app=app)
+        completo = _scrape(app=app)
     except HTTPRequestError as exc:
         _record_scrape(last_error_at=time.time(), last_error=f"HTTP error code {exc.code}")
         if app is None:
             print(exc)
         else:
             app.logger.error(f"{exc}")
+        return False
     except Exception as exc:
         # Se registra y se re-lanza (mismo comportamiento que antes).
         _record_scrape(last_error_at=time.time(), last_error=exc.__class__.__name__)
         raise
     else:
+        if completo is False:
+            _record_scrape(last_error_at=time.time(), last_error="cuenta sin positions: cuenta y posiciones sin actualizar")
+            current_app.logger.warning("Pasada incompleta: la respuesta de la cuenta no trae positions; "
+                                       "cuenta y posiciones quedaron como estaban")
+            return False
         _record_scrape(last_success_at=time.time())
+        return True
 
 
 # flake8: noqa: C901
@@ -392,6 +477,7 @@ def _scrape(app=None):
     up_to_date = False
     weightused = 0
     processed, updated_positions, new_positions, updated_orders, sleeps = 0, 0, 0, 0, 0
+    overweight = False
 
     if current_app.config["EXCHANGE"].lower() == "binance":
         if weightused < 800:
@@ -467,7 +553,13 @@ def _scrape(app=None):
                     f"Weight used: {weightused}/800; Processed: {processed}; Sleep: 1 minute"
                 )
                 sleeps += 1
-                time.sleep(60)
+                _DETENER.wait(60)  # = time.sleep(60), salvo que el loop dedicado reciba SIGTERM
+
+            if _DETENER.is_set():
+                # Apagado pedido: se corta entre páginas (nunca a mitad de una transacción) y la
+                # próxima pasada sigue desde el último income guardado.
+                current_app.logger.info(f"Apagado pedido: income cortado tras {processed} filas")
+                break
 
             with create_connection(current_app.config["DATABASE"]) as conn:
                 startTime = select_latest_income(conn)
@@ -770,3 +862,95 @@ def _scrape(app=None):
         print(
             f"Orders updated: {updated_orders}\nPositions updated: {updated_positions} (new: {new_positions})\nTrades processed: {processed}\nTime elapsed: {timedelta(seconds=elapsed)}\nSleeps: {sleeps}"
         )
+    # False: Binance respondió la cuenta sin "positions" (cuenta y posiciones no se actualizaron).
+    return not overweight
+
+
+# --------------------------------------------------------------------------------------
+# Loop dedicado: python -m futuresboard.scraper (su propio contenedor, misma imagen)
+# --------------------------------------------------------------------------------------
+# Reemplaza al hilo del web (que queda apagado con FUTURESBOARD_DISABLE_AUTO_SCRAPE=1). Misma pasada
+# scrape() cada AUTO_SCRAPE_INTERVAL s, con el mismo control de peso y scrape_state.json. Además deja
+# un latido (scraper_latido.json, junto a la DB) por cada vuelta OK y es el único que pasa la DB a WAL.
+
+
+def build_app(config) -> Flask:
+    """App mínima para el loop: config + logger. Sin login, blueprints ni secret key."""
+    from futuresboard import logs
+
+    logs.configure_logging()
+    app = Flask(__name__)
+    app.config.from_mapping(**json.loads(config.json()))
+    for value in (config.API_KEY, config.API_SECRET):
+        logs.register_secret(value)
+    return app
+
+
+def run_loop(app, *, interval=None, detener=None, max_vueltas=None) -> int:
+    """Corre scrape() hasta que ``detener`` se setee (SIGTERM). Nunca se cae por una vuelta con error.
+
+    El apagado nunca corta una escritura: la señal solo setea el evento, la vuelta en curso termina
+    (o se corta entre páginas de income) y recién ahí sale.
+    """
+    detener = _DETENER if detener is None else detener
+    interval = int(app.config["AUTO_SCRAPE_INTERVAL"] if interval is None else interval)
+    database = app.config["DATABASE"]
+    log = app.logger
+    with app.app_context():
+        modo = db.ensure_wal(database)
+        log.info("Scraper en loop: cada %s s, DB %s (journal_mode=%s)", interval, database, modo or "?")
+        vuelta = 0
+        while not detener.is_set():
+            vuelta += 1
+            inicio = time.time()
+            try:
+                ok = scrape(app=app)
+            except Exception as exc:  # un "database is locked" o un JSON raro no matan el loop
+                ok = False
+                log.error("Vuelta %d con error (%s): %s", vuelta, exc.__class__.__name__, redact_url(exc))
+            duracion = time.time() - inicio
+            if ok:
+                _write_latido(database, {"at": time.time(), "vuelta": vuelta, "intervalo": interval,
+                                         "duracion_segundos": round(duracion, 3), "pid": os.getpid()})
+                log.info("Vuelta %d OK en %.1f s; próxima en %s s", vuelta, duracion, interval)
+            else:
+                log.warning("Vuelta %d sin éxito en %.1f s (sin latido); reintento en %s s",
+                            vuelta, duracion, interval)
+            if modo != "wal":
+                modo = db.ensure_wal(database)  # no se pudo al arrancar (otra conexión con transacción)
+            if max_vueltas is not None and vuelta >= max_vueltas:
+                break
+            detener.wait(interval)
+        log.info("Scraper detenido tras %d vueltas", vuelta)
+    return 0
+
+
+def _pedir_apagado(signum, frame) -> None:
+    # Solo setea el evento (nada de logging ni I/O dentro del handler).
+    _DETENER.set()
+
+
+def main(argv=None) -> int:
+    from futuresboard.app import default_config_dir
+    from futuresboard.config import Config
+
+    parser = argparse.ArgumentParser(
+        prog="futuresboard.scraper",
+        description="Scraper en loop: scrape() cada AUTO_SCRAPE_INTERVAL s hasta SIGTERM.",
+    )
+    parser.add_argument("-c", "--config-dir", type=pathlib.Path, default=None,
+                        help="Directorio de config (default: $FUTURESBOARD_CONFIG_DIR o ./config).")
+    args = parser.parse_args(argv)
+    config_dir = args.config_dir.resolve() if args.config_dir else default_config_dir()
+    app = build_app(Config.from_config_dir(config_dir))
+    signal.signal(signal.SIGTERM, _pedir_apagado)
+    signal.signal(signal.SIGINT, _pedir_apagado)
+    return run_loop(app)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    # Con -m este archivo corre como __main__: se delega al módulo importado para que el evento de
+    # apagado sea el mismo que usa _scrape().
+    from futuresboard import scraper as _scraper
+
+    raise SystemExit(_scraper.main())

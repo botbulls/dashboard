@@ -60,7 +60,7 @@ dashboard se cambió `DATABASE` en `config.json`, pasar esa misma ruta al notifi
 | Chequeo | Cómo | Caído si |
 |---|---|---|
 | Contenedor passivbot | `GET /containers/<nombre>/json` vía docker-socket-proxy | no existe, no está `running`, o el proxy no responde |
-| Scrape de la DB | mtime del archivo de la DB (proxy: el scraper escribe `positions`/`account` en cada ciclo) | más viejo que `NOTIFIER_SCRAPE_MAX_AGE` |
+| Scrape de la DB | último scrape OK según el latido del scraper (`scraper_latido.json`) o `scrape_state.json`, que solo escribe el scraper. Si no están a la vista (DB montada como archivo suelto), mtime de la DB. No se usa el mtime de `futures.db-wal`: cualquier conexión lo crea al abrir. | más viejo que `NOTIFIER_SCRAPE_MAX_AGE`, o sin ningún scrape OK registrado |
 | Último trade (opcional) | `MAX(time)` de la tabla `income` | más viejo que `NOTIFIER_TRADE_MAX_AGE` |
 
 **Antispam:** solo se avisa en las transiciones. Un chequeo pasa a caído después de
@@ -69,8 +69,8 @@ dashboard se cambió `DATABASE` en `config.json`, pasar esa misma ruta al notifi
 registra y el aviso se reintenta en el ciclo siguiente.
 
 El estado se guarda en `NOTIFIER_STATE_PATH` (default `notifier_state.json` junto a la DB) para que
-reiniciar el notifier no repita una alerta ya enviada ni el resumen del día. Si la DB está montada en
-solo lectura, el estado tiene que ir a otro volumen escribible (ver compose).
+reiniciar el notifier no repita una alerta ya enviada ni el resumen del día. En Docker el estado va a
+un volumen propio (ver compose), no al directorio de datos de la DB.
 
 ### Resumen diario
 
@@ -88,7 +88,9 @@ Si el notifier arranca después de la hora y el resumen de ese día no se mandó
 ## docker-compose
 
 Snippet para sumar al compose del panel (ver [panel-passivbot.md](panel-passivbot.md)). El notifier
-usa la misma imagen que el dashboard, pero **no** comparte con él ni `config.json` ni el docker-socket-proxy:
+usa la misma imagen que el dashboard, pero **no** comparte con él ni `config.json` ni el docker-socket-proxy.
+Supone la DB en su propio directorio de datos (`./data/futures.db`, ver
+[produccion.md](produccion.md#scraper-en-su-propio-contenedor-y-sqlite-en-wal)), separado de `./config`:
 
 ```yaml
 services:
@@ -118,9 +120,12 @@ services:
       NOTIFIER_INTERVAL: "60"
       NOTIFIER_DAILY_SUMMARY: "21:00"
     volumes:
-      # Solo el archivo de la DB, en solo lectura: sin config.json (API keys de Binance).
-      - ./config/futures.db:/data/futures.db:ro
-      # Estado del notifier (único lugar donde escribe).
+      # Solo el directorio de DATOS (DB, -wal/-shm, scrape_state.json, latido del scraper). Nunca
+      # ./config: ahí está config.json con las API keys de Binance. Escribible (sin :ro) porque con
+      # WAL SQLite tiene que poder crear futures.db-shm/-wal si no hay otra conexión abierta; el
+      # código igual abre la DB con mode=ro (ver nota abajo).
+      - ./data:/data
+      # Estado del notifier.
       - notifier-state:/state
     # default: salida a internet (api.telegram.org). notifier-docker es internal: sin internet.
     networks: [default, notifier-docker]
@@ -158,9 +163,28 @@ Notas:
   pasar `GET /containers/client17-passivbot/json` (el mismo follow-up de panel-passivbot.md), o
   correr el notifier sin `FUTURESBOARD_DOCKER_URL` ni la red `notifier-docker` (se omite el chequeo del
   contenedor y quedan el scrape, el trade y el resumen diario).
-- La DB se monta como archivo: tiene que existir antes del `docker compose up` (si no, Docker crea un
-  directorio con ese nombre). Si la DB se borra y se recrea, reiniciar el notifier para que vea el
-  archivo nuevo. SQLite usa journal de rollback (no WAL), así que la lectura en solo lectura funciona.
+- **DB en WAL: se monta el directorio de datos, no el archivo suelto.** Con WAL los commits van a
+  `futures.db-wal` y la coordinación entre procesos a `futures.db-shm`, ambos junto a la DB: un archivo
+  montado solo leería con un `-wal`/`-shm` propio dentro del contenedor y vería datos viejos (hasta el
+  último checkpoint). Por eso la DB vive en `./data`, aparte de `./config`.
+- **Por qué `./data` va escribible.** Probado con SQLite 3.46 (el de la imagen) y un bind mount `:ro`:
+  si en ese momento no hay ninguna otra conexión abierta (el scraper y el web cierran la suya en cada
+  vuelta/request, y SQLite borra `-wal`/`-shm` al cerrar la última), la apertura falla con
+  `unable to open database file`. Con el directorio escribible SQLite crea el `-shm` y la lectura
+  funciona. El código sigue abriendo con `mode=ro` (no puede escribir la DB por SQL), pero un proceso
+  comprometido sí podría escribir en `./data`, y el costo frente al `:ro` de antes es concreto:
+  - **cuenta del panel**: en `futures.db` está la tabla `users` (hashes del login). Un notifier comprometido
+    (corre como root y tiene el directorio escribible) podría reescribir un hash y entrar al panel, que
+    controla el bot, el rescate y C3. Lo amortigua que el panel está detrás de Cloudflare Access;
+  - **su propia alerta**: podría pisar `scraper_latido.json` o `scrape_state.json` y así no avisar que el
+    scraper se cayó;
+  - borrar o pisar la DB y sus `-wal`/`-shm`.
+
+  Es una regresión de **integridad**, no de secretos: el notifier sigue sin ver `config.json` ni las API
+  keys. Mitigaciones a futuro (no hechas): que el scraper mantenga una conexión abierta para que `-wal`/
+  `-shm` existan siempre y probar el notifier con `:ro`, o sacar `users` de `futures.db`. No usar
+  `immutable=1` (leería páginas a medio checkpoint).
+- Con journal de rollback (DB vieja, sin WAL) el mismo montaje de directorio también funciona.
 - Sin Telegram configurado el notifier no termina (para no entrar en un loop de reinicios con
   `restart: unless-stopped`): loguea que está deshabilitado y queda inactivo.
 

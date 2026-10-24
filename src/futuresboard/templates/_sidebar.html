@@ -1,0 +1,69 @@
+{#- Partes del menú izquierdo que cambian con los datos. Las usan base.html y /api/vivo/* (futuresboard/vivo.py):
+    en_vivo.js reemplaza cada [data-vivo-bloque] por lo que arma el server con el mismo macro, así la página y la
+    actualización en vivo nunca se arman distinto. Exposición = tamaño de la posición sobre el balance (pbr del
+    server); el crudo queda en data-value. -#}
+
+{% macro ordenes(compras, ventas) -%}
+    {{ compras }} {{ 'compra' if compras == 1 else 'compras' }} · {{ ventas }} {{ 'venta' if ventas == 1 else 'ventas' }}
+{%- endmacro %}
+
+{% macro activas(coin_list, moneda_actual) -%}
+{%- set n_activas = coin_list['totals']['active'] %}
+<section data-vivo-bloque="monedas_activas" class="bb-sidebar__seccion" id="activecoins-collapse" aria-labelledby="bbTituloMonedas">
+    <div class="bb-sidebar__titulo"><span id="bbTituloMonedas">Monedas activas</span><span class="bb-cuenta-badge">{{ n_activas }}</span></div>
+    {% if coin_list['active'] %}
+        {% set t = coin_list['totals'] %}
+        <div class="bb-monedas__enc" aria-hidden="true"><span>Par</span><span title="Tamaño de la posición sobre el balance">Exposición</span></div>
+        <ul class="bb-monedas" aria-label="Monedas activas: exposición y órdenes abiertas">
+            {% for item in coin_list['active'] %}
+                {% set c = coin_list['active'][item] %}
+                <li>
+                    <a class="bb-moneda" href="{{ url_for('main.coin_page', coin=item) }}"{% if item == moneda_actual %} aria-current="page"{% endif %}>
+                        <span class="bb-moneda__par">{{ item }}</span>
+                        <span class="bb-moneda__expo"{% if c[2] is none %} title="Sin balance para calcular"{% else %} data-value="{{ c[2] }}"{% endif %}><span class="bb-sr">exposición long </span>{{ '—' if c[2] is none else (c[2]|float * 100)|pct(0) }}</span>
+                        <span class="bb-moneda__ord">{{ ordenes(c[0], c[1]) }}</span>
+                        {% if c[5] is none or c[5]|float > 0 or c[3] or c[4] %}
+                            <span class="bb-moneda__short"{% if c[5] is none %} title="Sin balance para calcular"{% else %} data-value="{{ c[5] }}"{% endif %}>Short {{ '—' if c[5] is none else (c[5]|float * 100)|pct(0) }} · {{ ordenes(c[3], c[4]) }}</span>
+                        {% endif %}
+                    </a>
+                </li>
+            {% endfor %}
+            <li class="bb-moneda bb-moneda--total">
+                <span class="bb-moneda__par">Total</span>
+                <span class="bb-moneda__expo"{% if t['pbr_long'] is none %} title="Sin balance para calcular"{% else %} data-value="{{ t['pbr_long'] }}"{% endif %}><span class="bb-sr">exposición long </span>{{ '—' if t['pbr_long'] is none else (t['pbr_long']|float * 100)|pct(0) }}</span>
+                <span class="bb-moneda__ord">{{ ordenes(t['buys_long'], t['sells_long']) }}</span>
+                {% if t['pbr_short'] is none or t['pbr_short']|float > 0 or t['buys_short'] or t['sells_short'] %}
+                    <span class="bb-moneda__short"{% if t['pbr_short'] is none %} title="Sin balance para calcular"{% else %} data-value="{{ t['pbr_short'] }}"{% endif %}>Short {{ '—' if t['pbr_short'] is none else (t['pbr_short']|float * 100)|pct(0) }} · {{ ordenes(t['buys_short'], t['sells_short']) }}</span>
+                {% endif %}
+            </li>
+        </ul>
+    {% else %}
+        <p class="bb-sidebar__vacio">Sin posiciones abiertas.</p>
+    {% endif %}
+</section>
+{%- endmacro %}
+
+{% macro inactivas(coin_list, moneda_actual) -%}
+<details data-vivo-bloque="monedas_inactivas" class="bb-sidebar__seccion bb-inactivas" id="inactivecoins-collapse">
+    <summary class="bb-sidebar__titulo"><span><i class="fas fa-chevron-right" aria-hidden="true"></i> Monedas inactivas</span><span class="bb-cuenta-badge">{{ coin_list['totals']['inactive'] }}</span></summary>
+    <ul>
+        {% for item in coin_list['inactive'] %}
+            <li><a href="{{ url_for('main.coin_page', coin=item) }}"{% if item == moneda_actual %} aria-current="page"{% endif %}>{{ item }}</a></li>
+        {% endfor %}
+    </ul>
+</details>
+{%- endmacro %}
+
+{#- Cuenta del ítem Posiciones (y su badge del rail). La envoltura es display: contents: la grilla del ítem no cambia. -#}
+{% macro badge_posiciones(n_activas) -%}
+<span data-vivo-bloque="nav_posiciones" class="bb-vivo-envoltura">{% if n_activas %}<span class="bb-cuenta-badge"><span class="bb-sr">monedas con posición: </span>{{ n_activas }}</span><span class="bb-badge-rail" aria-hidden="true">{{ n_activas }}</span>{% endif %}</span>
+{%- endmacro %}
+
+{#- Semáforo del rescate en el ítem del menú (solo Inicio arma rescate_resumen). -#}
+{% macro punto_rescate(r) -%}
+<span data-vivo-bloque="nav_rescate" class="bb-vivo-envoltura">
+    {%- if r and not r.error and r.ratio %}
+        {%- set sem = r.ratio.semaforo %}
+        <span class="bb-punto bb-punto--{{ {'verde': 'ok', 'amarillo': 'aviso', 'rojo': 'peligro'}.get(sem, 'gris') }}" aria-hidden="true"></span><span class="bb-sr">{{ {'verde': 'margen holgado', 'amarillo': 'margen ajustado', 'rojo': 'margen bajo: inyecta'}.get(sem, 'margen sin dato') }}</span>
+    {%- endif %}</span>
+{%- endmacro %}

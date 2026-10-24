@@ -38,5 +38,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 # gunicorn con 1 worker gthread: el scraper automatico corre como hilo dentro del worker
 # (ver src/futuresboard/gunicorn_conf.py). Lee ./config/config.json (o FUTURESBOARD_CONFIG_DIR).
 # Para desactivar el scraper: FUTURESBOARD_DISABLE_AUTO_SCRAPE=1.
+# Scraper en su propio contenedor (misma imagen): python -m futuresboard.scraper (docs/produccion.md).
 # Scrape puntual (cron): docker run ... futuresboard --scrape-only
 CMD ["gunicorn", "--config", "python:futuresboard.gunicorn_conf", "futuresboard.wsgi:app"]

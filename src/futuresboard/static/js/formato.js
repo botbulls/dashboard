@@ -112,6 +112,16 @@
     /* Colores de gráficos leídos de los tokens (se recalculan al cambiar el tema) */
     token: function (nombre) { return getComputedStyle(document.documentElement).getPropertyValue(nombre).trim(); },
   };
+  /* DataTables: las columnas desde..hasta ordenan por el crudo de data-order (no por el texto es-AR). DataTables lo
+     detecta solo en la primera fila al arrancar; así vale también si la tabla arranca vacía y las filas llegan después
+     (en_vivo.js). Es la misma configuración que arma DataTables al detectarlo. */
+  window.BB.columnasDataOrder = function (desde, hasta) {
+    var out = [];
+    for (var i = desde; i <= hasta; i++) {
+      out.push({ targets: i, data: { _: i + '.display', sort: i + '.@data-order', type: i + '.@data-order' } });
+    }
+    return out;
+  };
   /* Textos de DataTables en español (solo la interfaz: el orden usa los crudos de data-order). */
   window.BB.dataTablesEs = {
     search: 'Buscar:', lengthMenu: 'Mostrar _MENU_', info: 'Mostrando _START_ a _END_ de _TOTAL_',
