@@ -149,6 +149,47 @@ def test_vuelta_con_error_no_deja_latido_y_el_loop_sigue(loop_app):
     assert latido["vuelta"] == 2  # la 1 falló (HTTP), la 2 dejó latido
 
 
+def test_cuenta_sin_positions_no_cuenta_como_ok_ni_deja_latido(loop_app, monkeypatch):
+    # Binance responde la cuenta sin "positions": cuenta y posiciones quedan como estaban. Antes eso era un scrape
+    # OK con latido, y la página decía "datos de hace 5 s" con la cuenta y las posiciones viejas.
+    app, fake, _, data_dir = loop_app
+
+    class SinPositions(FakeBinance):
+        def __call__(self, http_method, url_path, payload={}, exchange="binance"):
+            headers, data = super().__call__(http_method, url_path, payload, exchange)
+            if url_path == "/fapi/v2/account":
+                data = {k: v for k, v in data.items() if k != "positions"}
+            return headers, data
+
+    monkeypatch.setattr(scraper, "send_signed_request", SinPositions())
+    scraper.run_loop(app, interval=0, detener=threading.Event(), max_vueltas=1)
+    database = data_dir / "futures.db"
+    assert scraper.read_latido(database) == {}
+    estado = scraper.read_scrape_state(database)
+    assert "last_success_at" not in estado and "positions" in estado["last_error"]
+    assert scraper.frescura(database)["at"] is None
+
+    monkeypatch.setattr(scraper, "send_signed_request", fake)  # la vuelta siguiente, con la cuenta completa
+    scraper.run_loop(app, interval=0, detener=threading.Event(), max_vueltas=1)
+    assert scraper.read_latido(database)["vuelta"] == 1
+
+
+def test_loop_no_escribe_nada_en_el_directorio_de_config(loop_app):
+    # El contenedor scraper monta solo config.json en :ro (nunca el directorio ./config, con el estado del panel,
+    # rescate y C3). Con el directorio y el archivo sin permiso de escritura, el loop corre igual.
+    app, _, config_dir, data_dir = loop_app
+    config_json = config_dir / "config.json"
+    os.chmod(config_json, 0o444)
+    os.chmod(config_dir, 0o555)
+    try:
+        assert scraper.run_loop(app, interval=0, detener=threading.Event(), max_vueltas=1) == 0
+    finally:
+        os.chmod(config_dir, 0o755)
+        os.chmod(config_json, 0o644)
+    assert scraper.read_latido(data_dir / "futures.db")["vuelta"] == 1
+    assert sorted(p.name for p in config_dir.iterdir()) == ["config.json"]
+
+
 def test_detener_antes_de_la_proxima_pagina_corta_el_income(loop_app, monkeypatch):
     app, _, _, data_dir = loop_app
     detener = threading.Event()
@@ -280,8 +321,29 @@ def test_frescura_usa_lo_mas_nuevo_entre_latido_y_scrape_state(tmp_path):
     assert scraper.frescura(database, now=1000) == {
         "fuente": "latido", "at": 950.0, "edad_segundos": 50, "intervalo_segundos": 60}
 
+    # scrape_state más nuevo que el latido (otro scraper anduvo después): fuente e intervalo son los suyos.
+    scraper.scrape_state_path(database).write_text(json.dumps({"last_success_at": 990}))
+    assert scraper.frescura(database, now=1000) == {
+        "fuente": "scrape_state", "at": 990.0, "edad_segundos": 10, "intervalo_segundos": None}
+    assert scraper.frescura(database, now=1000, intervalo_defecto=300)["intervalo_segundos"] == 300
+    # Empate: el latido.
+    scraper.scrape_state_path(database).write_text(json.dumps({"last_success_at": 950}))
+    assert scraper.frescura(database, now=1000, intervalo_defecto=300)["fuente"] == "latido"
+    assert scraper.frescura(database, now=1000, intervalo_defecto=300)["intervalo_segundos"] == 60
+
     scraper.latido_path(database).write_text("{roto")
     assert scraper.read_latido(database) == {}
+
+
+def test_frescura_web_con_el_hilo_del_web_usa_su_intervalo(tmp_path):
+    # Compose sin servicio scraper (prod hoy): sin latido, el umbral de "datos viejos" sale del intervalo del hilo
+    # (300 s) y no de los 180 s por defecto, que lo ponían amarillo 2 de cada 5 minutos.
+    database = tmp_path / "futures.db"
+    scraper.scrape_state_path(database).write_text(json.dumps({"last_success_at": 900}))
+    cfg = {"DATABASE": database, "AUTO_SCRAPE_INTERVAL": 300, "DISABLE_AUTO_SCRAPE": False}
+    assert scraper.frescura_web(cfg, now=1000)["intervalo_segundos"] == 300
+    cfg["DISABLE_AUTO_SCRAPE"] = True  # el web no scrapea: no se sabe cada cuánto corre el otro (cron)
+    assert scraper.frescura_web(cfg, now=1000)["intervalo_segundos"] is None
 
 
 def _login(client, app):

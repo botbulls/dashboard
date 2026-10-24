@@ -7,8 +7,9 @@ No carga ``Config`` ni ``config.json`` (que tienen las API keys de Binance): la 
 Con la DB en WAL el notifier tiene que ver ``futures.db-wal``/``-shm`` junto a la DB: en Docker se monta
 el directorio de DATOS (``./data``: DB, ``-wal``/``-shm``, ``scrape_state.json`` y latido del scraper),
 nunca el de config (``config.json`` tiene las API keys) ni el archivo suelto. Va sin ``:ro`` porque, si no
-hay otra conexión abierta, SQLite tiene que crear el ``-shm``; el código igual abre con ``mode=ro``
-(trade-off en docs/notificaciones.md).
+hay otra conexión abierta, SQLite tiene que crear el ``-shm``; el código igual abre con ``mode=ro``. Costo
+(docs/notificaciones.md): un notifier comprometido podría escribir ese directorio, o sea reescribir la tabla
+``users`` de la DB (hashes del login del panel) o pisar el latido para callar su propia alerta. No ve las keys.
 
 Cada ``NOTIFIER_INTERVAL`` segundos:
 - chequea el contenedor de passivbot via docker-socket-proxy (si FUTURESBOARD_DOCKER_URL está configurado),

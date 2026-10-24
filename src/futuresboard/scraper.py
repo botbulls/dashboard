@@ -119,28 +119,40 @@ def _write_latido(database, data: dict) -> None:
             os.unlink(tmp_name)
 
 
-def frescura(database, now: float | None = None) -> dict:
+def frescura(database, now: float | None = None, intervalo_defecto: int | None = None) -> dict:
     """Edad de los datos para el web ("datos de hace X s").
 
     Toma lo más nuevo entre el latido del loop dedicado y el último scrape OK de
-    ``scrape_state.json`` (este último cubre el scraper como hilo del web o por cron).
+    ``scrape_state.json`` (este último cubre el scraper como hilo del web o por cron). ``fuente`` e
+    ``intervalo_segundos`` son los de esa marca más nueva: el intervalo sale del latido; si gana
+    ``scrape_state.json`` (o no hay latido) es ``intervalo_defecto`` (ver ``frescura_web``).
     """
     now = time.time() if now is None else now
     latido = read_latido(database)
     ok = read_scrape_state(database).get("last_success_at")
-    marcas = [float(latido["at"])] if latido else []
+    marcas = [(float(latido["at"]), "latido")] if latido else []
     if isinstance(ok, (int, float)):
-        marcas.append(float(ok))
+        marcas.append((float(ok), "scrape_state"))
     if not marcas:
         return {"fuente": None, "at": None, "edad_segundos": None, "intervalo_segundos": None}
-    at, fuente = max(marcas), ("latido" if latido else "scrape_state")
-    intervalo = latido.get("intervalo")
+    at, fuente = max(marcas, key=lambda m: m[0])  # empate: el latido (va primero)
+    intervalo = latido.get("intervalo") if fuente == "latido" else None
+    if not isinstance(intervalo, int):
+        intervalo = intervalo_defecto if isinstance(intervalo_defecto, int) else None
     return {
         "fuente": fuente,
         "at": at,
         "edad_segundos": max(0, int(now - at)),
-        "intervalo_segundos": intervalo if isinstance(intervalo, int) else None,
+        "intervalo_segundos": intervalo,
     }
+
+
+def frescura_web(config, now: float | None = None) -> dict:
+    """``frescura`` para el web (``app.config``): sin un latido más nuevo y con el hilo del web prendido
+    (compose sin servicio scraper), el intervalo es el ``AUTO_SCRAPE_INTERVAL`` del web. Sin eso el indicador
+    "en vivo" usaría el umbral de 180 s y se pondría amarillo entre dos vueltas de 300 s del hilo."""
+    defecto = None if config.get("DISABLE_AUTO_SCRAPE") else config.get("AUTO_SCRAPE_INTERVAL")
+    return frescura(config["DATABASE"], now=now, intervalo_defecto=defecto)
 
 
 def auto_scrape(app):
@@ -431,10 +443,11 @@ def create_orders(conn, orders):
 
 
 def scrape(app=None) -> bool:
-    """Una pasada. Devuelve True si terminó bien (False ante un error HTTP del exchange)."""
+    """Una pasada. Devuelve True si terminó bien (False ante un error HTTP del exchange, o si la cuenta y las
+    posiciones no se pudieron actualizar: esa pasada no cuenta como scrape OK ni deja latido)."""
     _record_scrape(last_started_at=time.time())
     try:
-        _scrape(app=app)
+        completo = _scrape(app=app)
     except HTTPRequestError as exc:
         _record_scrape(last_error_at=time.time(), last_error=f"HTTP error code {exc.code}")
         if app is None:
@@ -447,6 +460,11 @@ def scrape(app=None) -> bool:
         _record_scrape(last_error_at=time.time(), last_error=exc.__class__.__name__)
         raise
     else:
+        if completo is False:
+            _record_scrape(last_error_at=time.time(), last_error="cuenta sin positions: cuenta y posiciones sin actualizar")
+            current_app.logger.warning("Pasada incompleta: la respuesta de la cuenta no trae positions; "
+                                       "cuenta y posiciones quedaron como estaban")
+            return False
         _record_scrape(last_success_at=time.time())
         return True
 
@@ -459,6 +477,7 @@ def _scrape(app=None):
     up_to_date = False
     weightused = 0
     processed, updated_positions, new_positions, updated_orders, sleeps = 0, 0, 0, 0, 0
+    overweight = False
 
     if current_app.config["EXCHANGE"].lower() == "binance":
         if weightused < 800:
@@ -843,6 +862,8 @@ def _scrape(app=None):
         print(
             f"Orders updated: {updated_orders}\nPositions updated: {updated_positions} (new: {new_positions})\nTrades processed: {processed}\nTime elapsed: {timedelta(seconds=elapsed)}\nSleeps: {sleeps}"
         )
+    # False: Binance respondió la cuenta sin "positions" (cuenta y posiciones no se actualizaron).
+    return not overweight
 
 
 # --------------------------------------------------------------------------------------

@@ -172,9 +172,18 @@ Notas:
   vuelta/request, y SQLite borra `-wal`/`-shm` al cerrar la última), la apertura falla con
   `unable to open database file`. Con el directorio escribible SQLite crea el `-shm` y la lectura
   funciona. El código sigue abriendo con `mode=ro` (no puede escribir la DB por SQL), pero un proceso
-  comprometido sí podría borrar o pisar los archivos de `./data`: es el costo frente al `:ro` de antes.
-  Lo que no cambia: el notifier sigue sin ver `config.json` ni las API keys. No usar `immutable=1`
-  (leería páginas a medio checkpoint).
+  comprometido sí podría escribir en `./data`, y el costo frente al `:ro` de antes es concreto:
+  - **cuenta del panel**: en `futures.db` está la tabla `users` (hashes del login). Un notifier comprometido
+    (corre como root y tiene el directorio escribible) podría reescribir un hash y entrar al panel, que
+    controla el bot, el rescate y C3. Lo amortigua que el panel está detrás de Cloudflare Access;
+  - **su propia alerta**: podría pisar `scraper_latido.json` o `scrape_state.json` y así no avisar que el
+    scraper se cayó;
+  - borrar o pisar la DB y sus `-wal`/`-shm`.
+
+  Es una regresión de **integridad**, no de secretos: el notifier sigue sin ver `config.json` ni las API
+  keys. Mitigaciones a futuro (no hechas): que el scraper mantenga una conexión abierta para que `-wal`/
+  `-shm` existan siempre y probar el notifier con `:ro`, o sacar `users` de `futures.db`. No usar
+  `immutable=1` (leería páginas a medio checkpoint).
 - Con journal de rollback (DB vieja, sin WAL) el mismo montaje de directorio también funciona.
 - Sin Telegram configurado el notifier no termina (para no entrar en un loop de reinicios con
   `restart: unless-stopped`): loguea que está deshabilitado y queda inactivo.

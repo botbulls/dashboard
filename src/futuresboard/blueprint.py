@@ -299,7 +299,7 @@ def _hace(segundos) -> str:
 
 def _vivo_ctx(url: str) -> dict:
     """Lo que necesita el indicador "en vivo" de base.html: a dónde pide en_vivo.js y la edad de los datos al render."""
-    f = scraper.frescura(current_app.config["DATABASE"])
+    f = scraper.frescura_web(current_app.config)
     edad = f["edad_segundos"]
     return {
         "url": url,
@@ -311,7 +311,7 @@ def _vivo_ctx(url: str) -> dict:
 
 def _cuenta(balance_db: float, upnl_db: float) -> dict:
     """Balance y PnL no realizado de Inicio con su fuente: la lectura del rescate si es fresca, si no la base."""
-    frescura = scraper.frescura(current_app.config["DATABASE"])
+    frescura = scraper.frescura_web(current_app.config)
     base = {"origen": "base", "at": frescura["at"], "edad_segundos": frescura["edad_segundos"]}
     fuentes = {"balance": dict(base), "upnl": dict(base)}
     balance, upnl = balance_db, upnl_db
@@ -1506,11 +1506,17 @@ def _run_bot_action(action: str, params: dict, validate, work):
     return _json_response({"ok": True, "job_id": job.id, "job": job.to_dict()}, 202)
 
 
-def bot_status_payload() -> tuple[dict, int]:
-    """Estado del bot y HTTP status: lo devuelven /api/bot/status y, dentro de su JSON, /api/vivo/inicio."""
+def bot_status_payload(docker_timeout: float | None = None) -> tuple[dict, int]:
+    """Estado del bot y HTTP status: lo devuelven /api/bot/status y, dentro de su JSON, /api/vivo/inicio.
+
+    ``docker_timeout``: tope del inspect al docker-proxy (default ``bot_control.HTTP_TIMEOUT_SECONDS``, 10 s).
+    """
     settings = bot_control.Settings()
+    docker = None
+    if docker_timeout is not None and settings.enabled:
+        docker = bot_control.DockerClient(settings.docker_url, timeout=docker_timeout)
     try:
-        out = bot_control.get_status(settings)
+        out = bot_control.get_status(settings, docker=docker)
     except bot_control.BotControlError as exc:
         return {"enabled": settings.enabled, "error": str(exc)}, exc.status_code
     data_dir = _bot_store().data_dir

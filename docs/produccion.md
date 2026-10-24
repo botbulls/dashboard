@@ -69,6 +69,32 @@ python -m futuresboard.scraper            # lee ./config (o -c DIR / FUTURESBOAR
 - **El web no scrapea**: el contenedor del dashboard lleva `FUTURESBOARD_DISABLE_AUTO_SCRAPE=1`. Sin eso
   habría dos scrapers. gunicorn queda igual (1 worker): el rate limit del login sigue en memoria.
 - El contenedor no sirve HTTP: `healthcheck: {disable: true}` (el de la imagen consulta `:5000/health`).
+- **Montajes del contenedor scraper**: el directorio de datos (escribible: DB, `-wal`/`-shm`,
+  `scrape_state.json`, latido) y **solo el archivo** `config.json` en `:ro` (necesita las API keys para
+  pedirle a Binance). Nunca el directorio `./config`: ahí están `rescate_config.json`, `c3_config.json` y
+  `bot_control_state.json`, que el scraper no usa y no tiene por qué poder escribir. El scraper no escribe
+  nada en el directorio de config (probado con `config/` en 555 y `config.json` en 444).
+
+  ```yaml
+  scraper:
+    image: botbulls/dashboard:<tag>
+    command: ["python", "-m", "futuresboard.scraper"]
+    healthcheck: {disable: true}
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    environment:
+      - FUTURESBOARD_DATABASE=/usr/src/futuresboard/data/futures.db
+      - FUTURESBOARD_AUTO_SCRAPE_INTERVAL=60
+    volumes:
+      - ./dashboard/config/config.json:/usr/src/futuresboard/config/config.json:ro
+      - ./dashboard/data:/usr/src/futuresboard/data
+  ```
+
+  `config.json` se lee **una sola vez al arrancar**: después de editarlo, `docker compose restart scraper`.
+  Eso además cubre que un archivo montado suelto queda atado a su inodo: un editor que guarda con
+  tmp + rename deja al contenedor viendo el archivo viejo hasta que se reinicia (el código del panel no
+  reescribe `config.json`).
 
 **Directorio de datos.** La DB va a un directorio propio, separado de `config.json` (que tiene las API
 keys), con `FUTURESBOARD_DATABASE` (ruta absoluta, ej. `/usr/src/futuresboard/data/futures.db`). Con la
@@ -94,7 +120,9 @@ estado anterior o el nuevo, nunca la tabla vacía). Todas las conexiones fijan `
 - Solo sirve sobre un disco local (bind mount del host), no sobre NFS/SMB: el `-shm` es memoria
   compartida.
 - Lectores de solo lectura (notifier): el directorio va escribible aunque el código abra con `mode=ro`;
-  ver [notificaciones.md](notificaciones.md#docker-compose).
+  ver [notificaciones.md](notificaciones.md#docker-compose). Ojo con lo que implica: en esa DB está la
+  tabla `users` (hashes del login del panel), así que un notifier comprometido podría reescribirla y
+  tomar la cuenta del panel, y también pisar el latido para callar su propia alerta.
 
 **Backups con WAL.** Copiar solo `futures.db` puede perder lo último commiteado (vive en `-wal` hasta el
 checkpoint) o dar una copia inconsistente. Opciones:
@@ -126,7 +154,8 @@ lector parados, `python3 -c "import sqlite3; c=sqlite3.connect('data/futures.db'
   `running`, `status`, `started_at` (StartedAt) y `uptime_seconds`.
   - contenedor detenido o inexistente → `critical`;
   - proxy caído / sin respuesta → `warn` (nunca 500). Ojo: el timeout del cliente es 10 s, así que con el
-    proxy caído la consulta tarda eso;
+    proxy caído la consulta tarda eso (`/api/vivo/inicio` usa 3 s para el estado del bot: con el proxy
+    colgado los números se actualizan igual y el bot queda "Sin datos");
   - panel sin `FUTURESBOARD_DOCKER_URL` → `skipped` (no afecta el estado global).
 - **last_trade**: último fill en la tabla `income` (`REALIZED_PNL`, `COMMISSION`, `ADLTRADE`,
   `BUSTTRADE`; funding y transfers no cuentan). También se informa `last_order_at` (la orden abierta

@@ -54,11 +54,23 @@ de ganancia de Moneda, Historial, Proyección, Rescate y Ajustes.
 - No toca nada con un modal abierto (confirmaciones, progreso del bot, velas, detalle) ni con el foco en un campo
   del panel del bot: espera y aplica cuando se cierra.
 - Debajo del título: "Actualizado hace X s · datos de hace Y s" (la edad sale del latido del scraper; con más de
-  3 vueltas sin dato se pinta en amarillo). Ese texto no es `aria-live`.
+  3 vueltas sin dato, mínimo 3 min, se pinta en amarillo). Ese texto no es `aria-live`; cuando los datos pasan a
+  viejos se avisa una vez en el `role="status"` ("Los datos tienen más de 3 min: el scraper no está actualizando
+  la base"). Sin latido y con el scraper como hilo del web (compose sin servicio scraper) las vueltas son las del
+  hilo (`AUTO_SCRAPE_INTERVAL`, 300 s): no se pone amarillo entre dos vueltas.
+- Si una respuesta llega después de un pedido más nuevo (por ejemplo, volver a la pestaña con uno en vuelo), se
+  descarta: cada pedido lleva un número y el nuevo aborta al anterior.
+- Después de aplicar dispara `fb-vivo-aplicado`: en Moneda la calculadora recalcula el promedio y la cantidad
+  para la distancia con la posición y el precio nuevos (si la posición se cerró, la primera fila "Posición"
+  queda en 0).
+- El estado del bot viaja en el JSON de Inicio con un tope de 3 s para el `inspect` a Docker (el pedido se corta a
+  los 10 s): con el docker-proxy colgado los números se actualizan igual y el bot queda "Sin datos".
 - Un número que cambió se resalta apenas (fondo que se apaga en 1,6 s), salvo con `prefers-reduced-motion`.
 - Los bloques se reemplazan solo si cambiaron, sin sacarle el foco a nadie y sin cerrar los `<details>`
-  abiertos. Un aviso del rescate (`role="alert"`) que sigue diciendo lo mismo y solo cambia el "hace N min" se
-  actualiza sin volver a anunciarse.
+  abiertos. Un aviso del rescate (`role="alert"`) que sigue diciendo lo mismo y solo cambia el "hace N min" (o
+  pasa de "89 s" a "2 min") se actualiza sin volver a anunciarse, también cuando se reemplaza el bloque entero
+  porque cambió la cantidad de tarjetas. Con el foco adentro de un bloque que cambió de forma, ese bloque espera
+  a que el foco salga (nunca se lo saca).
 - En `file://` (los scripts de captura abren el HTML guardado por `file://`) no hace nada: no pide, no avisa y
   deja el texto que vino del server.
 

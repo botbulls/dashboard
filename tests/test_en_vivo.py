@@ -209,6 +209,50 @@ def test_error_del_bot_no_corta_los_numeros(client, con_datos, monkeypatch):  # 
     assert d["ok"] is True and d["bot"]["ok"] is False and d["valores"]["balance"]["crudo"] == "5416.80"
 
 
+def test_docker_colgado_no_frena_los_numeros(client, con_datos, monkeypatch):  # noqa: F811
+    # Con el docker-proxy colgado, /api/vivo/inicio corta el inspect a los 3 s (el JS corta a los 10 s): los números
+    # llegan igual y el bot queda sin datos. /api/bot/status sigue con los 10 s de siempre.
+    from futuresboard import bot_control
+    from futuresboard import vivo
+
+    monkeypatch.setenv(bot_control.ENV_DOCKER_URL, "http://docker-proxy:2375")
+    timeouts = []
+
+    def colgado(self, method, url, **kw):
+        timeouts.append(kw.get("timeout"))
+        raise requests.ReadTimeout("colgado")
+
+    monkeypatch.setattr(requests.Session, "request", colgado)
+    d = _get(client, "/api/vivo/inicio").get_json()
+    assert d["ok"] is True and d["valores"]["balance"]["crudo"] == "5416.80"
+    assert d["bot"]["ok"] is False and timeouts == [vivo.BOT_DOCKER_TIMEOUT_S] and vivo.BOT_DOCKER_TIMEOUT_S < 10
+    client.get("/api/bot/status")
+    assert timeouts[-1] == bot_control.HTTP_TIMEOUT_SECONDS
+
+
+def test_moneda_con_la_posicion_cerrada_manda_la_calculadora_en_cero(client, con_datos, app):  # noqa: F811
+    html = _get(client, "/coins/BTCUSDT").get_data(as_text=True)
+    assert 'data-vivo="pos_cantidad_0"' in html  # la página cargó con la posición
+    with sqlite3.connect(str(app.config["DATABASE"])) as con:
+        con.execute("DELETE FROM positions WHERE symbol = 'BTCUSDT'")
+    v = _get(client, "/api/vivo/moneda/BTCUSDT").get_json()["valores"]
+    assert v["pos_cantidad_0"]["crudo"] == "0" and v["pos_precio_0"]["crudo"] == "0"
+    # La calculadora recalcula el promedio cuando en_vivo.js aplica los valores nuevos.
+    assert "window.addEventListener('fb-vivo-aplicado'" in html
+
+
+def test_pagina_con_el_hilo_del_web_usa_su_intervalo(client, con_datos, app):  # noqa: F811
+    # Imagen nueva con el compose viejo (sin servicio scraper ni latido): el indicador usa los 300 s del hilo.
+    from futuresboard import scraper
+
+    app.config["DISABLE_AUTO_SCRAPE"] = False  # el hilo no arranca: init_app ya corrió
+    app.config["AUTO_SCRAPE_INTERVAL"] = 300
+    scraper.scrape_state_path(app.config["DATABASE"]).write_text(json.dumps({"last_success_at": time.time() - 200}))
+    html = _get(client, "/").get_data(as_text=True)
+    assert re.search(r'data-vivo-edad="20[01]" data-vivo-intervalo="300"', html)
+    assert _get(client, "/api/vivo/inicio").get_json()["datos"]["intervalo_segundos"] == 300
+
+
 def test_base_bloqueada_responde_503_json(client, con_datos, monkeypatch):  # noqa: F811
     monkeypatch.setattr(bp, "_datos_inicio", mock.Mock(side_effect=sqlite3.OperationalError("database is locked")))
     resp = client.get("/api/vivo/inicio")
@@ -371,6 +415,10 @@ def test_js_en_vivo_contrato():
     assert "location.protocol === 'file:'" in js  # las capturas abren el HTML guardado: no pide nada
     assert ".modal.show" in js and "menu_admin" in js
     assert "prefers-reduced-motion" in js
+    # Una respuesta vieja no pisa a una más nueva; la calculadora recalcula; "hace 89 s" -> "hace 2 min" no es otro
+    # aviso; al reemplazar un bloque entero, los avisos que ya estaban no se vuelven a anunciar.
+    assert "mio !== pedido" in js and "fb-vivo-aplicado" in js
+    assert "(\\s*(s|min|h|d)\\b)?" in js and "silenciarRepetidos(viejo, nuevo);" in js
     css = (STATIC / "styles" / "bb.css").read_text(encoding="utf-8")
     assert "@media (prefers-reduced-motion: reduce) { .bb-vivo-cambio { animation: none; } }" in css
     assert ".bb-vivo-envoltura { display: contents; }" in css

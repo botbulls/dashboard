@@ -72,7 +72,7 @@ def _macro(plantilla, nombre, *args):
 def _comun(pagina, coin_list, moneda_actual=None):
     """Lo de todas las páginas: menú izquierdo (monedas activas e inactivas, cuentas) y frescura de la base."""
     n = coin_list["totals"]["active"]
-    f = scraper.frescura(current_app.config["DATABASE"])
+    f = scraper.frescura_web(current_app.config)
     return {
         "ok": True,
         "pagina": pagina,
@@ -91,10 +91,15 @@ def _comun(pagina, coin_list, moneda_actual=None):
     }
 
 
+# Tope del inspect a Docker dentro de /api/vivo/inicio: muy por debajo de los 10 s con los que en_vivo.js corta el
+# pedido. Con el docker-proxy colgado, los números se actualizan igual y el estado del bot dice "Sin datos".
+BOT_DOCKER_TIMEOUT_S = 3
+
+
 def _bot():
     """Estado del bot como ``/api/bot/status``; un error de Docker no corta la actualización de los números."""
     try:
-        datos, http = bp.bot_status_payload()
+        datos, http = bp.bot_status_payload(docker_timeout=BOT_DOCKER_TIMEOUT_S)
     except Exception:  # defensivo: el resto del JSON sale igual
         log.exception("No se pudo leer el estado del bot para /api/vivo/inicio")
         return {"ok": False, "http": 500, "datos": {"error": "No se pudo leer el estado del bot."}}
@@ -192,9 +197,13 @@ def moneda(coin):
     v["precio"] = valor(precio, formato.num(precio))
     for k in range(3):
         v[f"objetivo_{k}"] = valor(pm["target"][k], formato.num(pm["target"][k]))
-    for k, position in enumerate(pm["allpositions"]):
-        v[f"pos_cantidad_{k}"] = valor(position[6], position[6])
-        v[f"pos_precio_{k}"] = valor(position[4], position[4])
+    # Las filas "Posición" de la calculadora (una, o dos en hedge). Si la posición se cerró, la primera va en 0 (es la
+    # que usa la cuenta del promedio): sin esto los campos se quedaban con la posición vieja.
+    posiciones = pm["allpositions"]
+    for k in range(max(len(posiciones), 1)):
+        cantidad, entrada = (posiciones[k][6], posiciones[k][4]) if k < len(posiciones) else (0, 0)
+        v[f"pos_cantidad_{k}"] = valor(cantidad, cantidad)
+        v[f"pos_precio_{k}"] = valor(entrada, entrada)
     out["bloques"]["bajada_moneda"] = _macro("_moneda.html", "bajada", lastupdate, precio)
     out["bloques"]["precio_tag"] = _macro("_moneda.html", "precio_tag", precio)
     out["tablas"] = {"orders": _macro("_moneda.html", "filas_ordenes", pm["allpositions"], pm["allorders"])}

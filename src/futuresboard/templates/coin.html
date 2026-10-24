@@ -293,6 +293,15 @@
                 }
             }
 
+            // en_vivo.js actualiza la posición y el precio sin recargar: el promedio y la cantidad para la distancia
+            // se recalculan con los valores nuevos (solo si ya se habían cargado los campos).
+            window.addEventListener('fb-vivo-aplicado', function () {
+                if (document.getElementById("positionsize")) {
+                    averageDown();
+                    calcTarget();
+                }
+            });
+
             $(document).ready( function () {
                 $('#orders').DataTable({
                     "paging": false,

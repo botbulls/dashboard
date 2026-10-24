@@ -9,6 +9,8 @@
    - tablas[id] -> filas de la DataTable #id por data-fila, sin perder orden, búsqueda ni scroll.
    - graficos -> window.BB.vivoGraficos (Inicio), con chart.update('none').
    - bot -> evento fb-bot-status (franja y menú), igual que el panel.
+   Después de aplicar avisa con el evento fb-vivo-aplicado (la calculadora de Moneda recalcula). Una respuesta que llega
+   después de otra más nueva se descarta (número de pedido). Datos viejos: además del color, una vez en el aviso.
    No pide nada al cargar (la página llega con los datos), usa setTimeout encadenado, se pausa con la pestaña oculta y
    refresca apenas vuelve, espera más entre reintentos si falla y, si la sesión venció (redirect al login o a
    Cloudflare Access), avisa y deja de pedir. No actualiza con un modal abierto ni con el foco en un campo del panel del
@@ -26,7 +28,7 @@
   var aviso = document.querySelector('[data-vivo-aviso]');
   var reducido = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : { matches: true };
 
-  var timer = null, relojTimer = null, enCurso = null, fallos = 0, parado = false;
+  var timer = null, relojTimer = null, enCurso = null, fallos = 0, parado = false, pedido = 0, datosViejos = false;
   var actualizadoEn = Date.now();  // la página llega con los datos recién leídos
   var edadDatos = entero(raiz.getAttribute('data-vivo-edad')), edadDatosEn = Date.now();
   var intervaloScraper = entero(raiz.getAttribute('data-vivo-intervalo'));
@@ -60,7 +62,14 @@
     var t = '· datos de hace ' + hace(edad);
     if (datosEl.textContent !== t) datosEl.textContent = t;
     // Datos viejos: el scraper no está actualizando la base (más de 3 vueltas, o 3 min sin dato del intervalo).
-    raiz.classList.toggle('is-viejo', edad > Math.max(3 * (intervaloScraper || 60), 180));
+    var esViejo = edad > Math.max(3 * (intervaloScraper || 60), 180);
+    raiz.classList.toggle('is-viejo', esViejo);
+    if (esViejo !== datosViejos) {
+      datosViejos = esViejo;
+      // Al cambiar (no cada segundo) va al aviso role="status": el color solo no le llega al lector de pantalla. Si
+      // el aviso está mostrando un error de conexión, ese tiene prioridad y este aparece con la próxima respuesta OK.
+      if (!raiz.classList.contains('is-error')) mostrarAviso(avisoOk(), false);
+    }
   }
 
   function arrancarReloj() {
@@ -89,9 +98,14 @@
     }
   }
 
+  function avisoOk() {
+    return datosViejos ? 'Los datos tienen más de ' + hace(Math.max(3 * (intervaloScraper || 60), 180)) +
+      ': el scraper no está actualizando la base.' : '';
+  }
+
   function estado(tipo) {
     raiz.classList.toggle('is-error', tipo === 'error' || tipo === 'sin-conexion');
-    if (tipo === 'ok') mostrarAviso('', false);
+    if (tipo === 'ok') mostrarAviso(avisoOk(), false);
     else if (tipo === 'sin-conexion') mostrarAviso('Sin conexión con el servidor, reintentando…', false);
     else if (tipo === 'error') mostrarAviso('No se pudo actualizar, reintentando…', false);
   }
@@ -180,7 +194,8 @@
   }
 
   function sinNumeros(el) {
-    return el.textContent.replace(/[\d.,]+/g, '#').replace(/\s+/g, ' ').trim();
+    // "hace 89 s" y "hace 2 min" son el mismo aviso: el número y su unidad de tiempo no cuentan.
+    return el.textContent.replace(/[\d.,]+(\s*(s|min|h|d)\b)?/g, '#').replace(/\s+/g, ' ').trim();
   }
 
   function mismaEtiqueta(a, b) {
@@ -214,6 +229,18 @@
     });
   }
 
+  function silenciarRepetidos(viejo, nuevo) {
+    var ya = {};
+    Array.prototype.forEach.call(viejo.querySelectorAll('[role="alert"], [role="status"], [data-vivo-rol]'),
+      function (a) { ya[sinNumeros(a)] = true; });
+    Array.prototype.forEach.call(nuevo.querySelectorAll('[role="alert"], [role="status"]'), function (a) {
+      if (ya[sinNumeros(a)]) {
+        a.setAttribute('data-vivo-rol', a.getAttribute('role'));
+        a.removeAttribute('role');
+      }
+    });
+  }
+
   function parchear(viejo, nuevo) {
     if (firma(viejo) === firma(nuevo)) return;
     // Un aviso (role alert/status) que sigue diciendo lo mismo y solo cambia un número ("hace 12 min") ya se anunció
@@ -238,6 +265,7 @@
     }
     if (viejo.contains(document.activeElement)) return;  // no se le saca el foco a nadie: se cambia en la próxima vuelta
     conservarDetalles(viejo, nuevo);
+    silenciarRepetidos(viejo, nuevo);
     viejo.parentNode.replaceChild(nuevo, viejo);
   }
 
@@ -347,6 +375,7 @@
       edadDatosEn = Date.now();
       intervaloScraper = typeof d.datos.intervalo_segundos === 'number' ? d.datos.intervalo_segundos : intervaloScraper;
     }
+    seguro(function () { window.dispatchEvent(new CustomEvent('fb-vivo-aplicado', { detail: { pagina: d.pagina } })); });
   }
 
   function programar(ms) {
@@ -368,6 +397,8 @@
       programar(REINTENTO_BLOQUEADO);
       return;
     }
+    if (enCurso) enCurso.abort();  // pageshow/visibilitychange con un pedido en vuelo: gana el nuevo
+    var mio = ++pedido;
     var ctrl = window.AbortController ? new AbortController() : null;
     var corte = setTimeout(function () { if (ctrl) ctrl.abort(); }, TIEMPO_MAX);
     enCurso = ctrl;
@@ -390,6 +421,7 @@
       })
       .then(function (d) {
         clearTimeout(corte);
+        if (mio !== pedido) return;  // llegó después de un pedido más nuevo: se descarta
         enCurso = null;
         if (parado) return;
         if (bloqueado()) {  // se abrió un modal mientras llegaba: se descarta y se vuelve a pedir en un rato
@@ -405,6 +437,7 @@
       })
       .catch(function (e) {
         clearTimeout(corte);
+        if (mio !== pedido) return;  // el pedido viejo que se abortó al salir uno nuevo
         enCurso = null;
         if (e && e.sesion) {
           sesionVencida();
