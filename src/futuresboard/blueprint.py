@@ -125,7 +125,6 @@ def get_coins():
     balance = db.query("SELECT totalWalletBalance FROM account WHERE AID = 1", one=True)
 
     active_symbols = []
-    pbr_long, pbr_short = 0.0, 0.0
 
     for position in all_active_positions:
         if position[0] not in active_symbols:
@@ -133,6 +132,7 @@ def get_coins():
         active_symbols.append(position[0])
 
         buy_long, sell_long, buy_short, sell_short,  = 0, 0, 0, 0
+        pbr_long, pbr_short = 0.0, 0.0
 
         buyorders_long = db.query(
             'SELECT COUNT(OID) FROM orders WHERE symbol = ? AND side = "BUY" AND positionSide = "LONG"',
@@ -158,7 +158,9 @@ def get_coins():
             one=True,
         )
 
-        coins["active"][position[0]] = [buy_long, sell_long, pbr_long, buy_short, sell_short, pbr_short]
+        # En hedge mode el mismo símbolo llega en dos filas (LONG y SHORT): se inicializa una sola vez y se acumula.
+        if position[0] not in coins["active"]:
+            coins["active"][position[0]] = [0, 0, 0.0, 0, 0, 0.0]
         if position[2] == 'LONG':
             pbr_long = round(calc_pbr(position[3], position[1], position[2], float(balance[0])), 2)
             pbr_short = 0.0
