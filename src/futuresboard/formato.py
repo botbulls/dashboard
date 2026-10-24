@@ -17,10 +17,15 @@ texto ya formateado: ``"5.416,81"`` leído como número daría 5,41681.
 """
 from __future__ import annotations
 
+import functools
+import hashlib
+import os
 import re
 from decimal import ROUND_HALF_EVEN
 from decimal import Decimal
 from decimal import InvalidOperation
+
+from flask import url_for
 
 MENOS = "−"
 NBSP = " "
@@ -138,7 +143,27 @@ def mes_es(valor):
 FILTROS = {"num": num, "usd": usd, "pct": pct, "tendencia": tendencia, "mes_es": mes_es}
 
 
+@functools.lru_cache(maxsize=None)
+def _huella(carpeta, archivo):
+    """Primeros 10 hex del sha256 del archivo estático, o ``None`` si no existe (se calcula una vez por proceso)."""
+    try:
+        with open(os.path.join(carpeta, archivo), "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()[:10]
+    except OSError:
+        return None
+
+
 def registrar(app) -> None:
-    """Registra los filtros en la app de Flask (presentación: no cambian rutas ni datos)."""
+    """Registra los filtros en la app de Flask (presentación: no cambian rutas ni datos).
+
+    También ``estatico(archivo)``: la URL de un estático con ``?v=<huella>``, para que el navegador (o una caché
+    intermedia) no mezcle HTML nuevo con CSS/JS viejos después de un deploy.
+    """
     for nombre, filtro in FILTROS.items():
         app.add_template_filter(filtro, nombre)
+
+    def estatico(archivo):
+        v = _huella(app.static_folder, archivo)
+        return url_for("static", filename=archivo, v=v) if v else url_for("static", filename=archivo)
+
+    app.add_template_global(estatico, "estatico")

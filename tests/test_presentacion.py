@@ -197,13 +197,33 @@ def test_sidebar_con_links_reales_y_seccion_activa(client, con_datos, url, secci
         assert f'href="{destino}"' in nav
 
 
-def test_monedas_activas_con_encabezados_y_crudo(client, con_datos):  # noqa: F811
+def test_monedas_activas_legibles_con_crudo(client, con_datos):  # noqa: F811
     html = _get(client, "/")
-    tabla = html.split('id="activecoins-collapse"', 1)[1].split("</table>", 1)[0]
-    for th in ("Par", "PBR L", "C/V L", "PBR S", "C/V S"):
-        assert f">{th}</" in tabla
-    assert "<caption>" in tabla and "<tfoot>" in tabla and ">Total<" in tabla
-    assert re.search(r'<td data-value="0\.0+">0,0+</td>', tabla)
+    lista = html.split('id="activecoins-collapse"', 1)[1].split("</ul>", 1)[0]
+    # Sin siglas: par, exposición en % (crudo = pbr en data-value) y órdenes en palabras; cada fila abre la moneda.
+    for sigla in ("PBR L", "C/V L", "PBR S", "C/V S"):
+        assert sigla not in lista
+    assert ">Exposición<" in lista or "Exposición</span>" in html.split('id="activecoins-collapse"', 1)[1]
+    filas = re.findall(r'<a class="bb-moneda" href="/coins/([A-Z0-9]+)"', lista)
+    assert filas, lista[:500]
+    assert re.search(r'class="bb-moneda__expo" data-value="[-0-9.]+"><span class="bb-sr">exposición long </span>[0-9.]+\u00a0%', lista)
+    assert re.search(r'\d+ (compra|compras) · \d+ (venta|ventas)', lista)
+    assert "bb-moneda--total" in lista and ">Total<" in lista
+    # Sin shorts en los datos, no aparece la línea de short.
+    assert "bb-moneda__short" not in lista
+
+
+def test_estaticos_con_huella_de_version(client, con_datos):  # noqa: F811
+    html = _get(client, "/")
+    for archivo in ("styles/bb.css", "styles/dashboard.css", "js/formato.js"):
+        assert re.search(rf'/static/{re.escape(archivo)}\?v=[0-9a-f]{{10}}"', html), archivo
+
+
+def test_menu_del_celu_con_boton_de_cerrar(client, con_datos):  # noqa: F811
+    html = _get(client, "/")
+    aside = html.split('id="sidebar"', 1)[1].split("</aside>", 1)[0]
+    assert 'id="bbCerrarMenu"' in aside and 'aria-label="Cerrar el menú"' in aside
+    assert 'tabindex="-1"' in html.split('id="sidebar"', 1)[0][-200:] + html.split('id="sidebar"', 1)[1][:40]
 
 
 @pytest.mark.parametrize("url,hooks", [
