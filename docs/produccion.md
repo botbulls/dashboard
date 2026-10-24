@@ -118,6 +118,7 @@ lector parados, `python3 -c "import sqlite3; c=sqlite3.connect('data/futures.db'
 | `GET /api/bot/health` | login | Estado detallado con `status` `ok`/`warn`/`critical`. Siempre HTTP 200; el estado va en el JSON. |
 | `GET /metrics` | login **o** `Authorization: Bearer $FUTURESBOARD_METRICS_TOKEN` | Formato Prometheus text. Sin sesión ni token: 401. El token no se acepta por query string. |
 | `GET /api/scraper/latido` | login | Edad de los datos (`edad_segundos`, `at`, `intervalo_segundos`, `fuente`: `latido`/`scrape_state`). Solo lee dos JSON junto a la DB; liviano para consultarlo seguido. |
+| `GET /api/vivo/inicio`, `/api/vivo/posiciones`, `/api/vivo/moneda/<par>` | login | Los números de cada página para actualizarlos sin recargar (cada 15 s por pestaña abierta). Ver `docs/en-vivo.md`. |
 
 ### Qué mide `/api/bot/health`
 

@@ -266,7 +266,8 @@
                 var positionvalue = document.getElementById("positionvalue").value;
                 var customaway = document.getElementById("customaway").value;
                 if (customaway.length > 0){
-                    var markprice = {{ markprice }};
+                    // El precio actual de la tabla (lo actualiza en_vivo.js), no el del momento en que cargó la página.
+                    var markprice = document.querySelector('[data-vivo="precio"]').getAttribute('data-value');
                     positionsize = parseFloat(positionsize);
                     positionvalue = parseFloat(positionvalue);
                     markprice = parseFloat(markprice);
@@ -299,6 +300,8 @@
                     "order": [],
                     "info": false,
                     "language": window.BB.dataTablesEs,
+                    // Cantidad y precio ordenan por el crudo también con filas que llegan después (en_vivo.js).
+                    "columnDefs": window.BB.columnasDataOrder(1, 2),
                 });
             } );
 

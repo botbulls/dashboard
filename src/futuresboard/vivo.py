@@ -128,6 +128,8 @@ def inicio():
     v["balance"] = valor(balance, formato.usd(balance))
     v["upnl"] = valor(upnl, formato.usd(upnl, signo=True))
     v["fuente"] = valor(ctx["fuente_texto"], ctx["fuente_texto"])
+    # En / sin fechas el período es la semana en curso: el lunes cambia y el subtítulo tiene que acompañar.
+    v["periodo"] = valor(f"{ctx['startdate']}/{ctx['enddate']}", f"del {ctx['startdate']} al {ctx['enddate']}")
     v["mes_nombre"] = valor(t[8], formato.mes_es(t[8]))
     v["monedas_movimiento"] = valor(t[10], f"{t[10]} {'moneda' if t[10] == 1 else 'monedas'} con movimiento")
     b = out["bloques"]

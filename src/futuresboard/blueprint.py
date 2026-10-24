@@ -285,6 +285,30 @@ def _rescate_resumen():
     return resumen_rescate.tarjetas(state_dir(current_app.config))
 
 
+def _hace(segundos) -> str:
+    """'38 s', '12 min', '3 h', '2 d' (mismos cortes que resumen_rescate.antiguedad)."""
+    s = max(0, int(segundos))
+    if s < 90:
+        return f"{s} s"
+    if s < 90 * 60:
+        return f"{s // 60} min"
+    if s < 48 * 3600:
+        return f"{s // 3600} h"
+    return f"{s // 86400} d"
+
+
+def _vivo_ctx(url: str) -> dict:
+    """Lo que necesita el indicador "en vivo" de base.html: a dónde pide en_vivo.js y la edad de los datos al render."""
+    f = scraper.frescura(current_app.config["DATABASE"])
+    edad = f["edad_segundos"]
+    return {
+        "url": url,
+        "edad": edad,
+        "intervalo": f["intervalo_segundos"],
+        "texto": "Sin latido del scraper" if edad is None else f"Datos de hace {_hace(edad)}",
+    }
+
+
 def _cuenta(balance_db: float, upnl_db: float) -> dict:
     """Balance y PnL no realizado de Inicio con su fuente: la lectura del rescate si es fresca, si no la base."""
     frescura = scraper.frescura(current_app.config["DATABASE"])
@@ -509,7 +533,12 @@ def index_page():
 
     # Semana en curso; /api/vivo/inicio sin fechas también usa la semana en curso (cambia el lunes sin recargar).
     startdate, enddate = ranges[2][0], ranges[2][1]
-    return render_template("home.html", timeframe="week", **_datos_inicio(startdate, enddate))
+    return render_template(
+        "home.html",
+        timeframe="week",
+        vivo=_vivo_ctx(url_for("vivo.inicio")),
+        **_datos_inicio(startdate, enddate),
+    )
 
 
 @app.route("/dashboard/<start>/<end>", methods=["GET"])
@@ -546,7 +575,11 @@ def dashboard_page(start, end):
         startdate, enddate = ranges[2][0], ranges[2][1]
         return redirect(url_for("main.dashboard_page", start=startdate, end=enddate))
 
-    return render_template("home.html", **_datos_inicio(startdate, enddate))
+    return render_template(
+        "home.html",
+        vivo=_vivo_ctx(url_for("vivo.inicio", start=startdate, end=enddate)),
+        **_datos_inicio(startdate, enddate),
+    )
 
 
 def _datos_posiciones() -> dict:
@@ -652,6 +685,7 @@ def positions_page():
         "positions.html",
         coin_list=get_coins(),
         custom=current_app.config["CUSTOM"],
+        vivo=_vivo_ctx(url_for("vivo.posiciones")),
         **_datos_posiciones(),
     )
 
@@ -923,6 +957,7 @@ def coin_page(coin):
         timeranges=ranges,
         custom=current_app.config["CUSTOM"],
         target=pm["target"],
+        vivo=_vivo_ctx(url_for("vivo.moneda", coin=coin)),
         candlesticks=sticks,
     )
 
@@ -1143,6 +1178,7 @@ def coin_page_timeframe(coin, start, end):
         timeranges=ranges,
         custom=current_app.config["CUSTOM"],
         target=pm["target"],
+        vivo=_vivo_ctx(url_for("vivo.moneda", coin=coin)),
         candlesticks=sticks,
     )
 

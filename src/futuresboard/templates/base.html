@@ -153,6 +153,7 @@
             <title>{% block title %}{% endblock %} - {{ custom['NAVBAR_TITLE'] }}</title>
         {% endblock %}
         <script src="{{ estatico('js/formato.js') }}"></script>
+        <script src="{{ estatico('js/en_vivo.js') }}" defer></script>
         <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.6.0/chart.min.js" integrity="sha512-GMGzUEevhWh8Tc/njS0bDpwgxdCJLQBWG3Z2Ct+JGOpVnEmjvNx6ts4v6A2XJf1HOrtOsfhv3hBKpK9kE5z8AQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
         <script src="{{ estatico('js/chartjs-chart-financial.js') }}" type="text/javascript"></script>
         <script src="{{ estatico('js/hammer.min.js') }}" type="text/javascript"></script>
@@ -246,6 +247,16 @@
                         <div class="bb-encabezado__texto">
                             <h1>{% block titulo_pagina %}{{ self.title() }}{% endblock %}</h1>
                             {% block bajada %}{% endblock %}
+                            {#- En vivo (static/js/en_vivo.js): solo en las páginas que pasan `vivo` (Inicio, Posiciones, Moneda).
+                                El texto que sale del server es el de sin JS / capturas; el JS lo actualiza cada segundo. -#}
+                            {% if vivo is defined and vivo %}
+                                <div id="bbVivo" class="bb-vivo" data-vivo-url="{{ vivo.url }}" data-vivo-edad="{{ '' if vivo.edad is none else vivo.edad }}" data-vivo-intervalo="{{ vivo.intervalo or '' }}">
+                                    <span class="bb-vivo__punto" aria-hidden="true"></span>
+                                    <span data-vivo-reloj></span>
+                                    <span data-vivo-datos title="Edad del último dato del scraper">{{ vivo.texto }}</span>
+                                </div>
+                                <div class="bb-vivo__aviso" role="status" data-vivo-aviso></div>
+                            {% endif %}
                         </div>
                         <div class="bb-acciones">
                             {% block acciones %}{% endblock %}

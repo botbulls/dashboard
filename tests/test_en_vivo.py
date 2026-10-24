@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import pathlib
 import re
 import sqlite3
 import time
@@ -25,6 +26,7 @@ from test_bot_control import client  # noqa: F401
 from test_presentacion import con_datos  # noqa: F401
 
 M = "−"
+STATIC = pathlib.Path(__file__).resolve().parents[1] / "src" / "futuresboard" / "static"
 URLS = {"/": "/api/vivo/inicio", "/positions": "/api/vivo/posiciones", "/coins/BTCUSDT": "/api/vivo/moneda/BTCUSDT"}
 # Claves del JSON que son solo para quien consuma la API: en la página el % va dentro de un bloque (con su ícono).
 SOLO_API = {"hoy_pct", "semana_pct", "mes_pct", "total_pct"}
@@ -174,6 +176,7 @@ def test_inicio_trae_graficos_bot_y_fuentes(client, con_datos):  # noqa: F811
 def test_inicio_con_periodo_y_fechas_invalidas(client, con_datos):  # noqa: F811
     d = _get(client, "/api/vivo/inicio?start=2020-01-01&end=2030-12-31").get_json()
     assert d["periodo"] == {"start": "2020-01-01", "end": "2030-12-31"}
+    assert d["valores"]["periodo"]["texto"] == "del 2020-01-01 al 2030-12-31"
     assert d["valores"]["hoy"]["crudo"] == "1233.81"
     for q in ("?start=2020-01-01", "?end=2020-01-01", "?start=ayer&end=hoy"):
         resp = client.get("/api/vivo/inicio" + q)
@@ -250,6 +253,16 @@ def test_json_igual_a_lo_que_pinta_la_pagina_en_las_dos_direcciones(client, con_
         assert re.findall(r'data-fila="([^"]+)"', filas), (pagina, tabla)
 
 
+def test_dashboard_con_fechas_pide_su_periodo(client, con_datos):  # noqa: F811
+    html = _get(client, "/dashboard/2020-01-01/2030-12-31").get_data(as_text=True)
+    assert 'data-vivo-url="/api/vivo/inicio?start=2020-01-01&amp;end=2030-12-31"' in html
+    d = _get(client, "/api/vivo/inicio?start=2020-01-01&end=2030-12-31").get_json()
+    h = _hooks(html)
+    assert set(h.bloques) == set(d["bloques"])
+    for clave, fragmento in d["bloques"].items():
+        assert _norm(fragmento) == _norm(h.bloques[clave]), clave
+
+
 def test_valores_cambian_con_la_base(client, con_datos):  # noqa: F811
     antes = _get(client, "/api/vivo/inicio").get_json()
     with sqlite3.connect(str(con_datos.config["DATABASE"])) as con:
@@ -314,3 +327,58 @@ def test_lectura_sin_wallet_usa_solo_el_upnl(client, con_datos):  # noqa: F811
     d = _get(client, "/api/vivo/inicio").get_json()
     assert (d["valores"]["balance"]["crudo"], d["valores"]["upnl"]["crudo"]) == ("5416.80", "-7.10")
     assert d["valores"]["fuente"]["texto"] == "Balance: base del scraper · PnL: lectura del rescate"
+
+
+# ---------------------------------------------------------------- hooks del JS en las páginas
+
+@pytest.mark.parametrize("pagina", list(URLS))
+def test_paginas_en_vivo_tienen_el_indicador_y_el_script(client, con_datos, pagina):  # noqa: F811
+    html = _get(client, pagina).get_data(as_text=True)
+    assert f'id="bbVivo" class="bb-vivo" data-vivo-url="{URLS[pagina]}"' in html
+    assert "data-vivo-reloj" in html and "data-vivo-datos" in html
+    # Un solo aviso de estado (role="status") para conexión / sesión; el reloj que cambia cada segundo no es live.
+    assert html.count("data-vivo-aviso") == 1
+    assert re.search(r'<div class="bb-vivo__aviso" role="status" data-vivo-aviso></div>', html)
+    vivo = html.split('id="bbVivo"', 1)[1].split("</div>", 1)[0]
+    assert "aria-live" not in vivo and "role=" not in vivo
+    assert re.search(r'<script src="/static/js/en_vivo\.js\?v=[0-9a-f]{10}" defer></script>', html)
+
+
+@pytest.mark.parametrize("url", ["/history", "/projection", "/rescate", "/settings"])
+def test_las_demas_paginas_no_piden_en_vivo(client, con_datos, url):  # noqa: F811
+    html = _get(client, url).get_data(as_text=True)
+    assert 'id="bbVivo"' not in html
+
+
+def test_edad_de_los_datos_del_latido_en_la_pagina(client, con_datos):  # noqa: F811
+    from futuresboard import scraper
+
+    scraper.latido_path(con_datos.config["DATABASE"]).write_text(
+        json.dumps({"at": time.time() - 42, "intervalo": 60, "vuelta": 1}), encoding="utf-8")
+    html = _get(client, "/positions").get_data(as_text=True)
+    assert re.search(r'data-vivo-edad="4[23]" data-vivo-intervalo="60"', html)
+    assert re.search(r"Datos de hace 4[23] s", html)
+    d = _get(client, "/api/vivo/posiciones").get_json()
+    assert d["datos"]["fuente"] == "latido" and d["datos"]["intervalo_segundos"] == 60
+
+
+def test_js_en_vivo_contrato():
+    js = (STATIC / "js" / "en_vivo.js").read_text(encoding="utf-8")
+    # setTimeout encadenado (no setInterval para pedir), pausa con la pestaña oculta, sesión vencida por redirect.
+    assert "setTimeout(tick" in js and "setInterval(tick" not in js
+    assert "visibilitychange" in js and "document.hidden" in js
+    assert "redirect: 'manual'" in js and "opaqueredirect" in js
+    assert "location.protocol === 'file:'" in js  # las capturas abren el HTML guardado: no pide nada
+    assert ".modal.show" in js and "menu_admin" in js
+    assert "prefers-reduced-motion" in js
+    css = (STATIC / "styles" / "bb.css").read_text(encoding="utf-8")
+    assert "@media (prefers-reduced-motion: reduce) { .bb-vivo-cambio { animation: none; } }" in css
+    assert ".bb-vivo-envoltura { display: contents; }" in css
+
+
+def test_home_actualiza_graficos_sin_recrearlos(client, con_datos):  # noqa: F811
+    html = _get(client, "/").get_data(as_text=True)
+    assert "window.BB.vivoGraficos = function (g)" in html and "c.update('none')" in html
+    # El poll propio del estado del bot (30 s) se apaga cuando en_vivo.js está activo: no se le pide a Docker dos veces.
+    assert "if (!vivoActivo) intervalo = setInterval(updateBotStatus, 30000);" in html
+    assert "window.addEventListener('fb-vivo-activo'" in html

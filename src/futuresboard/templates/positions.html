@@ -41,6 +41,9 @@
                 // La tabla scrollea de costado dentro de su caja (primera columna fija); el buscador queda afuera.
                 "dom": '<"bb-dt-arriba"f><"bb-tabla-scroll"t><"bb-dt-abajo"i>',
                 "language": window.BB.dataTablesEs,
+                // Orden por el crudo de data-order en las columnas numéricas también si la tabla arranca vacía y las
+                // filas llegan después por en_vivo.js (DataTables solo detecta data-order en la primera fila).
+                "columnDefs": window.BB.columnasDataOrder(2, 14),
             });
         } );
 

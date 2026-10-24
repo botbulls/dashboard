@@ -97,7 +97,7 @@
     {# Gráficos del período: un eje por gráfico (antes ganancia y balance compartían dos escalas). Los datos son los
        arrays crudos de Jinja; el formato es-AR va solo en ejes, tooltips y etiquetas (BB.fmt). #}
     <section class="bb-seccion" aria-labelledby="bbTituloPeriodo">
-        <h2 class="bb-seccion__titulo" id="bbTituloPeriodo">Período <span class="bb-seccion__sub">del {{ startdate }} al {{ enddate }}</span>
+        <h2 class="bb-seccion__titulo" id="bbTituloPeriodo">Período <span data-vivo="periodo" class="bb-seccion__sub">del {{ startdate }} al {{ enddate }}</span>
             <a class="bb-seccion__mas" href="{{ url_for('main.projection_page') }}">Proyección</a></h2>
         <div class="bb-graficos">
             <div class="card bb-grafico col-a">
@@ -183,6 +183,7 @@
 Chart.register(ChartDataLabels);
 
 // Gráficos de la home: un eje por gráfico, colores leídos de los tokens (se recrean al cambiar el tema).
+// en_vivo.js cambia estos arrays en el lugar (BB.vivoGraficos): un cambio de tema los vuelve a dibujar con lo último.
 const DIAS = {{ data[0][1] | safe }};
 const DIARIO = {{ data[0][0] }};        /* data[0][0]: ganancia por día, crudo */
 const BALANCE = {{ data[2][0] }};       /* data[2][0]: balance al cierre, crudo */
@@ -279,6 +280,24 @@ function graphClickEvent(event, array){
     // fb-theme-changed también llega cuando cambia el tema del sistema en modo automático.
     window.addEventListener('fb-theme-changed', pintar);
 
+    // En vivo: series nuevas del período (JSON de /api/vivo/inicio). Sin animación ni recrear los gráficos.
+    function reemplazar(arr, nuevo) { arr.length = 0; Array.prototype.push.apply(arr, nuevo || []); }
+    window.BB.vivoGraficos = function (g) {
+        if (!g || !g.diario || !g.balance || !g.por_moneda) return;
+        reemplazar(DIAS, g.diario.dias); reemplazar(DIARIO, g.diario.valores);
+        reemplazar(BALANCE_DIAS, g.balance.dias); reemplazar(BALANCE, g.balance.valores);
+        reemplazar(data.labels, g.por_moneda.monedas); reemplazar(POR_MONEDA, g.por_moneda.valores);
+        const lienzo = document.getElementById('barChartLienzo');
+        if (lienzo && g.por_moneda.alto) lienzo.style.height = g.por_moneda.alto + 'px';
+        const T = f.token, gana = T('--bb-gain-mark'), pierde = T('--bb-loss-mark');
+        const porSigno = (vs) => vs.map((v) => (v < 0 ? pierde : gana));
+        const [diario, balance, moneda] = graficos;
+        if (diario) { diario.data.labels = f.dias(DIAS); diario.data.datasets[0].backgroundColor = porSigno(DIARIO); }
+        if (balance) balance.data.labels = f.dias(BALANCE_DIAS);
+        if (moneda) { moneda.data.labels = data.labels; moneda.data.datasets[0].backgroundColor = porSigno(POR_MONEDA); }
+        graficos.forEach((c) => { c.update('none'); });
+        if (moneda) moneda.resize();
+    };
 })();
 
 // Bot status (passivbot) - no bloquea la carga de la pagina
@@ -382,8 +401,19 @@ function graphClickEvent(event, array){
             });
     }
 
+    // Con en_vivo.js activo el estado llega en su JSON cada 15 s (evento fb-bot-status) y no se pide aparte cada 30 s.
+    let vivoActivo = false, intervalo = null;
+    window.addEventListener('fb-vivo-activo', () => {
+        vivoActivo = true;
+        if (intervalo) { clearInterval(intervalo); intervalo = null; }
+    });
+    window.addEventListener('fb-bot-status-error', () => {
+        setBadge('Sin datos', 'bg-secondary', 'fas fa-question-circle');
+        setModal('<p class="text-danger">No se pudo leer el estado del bot. Se reintenta en la próxima actualización.</p>');
+    });
+
     function initBotStatus() {
-        const start = () => { updateBotStatus(); setInterval(updateBotStatus, 30000); };
+        const start = () => { updateBotStatus(); if (!vivoActivo) intervalo = setInterval(updateBotStatus, 30000); };
         if (window.requestIdleCallback) {
             requestIdleCallback(start, { timeout: 2000 });
         } else {
