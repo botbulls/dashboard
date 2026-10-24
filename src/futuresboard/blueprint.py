@@ -29,6 +29,7 @@ from futuresboard import jobs
 from futuresboard import perfiles
 from futuresboard import rescate
 from futuresboard import resumen_rescate
+from futuresboard import scraper
 from futuresboard import telegram_notify
 from futuresboard import db
 from futuresboard.config import BINANCE_FUTURES_MAINNET_URL
@@ -284,6 +285,32 @@ def _rescate_resumen():
     return resumen_rescate.tarjetas(state_dir(current_app.config))
 
 
+def _cuenta(balance_db: float, upnl_db: float) -> dict:
+    """Balance y PnL no realizado de Inicio con su fuente: la lectura del rescate si es fresca, si no la base."""
+    frescura = scraper.frescura(current_app.config["DATABASE"])
+    base = {"origen": "base", "at": frescura["at"], "edad_segundos": frescura["edad_segundos"]}
+    fuentes = {"balance": dict(base), "upnl": dict(base)}
+    balance, upnl = balance_db, upnl_db
+    lectura = resumen_rescate.lectura_cuenta(state_dir(current_app.config))
+    if lectura:
+        r = {"origen": "rescate", "at": lectura["at"], "edad_segundos": lectura["edad_segundos"]}
+        if lectura["wallet"] is not None:
+            balance = float(lectura["wallet"])
+            fuentes["balance"] = {**r, "derivado": lectura["wallet_derivada"]}
+        if lectura["upnl"] is not None:
+            upnl = float(lectura["upnl"])
+            fuentes["upnl"] = dict(r)
+    return {"balance": balance, "upnl": upnl, "fuentes": fuentes}
+
+
+def texto_fuente(fuentes: dict) -> str:
+    nombre = {"base": "base del scraper", "rescate": "lectura del rescate"}
+    b, u = fuentes["balance"]["origen"], fuentes["upnl"]["origen"]
+    if b == u:
+        return f"Balance y PnL: {nombre[b]}"
+    return f"Balance: {nombre[b]} · PnL: {nombre[u]}"
+
+
 def alto_grafico_monedas(n: int) -> int:
     """Alto en px del gráfico de ganancia por moneda (una barra de 34 px por moneda, mínimo 240)."""
     return max(240, 56 + 34 * n)
@@ -292,8 +319,9 @@ def alto_grafico_monedas(n: int) -> int:
 def _datos_inicio(startdate: str, enddate: str) -> dict:
     """Contexto de home.html para el período [startdate, enddate] (fechas ISO que ``fromisoformat`` acepta).
 
-    Lo usan las dos rutas de Inicio (``/``, con la semana en curso, y ``/dashboard/<a>/<b>``); antes eran dos copias
-    de las mismas cuentas.
+    Lo usan las dos rutas de Inicio (``/``, con la semana en curso, y ``/dashboard/<a>/<b>``) y ``/api/vivo/inicio``:
+    lo que actualiza el JS sale de las mismas cuentas que la página. Balance y PnL no realizado salen de la lectura
+    del rescate si es fresca (ver ``_cuenta``); los % del balance y la curva de balance usan ese mismo balance.
     """
     ranges = timeranges()
     start = (
@@ -380,6 +408,8 @@ def _datos_inicio(startdate: str, enddate: str) -> dict:
 
     # Sin fila de account o con balance NULL se muestra como balance 0 (los % quedan en "-").
     balance = float(balance[0]) if balance is not None and balance[0] is not None else 0.0
+    cuenta = _cuenta(balance, zero_value(unrealized[0]))
+    balance = cuenta["balance"]
 
     temptotal: tuple[list[float], list[float]] = ([], [])
 
@@ -421,7 +451,7 @@ def _datos_inicio(startdate: str, enddate: str) -> dict:
 
     for row in all_fees:
         fees[row[1]] = format_dp(abs(zero_value(row[0])), 4)
-    pnl = [format_dp(zero_value(unrealized[0])), format_dp(balance)]
+    pnl = [format_dp(cuenta["upnl"]), format_dp(balance)]
     totals = [
         format_dp(zero_value(total[0])),
         format_dp(zero_value(today[0])),
@@ -445,6 +475,8 @@ def _datos_inicio(startdate: str, enddate: str) -> dict:
         "timeranges": ranges,
         "custom": current_app.config["CUSTOM"],
         "rescate_resumen": _rescate_resumen(),
+        "fuentes": cuenta["fuentes"],
+        "fuente_texto": texto_fuente(cuenta["fuentes"]),
         "alto_por_moneda": alto_grafico_monedas(len(by_symbol[0])),
     }
 
@@ -475,6 +507,7 @@ def index_page():
             except Exception:
                 pass
 
+    # Semana en curso; /api/vivo/inicio sin fechas también usa la semana en curso (cambia el lunes sin recargar).
     startdate, enddate = ranges[2][0], ranges[2][1]
     return render_template("home.html", timeframe="week", **_datos_inicio(startdate, enddate))
 
@@ -517,7 +550,8 @@ def dashboard_page(start, end):
 
 
 def _datos_posiciones() -> dict:
-    """Posiciones abiertas con sus órdenes y el mark price público (lo que pinta /positions)."""
+    """Posiciones abiertas con sus órdenes y el mark price público: lo que pintan /positions y
+    /api/vivo/posiciones (mismas cuentas en los dos)."""
     coins = get_coins()
     positions = {}
 
@@ -623,10 +657,10 @@ def positions_page():
 
 
 def _posicion_moneda(coin) -> dict:
-    """Posición, órdenes y precio de una moneda (las dos rutas de /coins/<coin> tenían una copia cada una).
+    """Posición, órdenes y precio de una moneda: lo que pintan /coins/<coin> y /api/vivo/moneda/<coin>.
 
-    Lee la DB y el mark price público de Binance (``premiumIndex?symbol=``, peso 1); las velas quedan en la ruta.
-    ``coin`` tiene que estar validada (activa o inactiva) antes: va pegada en la URL.
+    Lee la DB y el mark price público de Binance (``premiumIndex?symbol=``, peso 1). Las velas no: son 4 pedidos
+    de 1000 velas y quedan solo en la página. ``coin`` tiene que estar validada (activa o inactiva) antes.
     """
     unrealized = db.query(
         "SELECT SUM(unrealizedProfit) FROM positions WHERE symbol = ?",
@@ -1437,7 +1471,7 @@ def _run_bot_action(action: str, params: dict, validate, work):
 
 
 def bot_status_payload() -> tuple[dict, int]:
-    """Estado del bot y HTTP status (lo que devuelve /api/bot/status)."""
+    """Estado del bot y HTTP status: lo devuelven /api/bot/status y, dentro de su JSON, /api/vivo/inicio."""
     settings = bot_control.Settings()
     try:
         out = bot_control.get_status(settings)

@@ -84,6 +84,7 @@
                         <span data-vivo="upnl" class="bb-num" data-value="{{ totals[7][0] }}">{{ totals[7][0]|usd(signo=True) }}</span>
                         {{ i.upnl_var(totals[7]) }}
                     </div>
+                    <span data-vivo="fuente" class="bb-hero__fuente">{{ fuente_texto }}</span>
                 </div>
             </a>
             {{ kpi("hoy", "Hoy", totals[1], totals[6][0], url_for("main.dashboard_page", start=timeranges[0][0], end=timeranges[0][1])) }}

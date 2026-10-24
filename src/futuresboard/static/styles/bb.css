@@ -373,6 +373,7 @@ a.bb-moneda { transition: background-color var(--bb-dur) var(--bb-ease); }
 .bb-hero .bb-kpi__valor { font-size: var(--bb-fs-40); letter-spacing: -0.01em; }
 .bb-hero__upnl { display: flex; align-items: baseline; gap: var(--bb-s2); flex-wrap: wrap; margin-top: var(--bb-s2); padding-top: var(--bb-s2); border-top: 1px solid var(--bb-border); }
 .bb-hero__upnl .bb-num { font-weight: 600; }
+.bb-hero__fuente { display: block; margin-top: var(--bb-s1); font-size: var(--bb-fs-12); color: var(--bb-text-3); }
 @media (max-width: 1199.98px) {
   .bb-kpi { grid-column: span 3; }
   .bb-kpi.bb-hero { grid-column: span 12; }
