@@ -255,4 +255,25 @@ def test_escritor_y_lector_concurrentes_sin_database_is_locked(tmp_path):
     assert esc["vueltas"] > 0 and lec["lecturas"] > 0, (esc, lec)
     assert esc["locked"] == 0, esc
     assert lec["locked"] == 0, lec
+    # El reemplazo de posiciones es atómico: el lector nunca ve la tabla vacía.
+    assert lec["sin_posiciones"] == 0, lec
     assert _journal_mode(path) == "wal"
+
+
+def test_reemplazo_de_posiciones_y_ordenes_es_atomico(tmp_path):
+    path = tmp_path / "futures.db"
+    _db_poblada(path, filas=10)
+    assert db.ensure_wal(path) == "wal"
+    lector = db.connect(path)
+
+    with scraper.create_connection(path) as conn:
+        scraper.delete_all_orders(conn)
+        scraper.delete_all_positions(conn)
+        # A mitad del reemplazo otro proceso sigue viendo los datos anteriores...
+        assert lector.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 300
+        scraper.create_position(conn, (0.5, 10, 2.0, 1.0, "BTCUSDT", "LONG"))
+        conn.commit()
+
+    # ...y después del commit, solo los nuevos.
+    assert lector.execute("SELECT COUNT(*) FROM positions").fetchone()[0] == 1
+    lector.close()

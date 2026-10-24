@@ -316,10 +316,11 @@ def update_position(conn, position):
 
 
 def delete_all_positions(conn):
+    # Sin commit: el borrado y los inserts nuevos van en la misma transacción (commitea el
+    # llamador), así un lector concurrente nunca ve la tabla vacía a mitad del reemplazo.
     sql = """ DELETE FROM positions """
     cur = conn.cursor()
     cur.execute(sql)
-    conn.commit()
 
 
 def select_position(conn, symbol):
@@ -355,10 +356,10 @@ def select_account(conn):
 
 # orders interactions
 def delete_all_orders(conn):
+    # Sin commit, por lo mismo que delete_all_positions.
     sql = """ DELETE FROM orders """
     cur = conn.cursor()
     cur.execute(sql)
-    conn.commit()
 
 
 def create_orders(conn, orders):
