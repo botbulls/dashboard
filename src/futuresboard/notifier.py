@@ -4,8 +4,11 @@ Uso: ``python -m futuresboard.notifier [--db RUTA_DB] [--state RUTA_ESTADO] [--o
 
 No carga ``Config`` ni ``config.json`` (que tienen las API keys de Binance): la DB se indica con ``--db`` o
 ``NOTIFIER_DB_PATH`` (default ``./config/futures.db``) y se abre en solo lectura (``mode=ro``).
-Con la DB en WAL el notifier tiene que ver ``futures.db-wal``/``-shm``: en Docker se monta el
-directorio de la DB (no el archivo solo, y no ``:ro``; ver docs/produccion.md).
+Con la DB en WAL el notifier tiene que ver ``futures.db-wal``/``-shm`` junto a la DB: en Docker se monta
+el directorio de DATOS (``./data``: DB, ``-wal``/``-shm``, ``scrape_state.json`` y latido del scraper),
+nunca el de config (``config.json`` tiene las API keys) ni el archivo suelto. Va sin ``:ro`` porque, si no
+hay otra conexión abierta, SQLite tiene que crear el ``-shm``; el código igual abre con ``mode=ro``
+(trade-off en docs/notificaciones.md).
 
 Cada ``NOTIFIER_INTERVAL`` segundos:
 - chequea el contenedor de passivbot via docker-socket-proxy (si FUTURESBOARD_DOCKER_URL está configurado),

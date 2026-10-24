@@ -20,7 +20,8 @@ def connect(path, *, readonly: bool = False, **kwargs) -> sqlite3.Connection:
     """Única forma de abrir la SQLite del dashboard: fija el busy_timeout.
 
     ``readonly=True`` abre con ``mode=ro`` (lo usa el notifier). En WAL un lector de solo lectura
-    necesita ver ``-wal``/``-shm`` junto a la DB: hay que montar el directorio, no el archivo solo.
+    necesita ver ``-wal``/``-shm`` junto a la DB (y poder crear el ``-shm`` si no hay otra conexión):
+    se monta el directorio de datos de la DB, escribible, no el archivo solo ni el directorio de config.
     """
     kwargs.setdefault("timeout", BUSY_TIMEOUT_SECONDS)
     if readonly:
@@ -33,9 +34,9 @@ def ensure_wal(path) -> str:
     """Pasa la DB a ``journal_mode=WAL`` si no lo está y devuelve el modo resultante.
 
     El modo WAL queda grabado en el archivo (persistente): alcanza con hacerlo una vez y lo hace
-    el escritor (el loop del scraper al arrancar). Si hay otra conexión con una transacción
-    abierta, SQLite no puede cambiar el modo: no se fuerza nada, se loguea y el llamador
-    reintenta en la vuelta siguiente. Nunca lanza.
+    solo el loop dedicado del scraper al arrancar (nunca el web ni el hilo). Si hay otra conexión
+    con una transacción abierta, SQLite no puede cambiar el modo: no se fuerza nada, se loguea y el
+    llamador reintenta en la vuelta siguiente. Nunca lanza.
     """
     try:
         conn = connect(path)

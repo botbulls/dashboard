@@ -9,6 +9,8 @@ Por que 1 worker y varios threads (y no N workers):
 * ``init_app`` arranca el hilo del scraper automatico dentro del proceso. Con N workers habria
   N scrapers en paralelo pegandole a Binance con la misma API key (rate limit / weight) y
   escribiendo la misma SQLite.
+  (Con el scraper en su propio contenedor y ``FUTURESBOARD_DISABLE_AUTO_SCRAPE=1`` esto no aplica,
+  pero los puntos de abajo si: se queda en 1 worker.)
 * El rate limit del login (PR de login-hardening) vive en memoria del proceso
   (``threading.Lock`` + dict): con N workers cada uno tendria su propio contador.
 * Si ``FUTURESBOARD_SECRET_KEY`` no esta definida, cada proceso generaria su propia clave
