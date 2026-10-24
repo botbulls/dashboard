@@ -235,20 +235,20 @@
                                     <li>
                                         <a class="bb-moneda" href="{{ url_for('main.coin_page', coin=item) }}"{% if item == moneda_actual %} aria-current="page"{% endif %}>
                                             <span class="bb-moneda__par">{{ item }}</span>
-                                            <span class="bb-moneda__expo" data-value="{{ c[2] }}"><span class="bb-sr">exposición long </span>{{ (c[2]|float * 100)|pct(0) }}</span>
+                                            <span class="bb-moneda__expo"{% if c[2] is none %} title="Sin balance para calcular"{% else %} data-value="{{ c[2] }}"{% endif %}><span class="bb-sr">exposición long </span>{{ '—' if c[2] is none else (c[2]|float * 100)|pct(0) }}</span>
                                             <span class="bb-moneda__ord">{{ ordenes(c[0], c[1]) }}</span>
-                                            {% if c[5]|float > 0 or c[3] or c[4] %}
-                                                <span class="bb-moneda__short" data-value="{{ c[5] }}">Short {{ (c[5]|float * 100)|pct(0) }} · {{ ordenes(c[3], c[4]) }}</span>
+                                            {% if c[5] is none or c[5]|float > 0 or c[3] or c[4] %}
+                                                <span class="bb-moneda__short"{% if c[5] is none %} title="Sin balance para calcular"{% else %} data-value="{{ c[5] }}"{% endif %}>Short {{ '—' if c[5] is none else (c[5]|float * 100)|pct(0) }} · {{ ordenes(c[3], c[4]) }}</span>
                                             {% endif %}
                                         </a>
                                     </li>
                                 {% endfor %}
                                 <li class="bb-moneda bb-moneda--total">
                                     <span class="bb-moneda__par">Total</span>
-                                    <span class="bb-moneda__expo" data-value="{{ t['pbr_long'] }}"><span class="bb-sr">exposición long </span>{{ (t['pbr_long']|float * 100)|pct(0) }}</span>
+                                    <span class="bb-moneda__expo"{% if t['pbr_long'] is none %} title="Sin balance para calcular"{% else %} data-value="{{ t['pbr_long'] }}"{% endif %}><span class="bb-sr">exposición long </span>{{ '—' if t['pbr_long'] is none else (t['pbr_long']|float * 100)|pct(0) }}</span>
                                     <span class="bb-moneda__ord">{{ ordenes(t['buys_long'], t['sells_long']) }}</span>
-                                    {% if t['pbr_short']|float > 0 or t['buys_short'] or t['sells_short'] %}
-                                        <span class="bb-moneda__short" data-value="{{ t['pbr_short'] }}">Short {{ (t['pbr_short']|float * 100)|pct(0) }} · {{ ordenes(t['buys_short'], t['sells_short']) }}</span>
+                                    {% if t['pbr_short'] is none or t['pbr_short']|float > 0 or t['buys_short'] or t['sells_short'] %}
+                                        <span class="bb-moneda__short"{% if t['pbr_short'] is none %} title="Sin balance para calcular"{% else %} data-value="{{ t['pbr_short'] }}"{% endif %}>Short {{ '—' if t['pbr_short'] is none else (t['pbr_short']|float * 100)|pct(0) }} · {{ ordenes(t['buys_short'], t['sells_short']) }}</span>
                                     {% endif %}
                                 </li>
                             </ul>

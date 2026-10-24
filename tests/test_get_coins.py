@@ -17,6 +17,7 @@ from futuresboard.blueprint import get_coins
 from futuresboard.config import Config
 
 BALANCE = 1000.0
+SIN_FILA = object()  # saldo=SIN_FILA borra la fila de account
 
 
 @pytest.fixture
@@ -25,7 +26,7 @@ def armar(tmp_path):
     (símbolo, side, positionSide, cantidad) y devuelve get_coins() sobre ella."""
     contador = itertools.count()
 
-    def _armar(posiciones, ordenes=()):
+    def _armar(posiciones, ordenes=(), saldo=BALANCE):
         carpeta = tmp_path / f"base{next(contador)}"
         carpeta.mkdir()
         db_path = carpeta / "futures.db"
@@ -42,7 +43,10 @@ def armar(tmp_path):
         conn = sqlite3.connect(db_path)
         try:
             with conn:
-                conn.execute("UPDATE account SET totalWalletBalance = ? WHERE AID = 1", (BALANCE,))
+                if saldo is SIN_FILA:
+                    conn.execute("DELETE FROM account")
+                else:
+                    conn.execute("UPDATE account SET totalWalletBalance = ? WHERE AID = 1", (saldo,))
                 for symbol, lado, nocional in posiciones:
                     cantidad = 1.0 if lado == "LONG" else -1.0
                     conn.execute(
@@ -135,3 +139,32 @@ def test_fila_one_way_both_no_hereda_la_exposicion_de_la_anterior(armar):
     assert coins["active"]["BBBUSDT"][2] == 0.0
     assert coins["active"]["BBBUSDT"][5] == 0.0
     assert coins["totals"]["pbr_long"] == "0.01"
+
+
+SIN_BALANCE = pytest.mark.parametrize("saldo", [0.0, None, SIN_FILA], ids=["balance-0", "balance-null", "sin-fila"])
+
+
+@SIN_BALANCE
+def test_sin_balance_la_exposicion_queda_desconocida_y_no_explota(armar, saldo):
+    # Sin balance no hay exposición que calcular: None (el menú muestra "—"), nunca 0 ni una excepción.
+    # Del lado sin posición la exposición sí se conoce: es 0.
+    posiciones = [("AAAUSDT", "LONG", 10), ("BTCUSDT", "LONG", 20), ("BTCUSDT", "SHORT", 50), ("ZZZUSDT", "SHORT", 30)]
+    ordenes = [("AAAUSDT", "SELL", "LONG", 1), ("BTCUSDT", "BUY", "LONG", 2), ("BTCUSDT", "SELL", "SHORT", 3)]
+    coins = armar(posiciones, ordenes, saldo=saldo)
+
+    assert coins["active"] == {
+        "AAAUSDT": [0, 1, None, 0, 0, 0.0],
+        "BTCUSDT": [2, 0, None, 0, 3, None],
+        "ZZZUSDT": [0, 0, 0.0, 0, 0, None],
+    }
+    assert coins["totals"]["pbr_long"] is None
+    assert coins["totals"]["pbr_short"] is None
+    assert (coins["totals"]["active"], coins["totals"]["buys_long"], coins["totals"]["sells_short"]) == (3, 2, 3)
+
+
+@SIN_BALANCE
+def test_sin_balance_y_solo_longs_el_total_short_sigue_en_cero(armar, saldo):
+    coins = armar([("AAAUSDT", "LONG", 10)], [("AAAUSDT", "SELL", "LONG", 1)], saldo=saldo)
+    assert coins["active"]["AAAUSDT"] == [0, 1, None, 0, 0, 0.0]
+    assert coins["totals"]["pbr_long"] is None
+    assert coins["totals"]["pbr_short"] == "0.00"
