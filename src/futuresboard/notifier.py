@@ -12,7 +12,8 @@ hay otra conexión abierta, SQLite tiene que crear el ``-shm``; el código igual
 
 Cada ``NOTIFIER_INTERVAL`` segundos:
 - chequea el contenedor de passivbot via docker-socket-proxy (si FUTURESBOARD_DOCKER_URL está configurado),
-- la edad del último scrape (mtime de la DB o de su ``-wal``, el más nuevo) y, opcionalmente, la del último trade/income,
+- la edad del último scrape (latido del scraper / ``scrape_state.json``; sin ellos, mtime de la DB) y,
+  opcionalmente, la del último trade/income,
 - avisa al pasar a caído (tras ``NOTIFIER_FAIL_THRESHOLD`` chequeos fallidos seguidos) y al recuperarse.
   Solo avisa en las transiciones: un estado caído persistente no se repite cada ciclo.
 - una vez por día, a ``NOTIFIER_DAILY_SUMMARY`` (HH:MM, hora de Buenos Aires), manda el resumen de PnL.
@@ -40,6 +41,7 @@ from typing import Tuple
 
 from futuresboard import bot_control
 from futuresboard import db
+from futuresboard import scraper
 from futuresboard import telegram_notify
 from futuresboard.telegram_notify import esc
 
@@ -134,21 +136,25 @@ def check_passivbot(docker: bot_control.DockerClient, container: str) -> Tuple[b
     return True, f"{container} corriendo"
 
 
-def _last_write_mtime(db_path: pathlib.Path) -> float:
-    """mtime de la última escritura. En WAL los commits van a ``<db>-wal`` y el archivo principal
-    solo cambia en los checkpoints, así que se toma el más nuevo de los dos."""
-    mtime = db_path.stat().st_mtime
-    try:
-        mtime = max(mtime, db_path.with_name(db_path.name + "-wal").stat().st_mtime)
-    except OSError:
-        pass
-    return mtime
-
-
 def check_scrape(db_path: pathlib.Path, max_age: int, now: float) -> Tuple[bool, str]:
-    """Proxy del último scrape: mtime de la DB (el scraper escribe positions/account en cada ciclo)."""
+    """Edad del último scrape OK.
+
+    Con el directorio de datos montado (DB en WAL) usa el latido del scraper y ``scrape_state.json``, que
+    solo escribe el scraper. El mtime de ``futures.db-wal`` no sirve: cualquier conexión (el web, o el
+    propio notifier en ``mode=ro``) lo crea al abrir la DB, y daría "fresco" con el scraper caído.
+    Sin esos JSON (layout viejo: solo el archivo de la DB montado, journal DELETE) se usa el mtime de la
+    DB (el scraper escribe positions/account en cada ciclo).
+    """
+    if scraper.latido_path(db_path).exists() or scraper.scrape_state_path(db_path).exists():
+        at = scraper.frescura(db_path, now)["at"]
+        if at is None:
+            return False, "sin scrape exitoso registrado"
+        age = now - at
+        if age > max_age:
+            return False, f"sin scrape OK hace {_fmt_age(age)} (máx {_fmt_age(max_age)})"
+        return True, f"último scrape OK hace {_fmt_age(age)}"
     try:
-        age = now - _last_write_mtime(db_path)
+        age = now - db_path.stat().st_mtime
     except OSError:
         return False, f"no se encuentra la DB ({db_path.name})"
     if age > max_age:

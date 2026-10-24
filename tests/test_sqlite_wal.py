@@ -128,21 +128,43 @@ def test_ensure_wal_no_fuerza_con_transaccion_abierta(tmp_path, monkeypatch):
     assert db.ensure_wal(path) == "wal"
 
 
-def test_check_scrape_del_notifier_mira_el_wal(tmp_path):
+def test_check_scrape_del_notifier_no_se_engana_con_el_wal(tmp_path):
+    """Con el scraper caído, una lectura cualquiera (el web, o el notifier en mode=ro) recrea
+    futures.db-wal con mtime actual: el chequeo tiene que mirar el latido, no ese mtime."""
     path = tmp_path / "futures.db"
-    sqlite3.connect(path).close()
-    wal = tmp_path / "futures.db-wal"
-    wal.write_bytes(b"")
+    scraper.db_setup(str(path))
+    assert db.ensure_wal(path) == "wal"
     ahora = time.time()
-    os.utime(path, (ahora - 3600, ahora - 3600))  # el archivo principal no cambia hasta el checkpoint
-    os.utime(wal, (ahora - 30, ahora - 30))
+    scraper.latido_path(path).write_text(json.dumps({"at": ahora - 7200, "intervalo": 60, "vuelta": 9}))
+    scraper.scrape_state_path(path).write_text(json.dumps({"last_success_at": ahora - 7200}))
 
+    ro = notifier._connect_ro(path)
+    ro.execute("SELECT COUNT(*) FROM income").fetchone()
+    ro.close()
+    assert (tmp_path / "futures.db-wal").exists()  # recién creado por el lector
+
+    ok, detalle = notifier.check_scrape(path, 900, ahora)
+    assert not ok and "2.0 h" in detalle, detalle
+
+    scraper.latido_path(path).write_text(json.dumps({"at": ahora - 30, "intervalo": 60, "vuelta": 10}))
     ok, detalle = notifier.check_scrape(path, 900, ahora)
     assert ok, detalle
 
-    wal.unlink()
-    ok, _ = notifier.check_scrape(path, 900, ahora)
-    assert not ok
+
+def test_check_scrape_sin_scrape_exitoso_y_layout_viejo(tmp_path):
+    path = tmp_path / "futures.db"
+    sqlite3.connect(path).close()
+    ahora = time.time()
+    # Layout viejo (solo el archivo de la DB montado, sin JSON del scraper a la vista): mtime de la DB.
+    os.utime(path, (ahora - 30, ahora - 30))
+    assert notifier.check_scrape(path, 900, ahora)[0]
+    os.utime(path, (ahora - 3600, ahora - 3600))
+    assert not notifier.check_scrape(path, 900, ahora)[0]
+    # scrape_state.json a la vista pero sin ningún scrape OK: caído aunque la DB sea nueva.
+    os.utime(path, (ahora, ahora))
+    scraper.scrape_state_path(path).write_text(json.dumps({"last_started_at": ahora}))
+    ok, detalle = notifier.check_scrape(path, 900, ahora)
+    assert not ok and detalle == "sin scrape exitoso registrado"
 
 
 # --------------------------------------------------------------------------------------

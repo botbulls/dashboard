@@ -60,7 +60,7 @@ dashboard se cambió `DATABASE` en `config.json`, pasar esa misma ruta al notifi
 | Chequeo | Cómo | Caído si |
 |---|---|---|
 | Contenedor passivbot | `GET /containers/<nombre>/json` vía docker-socket-proxy | no existe, no está `running`, o el proxy no responde |
-| Scrape de la DB | mtime de la DB o de su `-wal`, el más nuevo (proxy: el scraper escribe `positions`/`account` en cada ciclo; en WAL el archivo principal solo cambia en los checkpoints) | más viejo que `NOTIFIER_SCRAPE_MAX_AGE` |
+| Scrape de la DB | último scrape OK según el latido del scraper (`scraper_latido.json`) o `scrape_state.json`, que solo escribe el scraper. Si no están a la vista (DB montada como archivo suelto), mtime de la DB. No se usa el mtime de `futures.db-wal`: cualquier conexión lo crea al abrir. | más viejo que `NOTIFIER_SCRAPE_MAX_AGE`, o sin ningún scrape OK registrado |
 | Último trade (opcional) | `MAX(time)` de la tabla `income` | más viejo que `NOTIFIER_TRADE_MAX_AGE` |
 
 **Antispam:** solo se avisa en las transiciones. Un chequeo pasa a caído después de
