@@ -1,6 +1,10 @@
 {#- Filas de la tabla de Posiciones. Las usan positions.html y /api/vivo/posiciones (futuresboard/vivo.py):
     en_vivo.js las pasa a la DataTable por data-fila (par-lado) sin perder orden, búsqueda ni scroll. -#}
 {# Cada celda numérica lleva el crudo en data-order: DataTables ordena por número aunque el texto esté en es-AR. #}
+{# Sin precio de Binance (mark None: premiumIndex falló o no trae el par), lo que depende del precio va en "—" con el
+   crudo vacío. #}
+{% macro sin_precio() %}<td class="bb-n" data-order="">—</td>{% endmacro %}
+
 {% macro fila(coin, p, mark, cant_c, prox_c, dist_c, cant_v, prox_v, dist_v) %}
         <tr data-fila="{{ coin }}-{{ p[5] }}">
             <td>{{ coin }}</td>
@@ -10,25 +14,33 @@
             {% set valor = (p[6] * p[4])|round(2) %}
             <td class="bb-n" data-order="{{ valor }}">{{ valor|num }}</td>
             <td class="bb-n is-{{ p[2]|tendencia or 'cero' }}" data-order="{{ p[2] }}">{{ p[2]|usd(dec=2, signo=True) }}</td>
-            {% set precio = mark|round(8) %}
-            <td class="bb-n" data-order="{{ precio }}">{{ precio|num }}</td>
+            {% if mark is none %}{{ sin_precio() }}{% else %}{% set precio = mark|round(8) %}
+            <td class="bb-n" data-order="{{ precio }}">{{ precio|num }}</td>{% endif %}
             <td class="bb-n" data-order="{{ cant_c }}">{{ cant_c }}</td>
             <td class="bb-n" data-order="{{ prox_c }}">{{ prox_c|num }}</td>
+            {% if prox_c != "-" and mark is none %}{{ sin_precio() }}{{ sin_precio() }}{% else %}
             <td class="bb-n" data-order="{{ dist_c }}">{{ dist_c|num }}</td>
-            {% if prox_c != "-" %}{% set dpct = ((dist_c|float / mark) * 100)|round(2) %}<td class="bb-n" data-order="{{ dpct }}">{{ dpct|pct }}</td>{% else %}<td class="bb-n" data-order="-"></td>{% endif %}
+            {% if prox_c != "-" %}{% set dpct = ((dist_c|float / mark) * 100)|round(2) %}<td class="bb-n" data-order="{{ dpct }}">{{ dpct|pct }}</td>{% else %}<td class="bb-n" data-order="-"></td>{% endif %}{% endif %}
             <td class="bb-n" data-order="{{ cant_v }}">{{ cant_v }}</td>
             <td class="bb-n" data-order="{{ prox_v }}">{{ prox_v|num }}</td>
+            {% if prox_v != "-" and mark is none %}{{ sin_precio() }}{{ sin_precio() }}{% else %}
             <td class="bb-n" data-order="{{ dist_v }}">{{ dist_v|num }}</td>
-            {% if prox_v != "-" %}{% set vpct = ((dist_v|float / mark) * 100)|round(2) %}<td class="bb-n" data-order="{{ vpct }}">{{ vpct|pct }}</td>{% else %}<td class="bb-n" data-order="-"></td>{% endif %}
+            {% if prox_v != "-" %}{% set vpct = ((dist_v|float / mark) * 100)|round(2) %}<td class="bb-n" data-order="{{ vpct }}">{{ vpct|pct }}</td>{% else %}<td class="bb-n" data-order="-"></td>{% endif %}{% endif %}
         </tr>
 {% endmacro %}
 
 {% macro filas(positions, markprices) -%}
     {% for coin in positions %}
         {% set s = positions[coin][2] %}
-        {{ fila(coin, positions[coin][0][0], markprices[coin], s[0], s[4], s[5], s[1], s[6], s[7]) }}
+        {{ fila(coin, positions[coin][0][0], markprices.get(coin), s[0], s[4], s[5], s[1], s[6], s[7]) }}
         {% if positions[coin][0]|length > 1 %}
-            {{ fila(coin, positions[coin][0][1], markprices[coin], s[2], s[8], s[9], s[3], s[10], s[11]) }}
+            {{ fila(coin, positions[coin][0][1], markprices.get(coin), s[2], s[8], s[9], s[3], s[10], s[11]) }}
         {% endif %}
     {% endfor %}
+{%- endmacro %}
+
+{#- Aviso discreto en la bajada si a alguna posición le falta el precio de Binance. La envoltura está siempre (display:
+    contents): en_vivo.js pone y saca el aviso con el bloque "aviso_precio" de /api/vivo/posiciones. -#}
+{% macro aviso_precio(positions, markprices) -%}
+<span data-vivo-bloque="aviso_precio" class="bb-vivo-envoltura">{% if positions|reject("in", markprices)|list %} <span class="bb-tarjeta__aviso"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> sin precio de Binance</span>{% endif %}</span>
 {%- endmacro %}

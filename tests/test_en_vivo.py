@@ -10,7 +10,9 @@ import datetime as dt
 import json
 import pathlib
 import re
+import shutil
 import sqlite3
+import subprocess
 import time
 from html.parser import HTMLParser
 from unittest import mock
@@ -57,8 +59,13 @@ def _binance(url, *a, **kw):
     raise AssertionError(f"llamada inesperada: {url}")
 
 
-def _get(client, url):  # noqa: F811
-    with mock.patch.object(requests, "get", _binance):
+def _sin_binance(url, *a, **kw):
+    """Binance caído: premiumIndex (y las velas) fallan."""
+    raise requests.ConnectionError("Binance no responde")
+
+
+def _get(client, url, binance=_binance):  # noqa: F811
+    with mock.patch.object(requests, "get", binance):
         resp = client.get(url)
     assert resp.status_code == 200, (url, resp.status_code)
     return resp
@@ -261,10 +268,11 @@ def test_base_bloqueada_responde_503_json(client, con_datos, monkeypatch):  # no
 
 # ---------------------------------------------------------------- crudo == lo que muestra el template
 
+@pytest.mark.parametrize("binance", [_binance, _sin_binance], ids=["con_precio", "sin_binance"])
 @pytest.mark.parametrize("pagina", list(URLS))
-def test_json_igual_a_lo_que_pinta_la_pagina_en_las_dos_direcciones(client, con_datos, pagina):  # noqa: F811
-    html = _get(client, pagina).get_data(as_text=True)
-    d = _get(client, URLS[pagina]).get_json()
+def test_json_igual_a_lo_que_pinta_la_pagina_en_las_dos_direcciones(client, con_datos, pagina, binance):  # noqa: F811
+    html = _get(client, pagina, binance).get_data(as_text=True)
+    d = _get(client, URLS[pagina], binance).get_json()
     h = _hooks(html)
 
     # Página -> JSON: cada número del HTML tiene su valor, con el mismo crudo, texto y color.
@@ -295,6 +303,128 @@ def test_json_igual_a_lo_que_pinta_la_pagina_en_las_dos_direcciones(client, con_
     for tabla, filas in d.get("tablas", {}).items():
         assert _norm(filas) == _norm(h.tbody[tabla]), (pagina, tabla)
         assert re.findall(r'data-fila="([^"]+)"', filas), (pagina, tabla)
+
+
+# ---------------------------------------------------------------- sin precio de Binance
+
+RAYA = "—"
+AVISO = "sin precio de Binance"
+
+
+def _crudos(html):
+    return re.findall(r'data-(?:value|order)="([^"]*)"', html)
+
+
+def _filas(html):
+    """Celdas (data-order, texto) de cada <tr data-fila> de la tabla de Posiciones."""
+    filas = {}
+    for clave, cuerpo in re.findall(r'<tr data-fila="([^"]+)">(.*?)</tr>', html, re.S):
+        filas[clave] = [(o, re.sub(r"<[^>]+>", "", t).strip())
+                        for o, t in re.findall(r'<td class="bb-n[^"]*" data-order="([^"]*)">(.*?)</td>', cuerpo, re.S)]
+    return filas
+
+
+def _sin_eth(url, *a, **kw):
+    """premiumIndex responde pero sin ETHUSDT (par nuevo o deslistado)."""
+    if url.endswith("/fapi/v1/premiumIndex"):
+        return _Resp([{"symbol": "BTCUSDT", "markPrice": PRECIOS["BTCUSDT"]}])
+    return _binance(url, *a, **kw)
+
+
+@pytest.mark.parametrize("url", ["/positions", "/api/vivo/posiciones", "/coins/BTCUSDT", "/api/vivo/moneda/BTCUSDT"])
+def test_sin_precio_de_binance_responde_200_sin_none_ni_nan(client, con_datos, url):  # noqa: F811
+    # Antes /positions y /api/vivo/posiciones daban 500 (markprices[coin] indefinido en el template).
+    resp = _get(client, url, _sin_binance)
+    if resp.is_json:
+        d = resp.get_json()
+        texto = "".join(list(d["bloques"].values()) + list(d.get("tablas", {}).values()))
+        crudos = _crudos(texto) + [v["crudo"] for v in d["valores"].values()]
+    else:
+        texto = resp.get_data(as_text=True)
+        crudos = _crudos(texto)
+    assert crudos, url
+    assert not {c.lower() for c in crudos} & {"none", "nan", "inf", "-inf", "undefined"}, url
+    assert AVISO in texto, url
+
+
+def test_posiciones_sin_precio_muestra_raya_y_crudo_vacio(client, con_datos):  # noqa: F811
+    html = _get(client, "/positions", _sin_binance).get_data(as_text=True)
+    filas = _filas(html)
+    assert set(filas) == {"BTCUSDT-LONG", "ETHUSDT-LONG"}
+    for celdas in filas.values():
+        assert len(celdas) == 13
+        assert celdas[3][0] in ("-2.25", "0.21")  # el PnL no realizado sale de la base: no depende del precio
+        assert celdas[4] == ("", RAYA)  # precio actual
+        # Sin compras: "-" de siempre (no depende del precio). Con venta: distancia y % en "—" con el crudo vacío.
+        assert celdas[5:9] == [("0", "0"), ("-", "-"), ("-", "-"), ("-", "")]
+        assert celdas[9] == ("1", "1") and celdas[10][0] in ("82610.0", "3949.8")  # próxima venta: sale de la base
+        assert celdas[11:13] == [("", RAYA), ("", RAYA)]
+    assert AVISO in html.split('data-vivo-bloque="aviso_precio"', 1)[1].split("</p>", 1)[0]
+    # La DataTable sigue ordenando por data-order en las columnas numéricas.
+    assert "window.BB.columnasDataOrder(2, 14)" in html
+
+    d = _get(client, "/api/vivo/posiciones", _sin_binance).get_json()
+    assert AVISO in d["bloques"]["aviso_precio"] and _filas(d["tablas"]["orders"]) == filas
+
+
+def test_posiciones_con_precio_no_avisa(client, con_datos):  # noqa: F811
+    html = _get(client, "/positions").get_data(as_text=True)
+    assert AVISO not in html and RAYA not in "".join(t for c in _filas(html).values() for _, t in c)
+    assert _filas(html)["BTCUSDT-LONG"][4] == ("81954.1", "81.954,1")
+    assert AVISO not in _get(client, "/api/vivo/posiciones").get_json()["bloques"]["aviso_precio"]
+
+
+def test_posiciones_con_un_par_sin_precio(client, con_datos):  # noqa: F811
+    # premiumIndex responde sin uno de los pares: ese par va en "—", el otro con su precio.
+    html = _get(client, "/positions", _sin_eth).get_data(as_text=True)
+    filas = _filas(html)
+    assert filas["BTCUSDT-LONG"][4] == ("81954.1", "81.954,1") and filas["BTCUSDT-LONG"][11][1] != RAYA
+    assert filas["ETHUSDT-LONG"][4] == ("", RAYA) and filas["ETHUSDT-LONG"][11:13] == [("", RAYA), ("", RAYA)]
+    assert AVISO in html
+
+
+def test_moneda_sin_precio_muestra_raya_y_avisa(client, con_datos):  # noqa: F811
+    html = _get(client, "/coins/BTCUSDT", _sin_binance).get_data(as_text=True)
+    assert html.count('data-vivo="precio" data-value="">' + RAYA + "<") == 4
+    for k in range(3):
+        assert f'data-vivo="objetivo_{k}" data-value="">{RAYA}<' in html
+    bajada = html.split('data-vivo-bloque="bajada_moneda"', 1)[1].split("</p>", 1)[0]
+    assert AVISO in bajada and "precio actual" not in bajada
+    v = _get(client, "/api/vivo/moneda/BTCUSDT", _sin_binance).get_json()["valores"]
+    for k in ("precio", "objetivo_0", "objetivo_1", "objetivo_2"):
+        assert (v[k]["crudo"], v[k]["texto"]) == ("", RAYA), k
+
+
+def test_moneda_sin_posicion_con_binance_ok_no_avisa(client, con_datos, app):  # noqa: F811
+    # Sin posición, average_down_target(allpositions[0]...) tiraba IndexError en el mismo try que el pedido y el precio
+    # quedaba en "-": con el aviso, eso diría "sin precio de Binance" con Binance respondiendo bien.
+    with sqlite3.connect(str(app.config["DATABASE"])) as con:
+        con.execute("DELETE FROM positions WHERE symbol = 'BTCUSDT'")
+    html = _get(client, "/coins/BTCUSDT").get_data(as_text=True)
+    bajada = html.split('data-vivo-bloque="bajada_moneda"', 1)[1].split("</p>", 1)[0]
+    assert AVISO not in bajada and 'precio actual <span class="bb-num" data-value="81954.1">81.954,1</span>' in bajada
+    v = _get(client, "/api/vivo/moneda/BTCUSDT").get_json()
+    assert v["valores"]["precio"]["crudo"] == "81954.1" and AVISO not in v["bloques"]["bajada_moneda"]
+
+
+def _calc_target(html, precio):
+    """Corre calcTarget() de la página con node, con un DOM mínimo y el data-value del precio dado."""
+    fuente = html.split("function calcTarget()", 1)[1].split("function averageDown()", 1)[0]
+    script = (
+        "var els = {positionsize: {value: '0.0022'}, positionvalue: {value: '82372.0'}, customaway: {value: '1'},"
+        " averageTarget: {value: 'previo'}};"
+        "var document = {getElementById: function (id) { return els[id]; },"
+        " querySelector: function () { return {getAttribute: function () { return " + json.dumps(precio) + "; }}; }};"
+        "function calcTarget()" + fuente + "calcTarget(); console.log(String(els.averageTarget.value));"
+    )
+    return subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30, check=True).stdout.strip()
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="sin node")
+def test_calculadora_sin_precio_no_muestra_nan(client, con_datos):  # noqa: F811
+    html = _get(client, "/coins/BTCUSDT", _sin_binance).get_data(as_text=True)
+    assert _calc_target(html, "") == ""  # antes: NaN en "Cantidad para esa distancia"
+    assert re.fullmatch(r"-?\d+", _calc_target(html, "81954.1"))
 
 
 def test_dashboard_con_fechas_pide_su_periodo(client, con_datos):  # noqa: F811

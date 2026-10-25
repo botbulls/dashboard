@@ -65,6 +65,12 @@ def valor(crudo, texto, tono=""):
     return {"crudo": str(crudo), "texto": str(texto), "tono": tono}
 
 
+def _o_raya(crudo):
+    """Precio u objetivo de la calculadora de Moneda; sin precio de Binance (``"-"``), crudo vacío y "—" (como
+    ``celda_precio`` de ``_moneda.html``)."""
+    return valor("", "—") if crudo == "-" else valor(crudo, formato.num(crudo))
+
+
 def _macro(plantilla, nombre, *args):
     return str(get_template_attribute(plantilla, nombre)(*args))
 
@@ -174,6 +180,7 @@ def posiciones():
         return _error(503, "No se pudo leer la base de datos.")
     out = _comun("posiciones", coins)
     out["tablas"] = {"orders": _macro("_posiciones.html", "filas", datos["positions"], datos["markprices"])}
+    out["bloques"]["aviso_precio"] = _macro("_posiciones.html", "aviso_precio", datos["positions"], datos["markprices"])
     return _respuesta(out)
 
 
@@ -194,9 +201,9 @@ def moneda(coin):
     upnl = bp.format_dp(pm["unrealized"])
     v["upnl_moneda"] = valor(upnl, formato.usd(upnl, signo=True), formato.tendencia(upnl))
     precio = pm["markprice"]
-    v["precio"] = valor(precio, formato.num(precio))
+    v["precio"] = _o_raya(precio)
     for k in range(3):
-        v[f"objetivo_{k}"] = valor(pm["target"][k], formato.num(pm["target"][k]))
+        v[f"objetivo_{k}"] = _o_raya(pm["target"][k])
     # Las filas "Posición" de la calculadora (una, o dos en hedge). Si la posición se cerró, la primera va en 0 (es la
     # que usa la cuenta del promedio): sin esto los campos se quedaban con la posición vieja.
     posiciones = pm["allpositions"]

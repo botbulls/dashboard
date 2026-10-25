@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% import "_posiciones.html" as pos %}
 {% block title %}Posiciones{% endblock %}
-{% block bajada %}<p>Posiciones abiertas y órdenes que quedan por lado.<span class="bb-solo-celu"> Deslizá la tabla para ver todas las columnas.</span></p>{% endblock %}
+{% block bajada %}<p>Posiciones abiertas y órdenes que quedan por lado.{{ pos.aviso_precio(positions, markprices) }}<span class="bb-solo-celu"> Deslizá la tabla para ver todas las columnas.</span></p>{% endblock %}
 {% block content %}
     <div class="card bb-tabla-card">
         <div class="positions_datatable">

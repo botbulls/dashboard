@@ -2,7 +2,12 @@
     /api/vivo/moneda/<coin> (futuresboard/vivo.py) con los mismos argumentos. -#}
 
 {% macro bajada(lastupdate, markprice) -%}
-<p data-vivo-bloque="bajada_moneda">Último pedido: {{ lastupdate }}{% if markprice != '-' %} · precio actual <span class="bb-num" data-value="{{ markprice }}">{{ markprice|num }}</span>{% endif %}</p>
+<p data-vivo-bloque="bajada_moneda">Último pedido: {{ lastupdate }}{% if markprice != '-' %} · precio actual <span class="bb-num" data-value="{{ markprice }}">{{ markprice|num }}</span>{% else %} · <span class="bb-tarjeta__aviso"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> sin precio de Binance</span>{% endif %}</p>
+{%- endmacro %}
+
+{#- Precio u objetivo de la calculadora. Sin precio de Binance ("-"): crudo vacío y "—" (como vivo._o_raya). -#}
+{% macro celda_precio(clave, valor) -%}
+<td data-vivo="{{ clave }}" data-value="{{ '' if valor == '-' else valor }}">{{ '—' if valor == '-' else valor|num }}</td>
 {%- endmacro %}
 
 {#- Precio en el encabezado de "Posición y órdenes". La envoltura es display: contents. -#}

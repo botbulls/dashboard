@@ -744,6 +744,8 @@ def _posicion_moneda(coin) -> dict:
             ]
         else:
             markPrice = "-"
+    except IndexError:
+        pass  # sin posición (cerrada o moneda inactiva): el precio queda y los objetivos en "-"
     except Exception:
         markPrice = "-"
 

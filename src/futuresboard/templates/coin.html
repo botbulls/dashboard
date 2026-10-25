@@ -193,23 +193,23 @@
                                     </tr>
                                     <tr>
                                         <th scope="row">A 0,1 %</th>
-                                        <td data-vivo="objetivo_0" data-value="{{ target[0] }}">{{ target[0]|num }}</td>
-                                        <td data-vivo="precio" data-value="{{ markprice }}">{{ markprice|num }}</td>
+                                        {{ m.celda_precio("objetivo_0", target[0]) }}
+                                        {{ m.celda_precio("precio", markprice) }}
                                     </tr>
                                     <tr>
                                         <th scope="row">A 0,5 %</th>
-                                        <td data-vivo="objetivo_1" data-value="{{ target[1] }}">{{ target[1]|num }}</td>
-                                        <td data-vivo="precio" data-value="{{ markprice }}">{{ markprice|num }}</td>
+                                        {{ m.celda_precio("objetivo_1", target[1]) }}
+                                        {{ m.celda_precio("precio", markprice) }}
                                     </tr>
                                     <tr>
                                         <th scope="row">A 1 %</th>
-                                        <td data-vivo="objetivo_2" data-value="{{ target[2] }}">{{ target[2]|num }}</td>
-                                        <td data-vivo="precio" data-value="{{ markprice }}">{{ markprice|num }}</td>
+                                        {{ m.celda_precio("objetivo_2", target[2]) }}
+                                        {{ m.celda_precio("precio", markprice) }}
                                     </tr>
                                     <tr>
                                         <td><input type="number" class="form-control" id="customaway" onchange="calcTarget()" min="0" step="any" inputmode="decimal" aria-label="Distancia en %"></td>
                                         <td><input class="form-control" id="averageTarget" readonly aria-label="Cantidad para esa distancia"></td>
-                                        <td data-vivo="precio" data-value="{{ markprice }}">{{ markprice|num }}</td>
+                                        {{ m.celda_precio("precio", markprice) }}
                                     </tr>
                                 </tbody>
                             </table>
@@ -272,6 +272,10 @@
                     positionvalue = parseFloat(positionvalue);
                     markprice = parseFloat(markprice);
                     customaway = parseFloat(customaway);
+                    if (!isFinite(markprice)) {  // Binance no dio el precio (data-value vacío): campo vacío, no NaN
+                        document.getElementById("averageTarget").value = "";
+                        return;
+                    }
                     var targetprice = markprice * (1+(customaway/100));
                     document.getElementById("averageTarget").value = Math.round((positionsize * (positionvalue - targetprice)) / (targetprice - markprice));
                 }
