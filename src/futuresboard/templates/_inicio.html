@@ -1,0 +1,87 @@
+{#- Partes de Inicio que cambian de forma con los datos (ícono, "sin balance", filas). Las usan home.html y
+    /api/vivo/inicio (futuresboard/vivo.py) con los mismos argumentos: en_vivo.js reemplaza cada [data-vivo-bloque]
+    por lo que arma el server, así que la página y la actualización en vivo nunca se arman distinto. -#}
+
+{#- Variación de un KPI (% del balance): color e ícono por el signo del monto, no del %. -#}
+{% macro kpi_var(clave, valor, porcentaje) -%}
+{%- set t = valor|tendencia -%}
+<span data-vivo-bloque="{{ clave }}" class="bb-kpi__var is-{{ t or 'cero' }}" data-value="{{ porcentaje }}">
+    {%- if t == 'gana' %}<i class="fas fa-caret-up" aria-hidden="true"></i> {% elif t == 'pierde' %}<i class="fas fa-caret-down" aria-hidden="true"></i> {% endif -%}
+    {%- if porcentaje == '-' %}<span class="bb-kpi__aclara">sin balance</span>{% else %}{{ porcentaje|pct(signo=True) }} <span class="bb-kpi__aclara">del balance</span>{% endif -%}
+</span>
+{%- endmacro %}
+
+{#- PnL no realizado sobre el balance (tarjeta principal). Sin balance queda vacía y oculta, lista para aparecer. -#}
+{% macro upnl_var(pnl) -%}
+{%- set unrealised = pnl[0]|replace('$', '')|replace(',', '')|float %}
+{%- set balance = pnl[1]|replace('$', '')|replace(',', '')|float %}
+{%- if balance > 0 %}
+    {%- set upnl_pct = (unrealised / balance) * 100 %}
+    {%- set t = pnl[0]|tendencia %}
+<span data-vivo-bloque="upnl_pct" class="bb-kpi__var is-{{ t or 'cero' }}" data-value="{{ "%.2f"|format(upnl_pct) }}">
+    {%- if t == 'gana' %}<i class="fas fa-caret-up" aria-hidden="true"></i> {% elif t == 'pierde' %}<i class="fas fa-caret-down" aria-hidden="true"></i> {% endif -%}
+    {{ upnl_pct|pct(dec=2, signo=True) }}</span>
+{%- else %}
+<span data-vivo-bloque="upnl_pct" class="bb-kpi__var" hidden></span>
+{%- endif %}
+{%- endmacro %}
+
+{% macro ultimo_pedido(lastupdate) -%}
+<span data-vivo-bloque="ultimo_pedido" class="last-order-text"><span class="bb-solo-escritorio">Último pedido</span><span class="bb-solo-celu">Últ. pedido</span>
+{%- if lastupdate|length == 19 %} <span class="bb-hora">{{ lastupdate[11:] }}</span> · {{ lastupdate[8:10] }}/{{ lastupdate[5:7] }}{% else %} {{ lastupdate }}{% endif %}</span>
+{%- endmacro %}
+
+{#- Modo del rescate en la franja de estado (también a 390 px). La envoltura es display: contents. -#}
+{% macro franja_rescate(r, testnet) -%}
+<span data-vivo-bloque="franja_rescate" class="bb-vivo-envoltura">
+    {%- if not r or r.error %}
+        <span class="badge bb-badge bb-badge--neutro"><i class="fas fa-question-circle" aria-hidden="true"></i> Rescate sin datos</span>
+    {%- elif r.modo == 'dry_run' %}
+        <span class="badge bb-badge bb-badge--sim" title="El servicio rescate está en dry_run: no transfiere nada"><i class="fas fa-flask" aria-hidden="true"></i> <span>Rescate: <span class="bb-solo-escritorio">simulación (dry_run)</span><span class="bb-solo-celu">dry_run</span></span></span>
+    {%- elif r.modo == 'real' %}
+        <span class="badge bb-badge bb-badge--real"><i class="fas fa-bolt" aria-hidden="true"></i> Rescate: real</span>
+    {%- elif r.modo == 'off' %}
+        <span class="badge bb-badge bb-badge--neutro"><i class="fas fa-power-off" aria-hidden="true"></i> Rescate apagado</span>
+    {%- else %}
+        <span class="badge bb-badge bb-badge--neutro"><i class="fas fa-question-circle" aria-hidden="true"></i> Rescate sin datos</span>
+    {%- endif %}
+    {%- if (r and r.testnet) or testnet %}
+        <span class="badge bb-badge bb-badge--testnet" title="Cuenta de Binance testnet/Demo: no es plata real"><i class="fas fa-vial" aria-hidden="true"></i> testnet/Demo</span>
+    {%- endif %}
+    {%- if r and not r.error and r.modo and not r.servicio_vivo %}
+        <span class="badge bb-badge bb-badge--peligro"><i class="fas fa-heartbeat" aria-hidden="true"></i> el servicio no late</span>
+    {%- endif %}
+</span>
+{%- endmacro %}
+
+{% macro pie_periodo(totals) -%}
+{%- set period_profit = totals[9]|float %}
+{%- set wallet_balance = totals[7][1]|replace('$', '')|replace(',', '')|float %}
+<div data-vivo-bloque="pie_periodo" class="card-footer">Ganancia del período: <strong class="bb-num is-{{ period_profit|tendencia or 'cero' }}" data-value="{{ totals[9] }}">{{ period_profit|usd(dec=2, signo=True) }}</strong>
+    {% if wallet_balance > 0 %}({{ ((period_profit / wallet_balance) * 100)|pct(dec=2, signo=True) }}){% else %}(-){% endif %}</div>
+{%- endmacro %}
+
+{% macro pie_balance(data) -%}
+<div data-vivo-bloque="pie_balance" class="card-footer">{% if data[2][0] %}Último: <strong class="bb-num" data-value="{{ data[2][0][-1] }}">{{ data[2][0][-1]|usd(dec=2) }}</strong>{% else %}Sin datos en el período.{% endif %}</div>
+{%- endmacro %}
+
+{% macro tabla_diario(data) -%}
+<tbody data-vivo-bloque="tabla_diario">
+    {% for v in data[0][0] %}
+        <tr><td>{{ data[0][1][loop.index0] }}</td><td class="bb-n is-{{ v|tendencia or 'cero' }}" data-value="{{ v }}">{{ v|usd(dec=2, signo=True) }}</td></tr>
+    {% else %}
+        <tr><td colspan="2">Sin movimientos en el período.</td></tr>
+    {% endfor %}
+</tbody>
+{%- endmacro %}
+
+{% macro tabla_monedas(data) -%}
+<tbody data-vivo-bloque="tabla_monedas">
+    {% for moneda in data[1][0] %}
+        {% set v = data[1][1][loop.index0] %}
+        <tr><td><a href="{{ url_for('main.coin_page', coin=moneda) }}">{{ moneda }}</a></td><td class="bb-n is-{{ v|tendencia or 'cero' }}" data-value="{{ v }}">{{ v|usd(dec=2, signo=True) }}</td></tr>
+    {% else %}
+        <tr><td colspan="2">Sin movimientos en el período.</td></tr>
+    {% endfor %}
+</tbody>
+{%- endmacro %}

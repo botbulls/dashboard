@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_inicio.html" as i %}
 {% block title %}Inicio{% endblock %}
 {% block acciones %}
     <form method="GET" name="daterangeform" class="bb-fecha">
@@ -16,27 +17,10 @@
         </button>
         <button type="button" class="last-order-badge" data-bs-toggle="modal" data-bs-target="#lastOrderModal" title="Ver el último pedido">
             <i class="far fa-clock" aria-hidden="true"></i>
-            <span class="last-order-text"><span class="bb-solo-escritorio">Último pedido</span><span class="bb-solo-celu">Últ. pedido</span>
-            {%- if lastupdate|length == 19 %} <span class="bb-hora">{{ lastupdate[11:] }}</span> · {{ lastupdate[8:10] }}/{{ lastupdate[5:7] }}{% else %} {{ lastupdate }}{% endif %}</span>
+            {{ i.ultimo_pedido(lastupdate) }}
         </button>
         <span class="bb-franja__sep" aria-hidden="true"></span>
-        {% if not r or r.error %}
-            <span class="badge bb-badge bb-badge--neutro"><i class="fas fa-question-circle" aria-hidden="true"></i> Rescate sin datos</span>
-        {% elif r.modo == 'dry_run' %}
-            <span class="badge bb-badge bb-badge--sim" title="El servicio rescate está en dry_run: no transfiere nada"><i class="fas fa-flask" aria-hidden="true"></i> <span>Rescate: <span class="bb-solo-escritorio">simulación (dry_run)</span><span class="bb-solo-celu">dry_run</span></span></span>
-        {% elif r.modo == 'real' %}
-            <span class="badge bb-badge bb-badge--real"><i class="fas fa-bolt" aria-hidden="true"></i> Rescate: real</span>
-        {% elif r.modo == 'off' %}
-            <span class="badge bb-badge bb-badge--neutro"><i class="fas fa-power-off" aria-hidden="true"></i> Rescate apagado</span>
-        {% else %}
-            <span class="badge bb-badge bb-badge--neutro"><i class="fas fa-question-circle" aria-hidden="true"></i> Rescate sin datos</span>
-        {% endif %}
-        {% if (r and r.testnet) or config.get('BINANCE_TESTNET') %}
-            <span class="badge bb-badge bb-badge--testnet" title="Cuenta de Binance testnet/Demo: no es plata real"><i class="fas fa-vial" aria-hidden="true"></i> testnet/Demo</span>
-        {% endif %}
-        {% if r and not r.error and r.modo and not r.servicio_vivo %}
-            <span class="badge bb-badge bb-badge--peligro"><i class="fas fa-heartbeat" aria-hidden="true"></i> el servicio no late</span>
-        {% endif %}
+        {{ i.franja_rescate(r, config.get('BINANCE_TESTNET')) }}
         <p class="bb-franja__nota" role="note">Herramienta, no asesor: no garantiza resultados. <a href="#pie">Leer más</a></p>
     </section>
     <div class="bb-modales">
@@ -79,54 +63,41 @@
     </div>
     {# KPIs: valores de plata en tinta neutra con signo; la variación (% del balance) en verde/rojo con ícono.
        El crudo queda en data-value; las cuentas de abajo usan el crudo (totals[7]), nunca el texto formateado. #}
-    {% macro kpi(etiqueta, valor, porcentaje, url) %}
-        {% set t = valor|tendencia %}
+    {% macro kpi(clave, etiqueta, valor, porcentaje, url) %}
         <a class="card bb-kpi" href="{{ url }}">
             <div class="card-body">
-                <span class="bb-kpi__etiqueta">{{ etiqueta }}</span>
-                <div class="bb-kpi__valor bb-num" data-value="{{ valor }}">{{ valor|usd(signo=True) }}</div>
-                <span class="bb-kpi__var is-{{ t or 'cero' }}" data-value="{{ porcentaje }}">
-                    {%- if t == 'gana' %}<i class="fas fa-caret-up" aria-hidden="true"></i> {% elif t == 'pierde' %}<i class="fas fa-caret-down" aria-hidden="true"></i> {% endif -%}
-                    {%- if porcentaje == '-' %}<span class="bb-kpi__aclara">sin balance</span>{% else %}{{ porcentaje|pct(signo=True) }} <span class="bb-kpi__aclara">del balance</span>{% endif -%}
-                </span>
+                <span{% if clave == 'mes' %} data-vivo="mes_nombre"{% endif %} class="bb-kpi__etiqueta">{{ etiqueta }}</span>
+                <div data-vivo="{{ clave }}" class="bb-kpi__valor bb-num" data-value="{{ valor }}">{{ valor|usd(signo=True) }}</div>
+                {{ i.kpi_var(clave ~ '_pct', valor, porcentaje) }}
             </div>
         </a>
     {% endmacro %}
-    {% set unrealised = totals[7][0]|replace('$', '')|replace(',', '')|float %}
-    {% set balance = totals[7][1]|replace('$', '')|replace(',', '')|float %}
     <section class="bb-seccion" aria-labelledby="bbTituloGanancia">
         <h2 class="bb-sr" id="bbTituloGanancia">Cuenta y ganancia</h2>
         <div class="bb-kpis">
             <a class="card bb-kpi bb-hero" href="{{ url_for("main.positions_page") }}">
                 <div class="card-body">
                     <span class="bb-kpi__etiqueta">Balance de la billetera</span>
-                    <div class="bb-kpi__valor bb-num" data-value="{{ totals[7][1] }}">{{ totals[7][1]|usd }}</div>
+                    <div data-vivo="balance" class="bb-kpi__valor bb-num" data-value="{{ totals[7][1] }}">{{ totals[7][1]|usd }}</div>
                     <div class="bb-hero__upnl">
                         <span class="bb-kpi__aclara">PnL no realizado</span>
-                        <span class="bb-num" data-value="{{ totals[7][0] }}">{{ totals[7][0]|usd(signo=True) }}</span>
-                        {% if balance > 0 %}
-                            {% set upnl_pct = (unrealised / balance) * 100 %}
-                            {% set t = totals[7][0]|tendencia %}
-                            <span class="bb-kpi__var is-{{ t or 'cero' }}" data-value="{{ "%.2f"|format(upnl_pct) }}">
-                                {%- if t == 'gana' %}<i class="fas fa-caret-up" aria-hidden="true"></i> {% elif t == 'pierde' %}<i class="fas fa-caret-down" aria-hidden="true"></i> {% endif -%}
-                                {{ upnl_pct|pct(dec=2, signo=True) }}</span>
-                        {% endif %}
+                        <span data-vivo="upnl" class="bb-num" data-value="{{ totals[7][0] }}">{{ totals[7][0]|usd(signo=True) }}</span>
+                        {{ i.upnl_var(totals[7]) }}
                     </div>
+                    <span data-vivo="fuente" class="bb-hero__fuente">{{ fuente_texto }}</span>
                 </div>
             </a>
-            {{ kpi("Hoy", totals[1], totals[6][0], url_for("main.dashboard_page", start=timeranges[0][0], end=timeranges[0][1])) }}
-            {{ kpi("Desde el lunes", totals[2], totals[6][1], url_for("main.dashboard_page", start=timeranges[2][0], end=timeranges[2][1])) }}
-            {{ kpi(totals[8]|mes_es, totals[3], totals[6][2], url_for("main.dashboard_page", start=timeranges[4][0], end=timeranges[4][1])) }}
-            {{ kpi("Total", totals[0], totals[6][3], url_for("main.dashboard_page", start=timeranges[8][0], end=timeranges[8][1])) }}
+            {{ kpi("hoy", "Hoy", totals[1], totals[6][0], url_for("main.dashboard_page", start=timeranges[0][0], end=timeranges[0][1])) }}
+            {{ kpi("semana", "Desde el lunes", totals[2], totals[6][1], url_for("main.dashboard_page", start=timeranges[2][0], end=timeranges[2][1])) }}
+            {{ kpi("mes", totals[8]|mes_es, totals[3], totals[6][2], url_for("main.dashboard_page", start=timeranges[4][0], end=timeranges[4][1])) }}
+            {{ kpi("total", "Total", totals[0], totals[6][3], url_for("main.dashboard_page", start=timeranges[8][0], end=timeranges[8][1])) }}
         </div>
     </section>
     {% if rescate_resumen %}{% include "_rescate_tarjetas.html" %}{% endif %}
     {# Gráficos del período: un eje por gráfico (antes ganancia y balance compartían dos escalas). Los datos son los
        arrays crudos de Jinja; el formato es-AR va solo en ejes, tooltips y etiquetas (BB.fmt). #}
-    {% set period_profit = totals[9]|float %}
-    {% set wallet_balance = totals[7][1]|replace('$', '')|replace(',', '')|float %}
     <section class="bb-seccion" aria-labelledby="bbTituloPeriodo">
-        <h2 class="bb-seccion__titulo" id="bbTituloPeriodo">Período <span class="bb-seccion__sub">del {{ startdate }} al {{ enddate }}</span>
+        <h2 class="bb-seccion__titulo" id="bbTituloPeriodo">Período <span data-vivo="periodo" class="bb-seccion__sub">del {{ startdate }} al {{ enddate }}</span>
             <a class="bb-seccion__mas" href="{{ url_for('main.projection_page') }}">Proyección</a></h2>
         <div class="bb-graficos">
             <div class="card bb-grafico col-a">
@@ -138,18 +109,11 @@
                         <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Ver los números</summary>
                         <table class="bb-tabla-chica">
                             <thead><tr><th scope="col">Día</th><th scope="col" class="bb-n">Ganancia</th></tr></thead>
-                            <tbody>
-                                {% for v in data[0][0] %}
-                                    <tr><td>{{ data[0][1][loop.index0] }}</td><td class="bb-n is-{{ v|tendencia or 'cero' }}" data-value="{{ v }}">{{ v|usd(dec=2, signo=True) }}</td></tr>
-                                {% else %}
-                                    <tr><td colspan="2">Sin movimientos en el período.</td></tr>
-                                {% endfor %}
-                            </tbody>
+                            {{ i.tabla_diario(data) }}
                         </table>
                     </details>
                 </div>
-                <div class="card-footer">Ganancia del período: <strong class="bb-num is-{{ period_profit|tendencia or 'cero' }}" data-value="{{ totals[9] }}">{{ period_profit|usd(dec=2, signo=True) }}</strong>
-                    {% if wallet_balance > 0 %}({{ ((period_profit / wallet_balance) * 100)|pct(dec=2, signo=True) }}){% else %}(-){% endif %}</div>
+                {{ i.pie_periodo(totals) }}
             </div>
             <div class="card bb-grafico col-b">
                 <div class="card-body">
@@ -157,29 +121,22 @@
                     <p class="bb-grafico__sub">Al cierre de cada día.</p>
                     <div class="bb-grafico__lienzo"><canvas id="lineChart" role="img" aria-label="Balance al cierre de cada día"></canvas></div>
                 </div>
-                <div class="card-footer">{% if data[2][0] %}Último: <strong class="bb-num" data-value="{{ data[2][0][-1] }}">{{ data[2][0][-1]|usd(dec=2) }}</strong>{% else %}Sin datos en el período.{% endif %}</div>
+                {{ i.pie_balance(data) }}
             </div>
             <div class="card bb-grafico col-c">
                 <div class="card-body">
                     <h3>Ganancia por moneda</h3>
                     <p class="bb-grafico__sub">Tocá una moneda para abrirla.</p>
-                    <div class="bb-grafico__lienzo" style="height: {{ [240, 56 + 34 * (data[1][0]|length)]|max }}px"><canvas id="barChart" role="img" aria-label="Ganancia por moneda en el período"></canvas></div>
+                    <div class="bb-grafico__lienzo" id="barChartLienzo" style="height: {{ alto_por_moneda }}px"><canvas id="barChart" role="img" aria-label="Ganancia por moneda en el período"></canvas></div>
                     <details class="bb-detalle">
                         <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Ver los números</summary>
                         <table class="bb-tabla-chica">
                             <thead><tr><th scope="col">Moneda</th><th scope="col" class="bb-n">Ganancia</th></tr></thead>
-                            <tbody>
-                                {% for moneda in data[1][0] %}
-                                    {% set v = data[1][1][loop.index0] %}
-                                    <tr><td><a href="{{ url_for('main.coin_page', coin=moneda) }}">{{ moneda }}</a></td><td class="bb-n is-{{ v|tendencia or 'cero' }}" data-value="{{ v }}">{{ v|usd(dec=2, signo=True) }}</td></tr>
-                                {% else %}
-                                    <tr><td colspan="2">Sin movimientos en el período.</td></tr>
-                                {% endfor %}
-                            </tbody>
+                            {{ i.tabla_monedas(data) }}
                         </table>
                     </details>
                 </div>
-                <div class="card-footer">{{ totals[10] }} {{ 'moneda' if totals[10] == 1 else 'monedas' }} con movimiento</div>
+                <div data-vivo="monedas_movimiento" class="card-footer">{{ totals[10] }} {{ 'moneda' if totals[10] == 1 else 'monedas' }} con movimiento</div>
             </div>
         </div>
     </section>
@@ -226,6 +183,7 @@
 Chart.register(ChartDataLabels);
 
 // Gráficos de la home: un eje por gráfico, colores leídos de los tokens (se recrean al cambiar el tema).
+// en_vivo.js cambia estos arrays en el lugar (BB.vivoGraficos): un cambio de tema los vuelve a dibujar con lo último.
 const DIAS = {{ data[0][1] | safe }};
 const DIARIO = {{ data[0][0] }};        /* data[0][0]: ganancia por día, crudo */
 const BALANCE = {{ data[2][0] }};       /* data[2][0]: balance al cierre, crudo */
@@ -321,6 +279,25 @@ function graphClickEvent(event, array){
     pintar();
     // fb-theme-changed también llega cuando cambia el tema del sistema en modo automático.
     window.addEventListener('fb-theme-changed', pintar);
+
+    // En vivo: series nuevas del período (JSON de /api/vivo/inicio). Sin animación ni recrear los gráficos.
+    function reemplazar(arr, nuevo) { arr.length = 0; Array.prototype.push.apply(arr, nuevo || []); }
+    window.BB.vivoGraficos = function (g) {
+        if (!g || !g.diario || !g.balance || !g.por_moneda) return;
+        reemplazar(DIAS, g.diario.dias); reemplazar(DIARIO, g.diario.valores);
+        reemplazar(BALANCE_DIAS, g.balance.dias); reemplazar(BALANCE, g.balance.valores);
+        reemplazar(data.labels, g.por_moneda.monedas); reemplazar(POR_MONEDA, g.por_moneda.valores);
+        const lienzo = document.getElementById('barChartLienzo');
+        if (lienzo && g.por_moneda.alto) lienzo.style.height = g.por_moneda.alto + 'px';
+        const T = f.token, gana = T('--bb-gain-mark'), pierde = T('--bb-loss-mark');
+        const porSigno = (vs) => vs.map((v) => (v < 0 ? pierde : gana));
+        const [diario, balance, moneda] = graficos;
+        if (diario) { diario.data.labels = f.dias(DIAS); diario.data.datasets[0].backgroundColor = porSigno(DIARIO); }
+        if (balance) balance.data.labels = f.dias(BALANCE_DIAS);
+        if (moneda) { moneda.data.labels = data.labels; moneda.data.datasets[0].backgroundColor = porSigno(POR_MONEDA); }
+        graficos.forEach((c) => { c.update('none'); });
+        if (moneda) moneda.resize();
+    };
 })();
 
 // Bot status (passivbot) - no bloquea la carga de la pagina
@@ -424,8 +401,19 @@ function graphClickEvent(event, array){
             });
     }
 
+    // Con en_vivo.js activo el estado llega en su JSON cada 15 s (evento fb-bot-status) y no se pide aparte cada 30 s.
+    let vivoActivo = false, intervalo = null;
+    window.addEventListener('fb-vivo-activo', () => {
+        vivoActivo = true;
+        if (intervalo) { clearInterval(intervalo); intervalo = null; }
+    });
+    window.addEventListener('fb-bot-status-error', () => {
+        setBadge('Sin datos', 'bg-secondary', 'fas fa-question-circle');
+        setModal('<p class="text-danger">No se pudo leer el estado del bot. Se reintenta en la próxima actualización.</p>');
+    });
+
     function initBotStatus() {
-        const start = () => { updateBotStatus(); setInterval(updateBotStatus, 30000); };
+        const start = () => { updateBotStatus(); if (!vivoActivo) intervalo = setInterval(updateBotStatus, 30000); };
         if (window.requestIdleCallback) {
             requestIdleCallback(start, { timeout: 2000 });
         } else {

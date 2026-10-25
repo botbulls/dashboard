@@ -1,9 +1,11 @@
 {# Tarjetas del rescate en el dashboard principal. Lee rescate_resumen (resumen_rescate.tarjetas): sin llamadas a Binance.
    Estructura que leen los tests: data-tarjeta en la raíz de cada tarjeta y <div class="card-footer"> como último hijo
-   (el pie lleva la antigüedad). Cada frase va en un solo nodo de texto. Montos en es-AR con el crudo en data-value. #}
+   (el pie lleva la antigüedad). Cada frase va en un solo nodo de texto. Montos en es-AR con el crudo en data-value.
+   En vivo: /api/vivo/inicio devuelve este mismo parcial y en_vivo.js reemplaza solo los hijos que cambiaron, por
+   data-vivo-clave / data-tarjeta (un aviso con role="alert" que sigue igual no se vuelve a anunciar). #}
 {% set r = rescate_resumen %}
-<section class="bb-seccion rescate_tarjetas" id="rescateTarjetas" aria-labelledby="bbTituloRescate">
-    <h2 class="bb-seccion__titulo" id="bbTituloRescate">
+<section data-vivo-bloque="rescate" class="bb-seccion rescate_tarjetas" id="rescateTarjetas" aria-labelledby="bbTituloRescate">
+    <h2 data-vivo-clave="titulo" class="bb-seccion__titulo" id="bbTituloRescate">
         <a href="{{ url_for('main.rescate_page') }}"><i class="fas fa-life-ring" aria-hidden="true"></i> Rescate</a>
         {% if r.error %}
             <span class="badge bb-badge bb-badge--neutro">sin datos</span>
@@ -19,9 +21,9 @@
     </h2>
 
     {% if r.error %}
-        <div class="alert alert-secondary rescate_aviso mb-0" role="status">{{ r.error }} {{ r.como_activar }}</div>
+        <div data-vivo-clave="error" class="alert alert-secondary rescate_aviso mb-0" role="status">{{ r.error }} {{ r.como_activar }}</div>
     {% else %}
-    <div class="bb-rescate">
+    <div data-vivo-clave="tarjetas" class="bb-rescate">
         {# ---- Semáforo: margen / mantenimiento. Estado con ícono y palabra; el detalle va plegado. #}
         {% set rt_ = r.ratio %}
         {% set sem = rt_.semaforo %}
@@ -230,18 +232,18 @@
         {% endif %}
     </div>
     {% if r.modo and not r.servicio_vivo %}
-        <div class="alert alert-danger rescate_aviso mb-0" role="alert"><i class="fas fa-heartbeat me-1" aria-hidden="true"></i> El servicio rescate no late (último latido {{ r.latido_hace or 'desconocido' }}): los datos pueden estar viejos y nadie está vigilando el tope.</div>
+        <div data-vivo-clave="no-late" class="alert alert-danger rescate_aviso mb-0" role="alert"><i class="fas fa-heartbeat me-1" aria-hidden="true"></i> El servicio rescate no late (último latido {{ r.latido_hace or 'desconocido' }}): los datos pueden estar viejos y nadie está vigilando el tope.</div>
     {% endif %}
     {% if r.sin_datos %}
-        <div class="alert alert-secondary rescate_aviso mb-0" role="status">Sin datos del rescate. {{ r.como_activar }}</div>
+        <div data-vivo-clave="sin-datos" class="alert alert-secondary rescate_aviso mb-0" role="status">Sin datos del rescate. {{ r.como_activar }}</div>
     {% elif r.lectura_error %}
-        <div class="alert alert-warning rescate_aviso mb-0" role="status">Última lectura con error: {{ r.lectura_error|truncate(220) }}</div>
+        <div data-vivo-clave="lectura-error" class="alert alert-warning rescate_aviso mb-0" role="status">Última lectura con error: {{ r.lectura_error|truncate(220) }}</div>
     {% endif %}
     {% if r.simulado %}
-        <p class="bb-tarjeta__linea mb-0">dry_run: los montos de préstamo son simulados (no se transfirió nada).</p>
+        <p data-vivo-clave="simulado" class="bb-tarjeta__linea mb-0">dry_run: los montos de préstamo son simulados (no se transfirió nada).</p>
     {% endif %}
     {% for e in r.errores %}
-        <div class="alert alert-warning rescate_aviso mb-0" role="alert">{{ e }}</div>
+        <div data-vivo-clave="error-{{ loop.index }}" class="alert alert-warning rescate_aviso mb-0" role="alert">{{ e }}</div>
     {% endfor %}
     {% endif %}
 </section>

@@ -237,9 +237,13 @@ class Settings:
 class DockerClient:
     """Cliente minimo de la Docker Engine API. Solo usa endpoints /containers/*."""
 
-    def __init__(self, base_url: str, session: Optional[requests.Session] = None) -> None:
+    def __init__(self, base_url: str, session: Optional[requests.Session] = None,
+                 timeout: float = HTTP_TIMEOUT_SECONDS) -> None:
         self.base_url = base_url.rstrip("/")
         self.http = session or requests.Session()
+        # Timeout de cada pedido (salvo start/stop/restart, que suman el "t" del stop). /api/vivo/inicio usa uno
+        # corto para responder los números antes de que el navegador corte (blueprint.bot_status_payload).
+        self.timeout = timeout
 
     def _url(self, name: str, suffix: str = "") -> str:
         if not _CONTAINER_NAME_RE.match(name):
@@ -247,7 +251,7 @@ class DockerClient:
         return f"{self.base_url}/containers/{quote(name, safe='')}{suffix}"
 
     def _request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
-        kwargs.setdefault("timeout", HTTP_TIMEOUT_SECONDS)
+        kwargs.setdefault("timeout", self.timeout)
         try:
             return self.http.request(method, url, **kwargs)
         except requests.RequestException as exc:

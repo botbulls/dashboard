@@ -29,9 +29,11 @@ from futuresboard import jobs
 from futuresboard import perfiles
 from futuresboard import rescate
 from futuresboard import resumen_rescate
+from futuresboard import scraper
 from futuresboard import telegram_notify
 from futuresboard import db
 from futuresboard.config import BINANCE_FUTURES_MAINNET_URL
+from futuresboard.config import state_dir
 
 app = Blueprint("main", __name__)
 
@@ -280,221 +282,76 @@ def timeranges():
 
 def _rescate_resumen():
     """Tarjetas del rescate para el dashboard principal: solo lee archivos (nunca Binance) y nunca lanza."""
-    return resumen_rescate.tarjetas(pathlib.Path(current_app.config["DATABASE"]).parent)
+    return resumen_rescate.tarjetas(state_dir(current_app.config))
 
 
-@app.route("/", methods=["GET"])
-def index_page():
-    daterange = request.args.get("daterange")
+def _hace(segundos) -> str:
+    """'38 s', '12 min', '3 h', '2 d' (mismos cortes que resumen_rescate.antiguedad)."""
+    s = max(0, int(segundos))
+    if s < 90:
+        return f"{s} s"
+    if s < 90 * 60:
+        return f"{s // 60} min"
+    if s < 48 * 3600:
+        return f"{s // 3600} h"
+    return f"{s // 86400} d"
+
+
+def _vivo_ctx(url: str) -> dict:
+    """Lo que necesita el indicador "en vivo" de base.html: a dónde pide en_vivo.js y la edad de los datos al render."""
+    f = scraper.frescura_web(current_app.config)
+    edad = f["edad_segundos"]
+    return {
+        "url": url,
+        "edad": edad,
+        "intervalo": f["intervalo_segundos"],
+        "texto": "Sin latido del scraper" if edad is None else f"Datos de hace {_hace(edad)}",
+    }
+
+
+def _cuenta(balance_db: float, upnl_db: float) -> dict:
+    """Balance y PnL no realizado de Inicio con su fuente: la lectura del rescate si es fresca, si no la base."""
+    frescura = scraper.frescura_web(current_app.config)
+    base = {"origen": "base", "at": frescura["at"], "edad_segundos": frescura["edad_segundos"]}
+    fuentes = {"balance": dict(base), "upnl": dict(base)}
+    balance, upnl = balance_db, upnl_db
+    lectura = resumen_rescate.lectura_cuenta(state_dir(current_app.config))
+    if lectura:
+        r = {"origen": "rescate", "at": lectura["at"], "edad_segundos": lectura["edad_segundos"]}
+        if lectura["wallet"] is not None:
+            balance = float(lectura["wallet"])
+            fuentes["balance"] = {**r, "derivado": lectura["wallet_derivada"]}
+        if lectura["upnl"] is not None:
+            upnl = float(lectura["upnl"])
+            fuentes["upnl"] = dict(r)
+    return {"balance": balance, "upnl": upnl, "fuentes": fuentes}
+
+
+def texto_fuente(fuentes: dict) -> str:
+    nombre = {"base": "base del scraper", "rescate": "lectura del rescate"}
+    b, u = fuentes["balance"]["origen"], fuentes["upnl"]["origen"]
+    if b == u:
+        return f"Balance y PnL: {nombre[b]}"
+    return f"Balance: {nombre[b]} · PnL: {nombre[u]}"
+
+
+def alto_grafico_monedas(n: int) -> int:
+    """Alto en px del gráfico de ganancia por moneda (una barra de 34 px por moneda, mínimo 240)."""
+    return max(240, 56 + 34 * n)
+
+
+def _datos_inicio(startdate: str, enddate: str) -> dict:
+    """Contexto de home.html para el período [startdate, enddate] (fechas ISO que ``fromisoformat`` acepta).
+
+    Lo usan las dos rutas de Inicio (``/``, con la semana en curso, y ``/dashboard/<a>/<b>``) y ``/api/vivo/inicio``:
+    lo que actualiza el JS sale de las mismas cuentas que la página. Balance y PnL no realizado salen de la lectura
+    del rescate si es fresca (ver ``_cuenta``); los % del balance y la curva de balance usan ese mismo balance.
+    """
     ranges = timeranges()
-
-    if daterange is not None:
-        daterange = daterange.split(" - ")
-        if len(daterange) == 2:
-            try:
-                start = (
-                    datetime.combine(
-                        datetime.fromisoformat(daterange[0]), datetime.min.time()
-                    ).timestamp()
-                    * 1000
-                )
-                end = (
-                    datetime.combine(
-                        datetime.fromisoformat(daterange[1]), datetime.max.time()
-                    ).timestamp()
-                    * 1000
-                )
-                startdate, enddate = daterange[0], daterange[1]
-                return redirect(url_for("main.dashboard_page", start=startdate, end=enddate))
-            except Exception:
-                pass
-
-    todaystart = (
-        datetime.combine(datetime.fromisoformat(ranges[0][0]), datetime.min.time()).timestamp()
-        * 1000
-    )
-    todayend = (
-        datetime.combine(datetime.fromisoformat(ranges[0][1]), datetime.max.time()).timestamp()
-        * 1000
-    )
-    weekstart = (
-        datetime.combine(datetime.fromisoformat(ranges[2][0]), datetime.min.time()).timestamp()
-        * 1000
-    )
-    weekend = (
-        datetime.combine(datetime.fromisoformat(ranges[2][1]), datetime.max.time()).timestamp()
-        * 1000
-    )
-    monthstart = (
-        datetime.combine(datetime.fromisoformat(ranges[4][0]), datetime.min.time()).timestamp()
-        * 1000
-    )
-    monthend = (
-        datetime.combine(datetime.fromisoformat(ranges[4][1]), datetime.max.time()).timestamp()
-        * 1000
-    )
-
     start = (
-        datetime.combine(datetime.fromisoformat(ranges[2][0]), datetime.min.time()).timestamp()
-        * 1000
+        datetime.combine(datetime.fromisoformat(startdate), datetime.min.time()).timestamp() * 1000
     )
-    end = (
-        datetime.combine(datetime.fromisoformat(ranges[2][1]), datetime.max.time()).timestamp()
-        * 1000
-    )
-    startdate, enddate = ranges[2][0], ranges[2][1]
-
-    balance = db.query("SELECT totalWalletBalance FROM account WHERE AID = 1", one=True)
-    total = db.query(
-        'SELECT SUM(income) FROM income WHERE asset <> "BNB" AND incomeType NOT IN'
-        + " ({0})".format(", ".join("?" for _ in remove_incomeTypes)),
-        remove_incomeTypes,
-        one=True,
-    )
-    today = db.query(
-        'SELECT SUM(income) FROM income WHERE asset <> "BNB" AND incomeType NOT IN'
-        + " ({0})".format(", ".join("?" for _ in remove_incomeTypes))
-        + " AND time >= ? AND time <= ?",
-        remove_incomeTypes + [todaystart, todayend],
-        one=True,
-    )
-    week = db.query(
-        'SELECT SUM(income) FROM income WHERE asset <> "BNB" AND incomeType NOT IN'
-        + " ({0})".format(", ".join("?" for _ in remove_incomeTypes))
-        + " AND time >= ? AND time <= ?",
-        remove_incomeTypes + [weekstart, weekend],
-        one=True,
-    )
-    month = db.query(
-        'SELECT SUM(income) FROM income WHERE asset <> "BNB" AND incomeType NOT IN'
-        + " ({0})".format(", ".join("?" for _ in remove_incomeTypes))
-        + " AND time >= ? AND time <= ?",
-        remove_incomeTypes + [monthstart, monthend],
-        one=True,
-    )
-
-    unrealized = db.query("SELECT SUM(unrealizedProfit) FROM positions", one=True)
-
-    all_fees = db.query(
-        'SELECT SUM(income), asset FROM income WHERE incomeType ="COMMISSION" GROUP BY asset'
-    )
-
-    by_date = db.query(
-        'SELECT DATE(time / 1000, "unixepoch") AS Date, SUM(income) AS inc FROM income WHERE asset <> "BNB" AND incomeType NOT IN'
-        + " ({0})".format(", ".join("?" for _ in remove_incomeTypes))
-        + " AND time >= ?  AND time <= ? GROUP BY Date",
-        remove_incomeTypes + [start, end],
-    )
-
-    by_symbol = db.query(
-        'SELECT SUM(income) AS inc, symbol FROM income WHERE asset <> "BNB" AND incomeType NOT IN'
-        + " ({0})".format(", ".join("?" for _ in remove_incomeTypes))
-        + " AND time >= ? AND time <= ? GROUP BY symbol ORDER BY inc DESC",
-        remove_incomeTypes + [start, end],
-    )
-
-    fees = {"USDT": 0, "BNB": 0}
-
-    # Sin fila de account o con balance NULL se muestra como balance 0 (los % quedan en "-").
-    balance = float(balance[0]) if balance is not None and balance[0] is not None else 0.0
-
-    temptotal: tuple[list[float], list[float]] = ([], [])
-    profit_period = balance - zero_value(week[0])
-
-    temp: tuple[list[float], list[float]] = ([], [])
-    for each in by_date:
-        temp[0].append(round(float(each[1]), 2))
-        temp[1].append(each[0])
-        temptotal[1].append(each[0])
-        temptotal[0].append(round(profit_period + float(each[1]), 2))
-        profit_period += float(each[1])
-    by_date = temp
-    total_by_date = temptotal
-
-    temp = ([], [])
-    for each in by_symbol:
-        temp[0].append(each[1])
-        temp[1].append(round(float(each[0]), 2))
-    by_symbol = temp
-
-    if balance == 0.0:
-        percentages = ["-", "-", "-", "-"]
-    else:
-        percentages = [
-            format_dp(zero_value(today[0]) / balance * 100),
-            format_dp(zero_value(week[0]) / balance * 100),
-            format_dp(zero_value(month[0]) / balance * 100),
-            format_dp(zero_value(total[0]) / balance * 100),
-        ]
-
-    for row in all_fees:
-        fees[row[1]] = format_dp(abs(zero_value(row[0])), 4)
-
-    pnl = [format_dp(zero_value(unrealized[0])), format_dp(balance)]
-    totals = [
-        format_dp(zero_value(total[0])),
-        format_dp(zero_value(today[0])),
-        format_dp(zero_value(week[0])),
-        format_dp(zero_value(month[0])),
-        ranges[3],
-        fees,
-        percentages,
-        pnl,
-        datetime.now().strftime("%B"),
-        zero_value(week[0]),
-        len(by_symbol[0]),
-    ]
-
-    return render_template(
-        "home.html",
-        coin_list=get_coins(),
-        totals=totals,
-        data=[by_date, by_symbol, total_by_date],
-        timeframe="week",
-        lastupdate=get_lastupdate(),
-        startdate=startdate,
-        enddate=enddate,
-        timeranges=ranges,
-        custom=current_app.config["CUSTOM"],
-        rescate_resumen=_rescate_resumen(),
-    )
-
-
-@app.route("/dashboard/<start>/<end>", methods=["GET"])
-def dashboard_page(start, end):
-    ranges = timeranges()
-    daterange = request.args.get("daterange")
-
-    if daterange is not None:
-        daterange = daterange.split(" - ")
-        if len(daterange) == 2:
-            try:
-                start = (
-                    datetime.combine(
-                        datetime.fromisoformat(daterange[0]), datetime.min.time()
-                    ).timestamp()
-                    * 1000
-                )
-                end = (
-                    datetime.combine(
-                        datetime.fromisoformat(daterange[1]), datetime.max.time()
-                    ).timestamp()
-                    * 1000
-                )
-                startdate, enddate = daterange[0], daterange[1]
-                return redirect(url_for("main.dashboard_page", start=startdate, end=enddate))
-            except Exception:
-                return redirect(url_for("main.dashboard_page", start=start, end=end))
-
-    try:
-        startdate, enddate = start, end
-        start = (
-            datetime.combine(datetime.fromisoformat(start), datetime.min.time()).timestamp() * 1000
-        )
-        end = datetime.combine(datetime.fromisoformat(end), datetime.max.time()).timestamp() * 1000
-    except Exception:
-        startdate, enddate = ranges[2][0], ranges[2][1]
-        return redirect(url_for("main.dashboard_page", start=startdate, end=enddate))
+    end = datetime.combine(datetime.fromisoformat(enddate), datetime.max.time()).timestamp() * 1000
 
     todaystart = (
         datetime.combine(datetime.fromisoformat(ranges[0][0]), datetime.min.time()).timestamp()
@@ -575,6 +432,8 @@ def dashboard_page(start, end):
 
     # Sin fila de account o con balance NULL se muestra como balance 0 (los % quedan en "-").
     balance = float(balance[0]) if balance is not None and balance[0] is not None else 0.0
+    cuenta = _cuenta(balance, zero_value(unrealized[0]))
+    balance = cuenta["balance"]
 
     temptotal: tuple[list[float], list[float]] = ([], [])
 
@@ -616,7 +475,7 @@ def dashboard_page(start, end):
 
     for row in all_fees:
         fees[row[1]] = format_dp(abs(zero_value(row[0])), 4)
-    pnl = [format_dp(zero_value(unrealized[0])), format_dp(balance)]
+    pnl = [format_dp(cuenta["upnl"]), format_dp(balance)]
     totals = [
         format_dp(zero_value(total[0])),
         format_dp(zero_value(today[0])),
@@ -630,22 +489,102 @@ def dashboard_page(start, end):
         zero_value(customframe[0]),
         len(by_symbol[0]),
     ]
+    return {
+        "coin_list": get_coins(),
+        "totals": totals,
+        "data": [by_date, by_symbol, total_by_date],
+        "lastupdate": get_lastupdate(),
+        "startdate": startdate,
+        "enddate": enddate,
+        "timeranges": ranges,
+        "custom": current_app.config["CUSTOM"],
+        "rescate_resumen": _rescate_resumen(),
+        "fuentes": cuenta["fuentes"],
+        "fuente_texto": texto_fuente(cuenta["fuentes"]),
+        "alto_por_moneda": alto_grafico_monedas(len(by_symbol[0])),
+    }
+
+
+@app.route("/", methods=["GET"])
+def index_page():
+    daterange = request.args.get("daterange")
+    ranges = timeranges()
+
+    if daterange is not None:
+        daterange = daterange.split(" - ")
+        if len(daterange) == 2:
+            try:
+                start = (
+                    datetime.combine(
+                        datetime.fromisoformat(daterange[0]), datetime.min.time()
+                    ).timestamp()
+                    * 1000
+                )
+                end = (
+                    datetime.combine(
+                        datetime.fromisoformat(daterange[1]), datetime.max.time()
+                    ).timestamp()
+                    * 1000
+                )
+                startdate, enddate = daterange[0], daterange[1]
+                return redirect(url_for("main.dashboard_page", start=startdate, end=enddate))
+            except Exception:
+                pass
+
+    # Semana en curso; /api/vivo/inicio sin fechas también usa la semana en curso (cambia el lunes sin recargar).
+    startdate, enddate = ranges[2][0], ranges[2][1]
     return render_template(
         "home.html",
-        coin_list=get_coins(),
-        totals=totals,
-        data=[by_date, by_symbol, total_by_date],
-        lastupdate=get_lastupdate(),
-        startdate=startdate,
-        enddate=enddate,
-        timeranges=ranges,
-        custom=current_app.config["CUSTOM"],
-        rescate_resumen=_rescate_resumen(),
+        timeframe="week",
+        vivo=_vivo_ctx(url_for("vivo.inicio")),
+        **_datos_inicio(startdate, enddate),
     )
 
 
-@app.route("/positions")
-def positions_page():
+@app.route("/dashboard/<start>/<end>", methods=["GET"])
+def dashboard_page(start, end):
+    ranges = timeranges()
+    daterange = request.args.get("daterange")
+
+    if daterange is not None:
+        daterange = daterange.split(" - ")
+        if len(daterange) == 2:
+            try:
+                start = (
+                    datetime.combine(
+                        datetime.fromisoformat(daterange[0]), datetime.min.time()
+                    ).timestamp()
+                    * 1000
+                )
+                end = (
+                    datetime.combine(
+                        datetime.fromisoformat(daterange[1]), datetime.max.time()
+                    ).timestamp()
+                    * 1000
+                )
+                startdate, enddate = daterange[0], daterange[1]
+                return redirect(url_for("main.dashboard_page", start=startdate, end=enddate))
+            except Exception:
+                return redirect(url_for("main.dashboard_page", start=start, end=end))
+
+    try:
+        startdate, enddate = start, end
+        datetime.combine(datetime.fromisoformat(start), datetime.min.time())
+        datetime.combine(datetime.fromisoformat(end), datetime.max.time())
+    except Exception:
+        startdate, enddate = ranges[2][0], ranges[2][1]
+        return redirect(url_for("main.dashboard_page", start=startdate, end=enddate))
+
+    return render_template(
+        "home.html",
+        vivo=_vivo_ctx(url_for("vivo.inicio", start=startdate, end=enddate)),
+        **_datos_inicio(startdate, enddate),
+    )
+
+
+def _datos_posiciones() -> dict:
+    """Posiciones abiertas con sus órdenes y el mark price público: lo que pintan /positions y
+    /api/vivo/posiciones (mismas cuentas en los dos)."""
     coins = get_coins()
     positions = {}
 
@@ -737,13 +676,92 @@ def positions_page():
                 stats.append("-")
         positions[coin] = [allpositions, allorders, stats]
 
+    return {"positions": positions, "markprices": markPrices}
+
+
+@app.route("/positions")
+def positions_page():
     return render_template(
         "positions.html",
         coin_list=get_coins(),
-        positions=positions,
         custom=current_app.config["CUSTOM"],
-        markprices=markPrices,
+        vivo=_vivo_ctx(url_for("vivo.posiciones")),
+        **_datos_posiciones(),
     )
+
+
+def _posicion_moneda(coin) -> dict:
+    """Posición, órdenes y precio de una moneda: lo que pintan /coins/<coin> y /api/vivo/moneda/<coin>.
+
+    Lee la DB y el mark price público de Binance (``premiumIndex?symbol=``, peso 1). Las velas no: son 4 pedidos
+    de 1000 velas y quedan solo en la página. ``coin`` tiene que estar validada (activa o inactiva) antes.
+    """
+    unrealized = db.query(
+        "SELECT SUM(unrealizedProfit) FROM positions WHERE symbol = ?",
+        [coin],
+        one=True,
+    )
+    allpositions = db.query(
+        "SELECT * FROM positions WHERE symbol = ? AND entryPrice > 0",
+        [coin],
+    )
+    allorders = db.query(
+        "SELECT * FROM orders WHERE symbol = ? ORDER BY side, price, origQty",
+        [coin],
+    )
+
+    temp = []
+    for position in allpositions:
+        position = list(position)
+        position[4] = round(float(position[4]), 5)
+        temp.append(position)
+    allpositions = temp
+
+    averagetargets = ["-", "-", "-", "-"]
+    try:
+        response = requests.get(
+            _binance_public_base() + "/fapi/v1/premiumIndex?symbol=" + coin, timeout=2
+        )
+        markPrice: float | str
+        if response:
+            markPrice = float(response.json()["markPrice"])
+            averagetargets = [
+                round(
+                    average_down_target(
+                        allpositions[0][4], allpositions[0][6], markPrice, markPrice * 1.001
+                    )
+                ),
+                round(
+                    average_down_target(
+                        allpositions[0][4], allpositions[0][6], markPrice, markPrice * 1.005
+                    )
+                ),
+                round(
+                    average_down_target(
+                        allpositions[0][4], allpositions[0][6], markPrice, markPrice * 1.01
+                    )
+                ),
+            ]
+        else:
+            markPrice = "-"
+    except IndexError:
+        pass  # sin posición (cerrada o moneda inactiva): el precio queda y los objetivos en "-"
+    except Exception:
+        markPrice = "-"
+
+    temp = []
+    for order in allorders:
+        order = list(order)
+        order[7] = datetime.fromtimestamp(order[7] / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
+        temp.append(order)
+    allorders = temp
+    return {
+        "unrealized": zero_value(unrealized[0]),
+        "allpositions": allpositions,
+        "allorders": allorders,
+        "markprice": markPrice,
+        "target": averagetargets,
+    }
 
 
 @app.route("/coins/<coin>", methods=["GET"])
@@ -854,56 +872,7 @@ def coin_page(coin):
             'SELECT SUM(income), asset FROM income WHERE incomeType ="COMMISSION" AND symbol = ? GROUP BY asset',
             [coin],
         )
-        unrealized = db.query(
-            "SELECT SUM(unrealizedProfit) FROM positions WHERE symbol = ?",
-            [coin],
-            one=True,
-        )
-        allpositions = db.query(
-            "SELECT * FROM positions WHERE symbol = ? AND entryPrice > 0",
-            [coin],
-        )
-        allorders = db.query(
-            "SELECT * FROM orders WHERE symbol = ? ORDER BY side, price, origQty",
-            [coin],
-        )
-
-        temp = []
-        for position in allpositions:
-            position = list(position)
-            position[4] = round(float(position[4]), 5)
-            temp.append(position)
-        allpositions = temp
-
-        averagetargets = ["-", "-", "-", "-"]
-        try:
-            response = requests.get(
-                _binance_public_base() + "/fapi/v1/premiumIndex?symbol=" + coin, timeout=2
-            )
-            markPrice: float | str
-            if response:
-                markPrice = float(response.json()["markPrice"])
-                averagetargets = [
-                    round(
-                        average_down_target(
-                            allpositions[0][4], allpositions[0][6], markPrice, markPrice * 1.001
-                        )
-                    ),
-                    round(
-                        average_down_target(
-                            allpositions[0][4], allpositions[0][6], markPrice, markPrice * 1.005
-                        )
-                    ),
-                    round(
-                        average_down_target(
-                            allpositions[0][4], allpositions[0][6], markPrice, markPrice * 1.01
-                        )
-                    ),
-                ]
-            else:
-                markPrice = "-"
-        except Exception:
-            markPrice = "-"
+        pm = _posicion_moneda(coin)
 
         sticks = {"15m": [], "1h": [], "4h": [], "1d": []}
 
@@ -937,13 +906,6 @@ def coin_page(coin):
             except:
                 pass
 
-        temp = []
-        for order in allorders:
-            order = list(order)
-            order[7] = datetime.fromtimestamp(order[7] / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
-            temp.append(order)
-        allorders = temp
-
         fees = {"USDT": 0, "BNB": 0}
         balance = float(balance[0])
         if balance == 0.0:
@@ -957,7 +919,7 @@ def coin_page(coin):
             ]
         for row in result:
             fees[row[1]] = format_dp(abs(zero_value(row[0])), 4)
-        pnl = [format_dp(zero_value(unrealized[0])), format_dp(balance)]
+        pnl = [format_dp(pm["unrealized"]), format_dp(balance)]
         totals = [
             format_dp(zero_value(total[0])),
             format_dp(zero_value(today[0])),
@@ -989,14 +951,15 @@ def coin_page(coin):
         totals=totals,
         summary=[],
         data=[by_date],
-        orders=[allpositions, allorders],
+        orders=[pm["allpositions"], pm["allorders"]],
         lastupdate=get_lastupdate(),
-        markprice=markPrice,
+        markprice=pm["markprice"],
         startdate=startdate,
         enddate=enddate,
         timeranges=ranges,
         custom=current_app.config["CUSTOM"],
-        target=averagetargets,
+        target=pm["target"],
+        vivo=_vivo_ctx(url_for("vivo.moneda", coin=coin)),
         candlesticks=sticks,
     )
 
@@ -1119,56 +1082,7 @@ def coin_page_timeframe(coin, start, end):
             'SELECT SUM(income), asset FROM income WHERE incomeType ="COMMISSION" AND symbol = ? GROUP BY asset',
             [coin],
         )
-        unrealized = db.query(
-            "SELECT SUM(unrealizedProfit) FROM positions WHERE symbol = ?",
-            [coin],
-            one=True,
-        )
-        allpositions = db.query(
-            "SELECT * FROM positions WHERE symbol = ? AND entryPrice > 0",
-            [coin],
-        )
-        allorders = db.query(
-            "SELECT * FROM orders WHERE symbol = ? ORDER BY side, price, origQty",
-            [coin],
-        )
-
-        temp = []
-        for position in allpositions:
-            position = list(position)
-            position[4] = round(float(position[4]), 5)
-            temp.append(position)
-        allpositions = temp
-
-        averagetargets = ["-", "-", "-", "-"]
-        try:
-            response = requests.get(
-                _binance_public_base() + "/fapi/v1/premiumIndex?symbol=" + coin, timeout=2
-            )
-            markPrice: float | str
-            if response:
-                markPrice = float(response.json()["markPrice"])
-                averagetargets = [
-                    round(
-                        average_down_target(
-                            allpositions[0][4], allpositions[0][6], markPrice, markPrice * 1.001
-                        )
-                    ),
-                    round(
-                        average_down_target(
-                            allpositions[0][4], allpositions[0][6], markPrice, markPrice * 1.005
-                        )
-                    ),
-                    round(
-                        average_down_target(
-                            allpositions[0][4], allpositions[0][6], markPrice, markPrice * 1.01
-                        )
-                    ),
-                ]
-            else:
-                markPrice = "-"
-        except Exception:
-            markPrice = "-"
+        pm = _posicion_moneda(coin)
 
         sticks = {"15m": [], "1h": [], "4h": [], "1d": []}
 
@@ -1202,12 +1116,6 @@ def coin_page_timeframe(coin, start, end):
             except:
                 pass
 
-        temp = []
-        for order in allorders:
-            order = list(order)
-            order[7] = datetime.fromtimestamp(order[7] / 1000.0).strftime("%Y-%m-%d %H:%M:%S")
-            temp.append(order)
-        allorders = temp
         fees = {"USDT": 0, "BNB": 0}
         balance = float(balance[0])
         if balance == 0.0:
@@ -1234,7 +1142,7 @@ def coin_page_timeframe(coin, start, end):
             temp[1].append(each[0])
         by_date = temp
 
-        pnl = [format_dp(zero_value(unrealized[0])), format_dp(balance)]
+        pnl = [format_dp(pm["unrealized"]), format_dp(balance)]
 
         customframe = db.query(
             'SELECT SUM(income) FROM income WHERE asset <> "BNB" AND incomeType NOT IN'
@@ -1264,14 +1172,15 @@ def coin_page_timeframe(coin, start, end):
         totals=totals,
         summary=[],
         data=[by_date],
-        orders=[allpositions, allorders],
+        orders=[pm["allpositions"], pm["allorders"]],
         lastupdate=get_lastupdate(),
-        markprice=markPrice,
+        markprice=pm["markprice"],
         startdate=startdate,
         enddate=enddate,
         timeranges=ranges,
         custom=current_app.config["CUSTOM"],
-        target=averagetargets,
+        target=pm["target"],
+        vivo=_vivo_ctx(url_for("vivo.moneda", coin=coin)),
         candlesticks=sticks,
     )
 
@@ -1537,7 +1446,7 @@ def csrf_protect(view):
 
 
 def _bot_store() -> bot_control.Store:
-    return bot_control.Store(pathlib.Path(current_app.config["DATABASE"]).parent)
+    return bot_control.Store(state_dir(current_app.config))
 
 
 JOBS_EXTENSION = "futuresboard_bot_jobs"
@@ -1546,7 +1455,7 @@ JOBS_EXTENSION = "futuresboard_bot_jobs"
 @app.record_once
 def _init_bot_jobs(state) -> None:
     """Registro de jobs del panel (uno por app/proceso). Recupera un job cortado por un reinicio."""
-    store = bot_control.Store(pathlib.Path(state.app.config["DATABASE"]).parent)
+    store = bot_control.Store(state_dir(state.app.config))
     registry = jobs.JobRegistry(store)
     state.app.extensions[JOBS_EXTENSION] = registry
     jobs.recover_interrupted(registry, state.app.logger)
@@ -1599,13 +1508,19 @@ def _run_bot_action(action: str, params: dict, validate, work):
     return _json_response({"ok": True, "job_id": job.id, "job": job.to_dict()}, 202)
 
 
-@app.route("/api/bot/status", methods=["GET"])
-def bot_status():
+def bot_status_payload(docker_timeout: float | None = None) -> tuple[dict, int]:
+    """Estado del bot y HTTP status: lo devuelven /api/bot/status y, dentro de su JSON, /api/vivo/inicio.
+
+    ``docker_timeout``: tope del inspect al docker-proxy (default ``bot_control.HTTP_TIMEOUT_SECONDS``, 10 s).
+    """
     settings = bot_control.Settings()
+    docker = None
+    if docker_timeout is not None and settings.enabled:
+        docker = bot_control.DockerClient(settings.docker_url, timeout=docker_timeout)
     try:
-        out = bot_control.get_status(settings)
+        out = bot_control.get_status(settings, docker=docker)
     except bot_control.BotControlError as exc:
-        return _json_response({"enabled": settings.enabled, "error": str(exc)}, exc.status_code)
+        return {"enabled": settings.enabled, "error": str(exc)}, exc.status_code
     data_dir = _bot_store().data_dir
     out["rescate_start_bloqueado"] = rescate.start_bloqueado(data_dir)
     # Perfiles de riesgo y TWE manual (docs/perfiles.md): definiciones y el perfil vigente según los valores.
@@ -1616,7 +1531,13 @@ def bot_status():
     out["perfil_ultimo"] = rescate_cfg.get("perfil")
     out["twe_manual"] = {"min": str(bot_control.TWE_MANUAL_MIN), "max": str(bot_control.TWE_MANUAL_MAX),
                          "paso": str(bot_control.TWE_MANUAL_PASO), "advertencia": str(bot_control.TWE_ADVERTENCIA)}
-    return _json_response(out)
+    return out, 200
+
+
+@app.route("/api/bot/status", methods=["GET"])
+def bot_status():
+    out, status = bot_status_payload()
+    return _json_response(out, status)
 
 
 def _check_rescate_start(data_dir: pathlib.Path) -> None:

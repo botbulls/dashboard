@@ -19,6 +19,7 @@ from futuresboard import formato
 from futuresboard import health
 from futuresboard import logs
 from futuresboard import telegram_notify
+from futuresboard import vivo
 from futuresboard.config import Config
 
 
@@ -95,6 +96,7 @@ def init_app(config: Config | None = None):
     app.register_blueprint(blueprint.app)
     formato.registrar(app)  # filtros de presentación es-AR (num, usd, pct, tendencia, mes_es)
     app.register_blueprint(health.ops)
+    app.register_blueprint(vivo.vivo)  # /api/vivo/*: números en vivo sin recargar (static/js/en_vivo.js)
 
     _register_log_secrets(app, config)
 

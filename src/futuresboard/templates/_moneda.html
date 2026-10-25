@@ -1,0 +1,36 @@
+{#- Partes de la página de una moneda que actualiza en_vivo.js: precio, posición y órdenes. Las usan coin.html y
+    /api/vivo/moneda/<coin> (futuresboard/vivo.py) con los mismos argumentos. -#}
+
+{% macro bajada(lastupdate, markprice) -%}
+<p data-vivo-bloque="bajada_moneda">Último pedido: {{ lastupdate }}{% if markprice != '-' %} · precio actual <span class="bb-num" data-value="{{ markprice }}">{{ markprice|num }}</span>{% else %} · <span class="bb-tarjeta__aviso"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i> sin precio de Binance</span>{% endif %}</p>
+{%- endmacro %}
+
+{#- Precio u objetivo de la calculadora. Sin precio de Binance ("-"): crudo vacío y "—" (como vivo._o_raya). -#}
+{% macro celda_precio(clave, valor) -%}
+<td data-vivo="{{ clave }}" data-value="{{ '' if valor == '-' else valor }}">{{ '—' if valor == '-' else valor|num }}</td>
+{%- endmacro %}
+
+{#- Precio en el encabezado de "Posición y órdenes". La envoltura es display: contents. -#}
+{% macro precio_tag(markprice) -%}
+<span data-vivo-bloque="precio_tag" class="bb-vivo-envoltura">{% if markprice != '-' %} <span class="bb-card-sub"><i class="fas fa-tag" aria-hidden="true"></i> {{ markprice|num }}</span>{% endif %}</span>
+{%- endmacro %}
+
+{#- Filas de la tabla #orders: la posición (o las dos, en hedge) y las órdenes abiertas; data-fila las identifica. -#}
+{% macro filas_ordenes(posiciones, ordenes) -%}
+    {% for position in posiciones %}
+        <tr data-fila="pos-{{ position[5] }}" class="bb-fila-destacada">
+            <td>Posición {{position[5]}} {{position[3]}}x</td>
+            <td class="bb-n" data-order="{{position[6]}}">{{position[6]|num}}</td>
+            <td class="bb-n" data-order="{{position[4]}}">{{position[4]|num}}</td>
+            <td></td>
+        </tr>
+    {% endfor %}
+    {% for order in ordenes %}
+        <tr data-fila="ord-{{ order[0] }}">
+            <td>{{ {'BUY': 'Compra', 'SELL': 'Venta'}.get(order[3], order[3]) }} {{order[8]}} {{order[4]}}</td>
+            <td class="bb-n" data-order="{{order[1]}}">{{order[1]|num}}</td>
+            <td class="bb-n" data-order="{{order[2]}}">{{order[2]|num}}</td>
+            <td>{{ order[7] }}</td>
+        </tr>
+    {% endfor %}
+{%- endmacro %}
