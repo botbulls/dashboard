@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pathlib
+import re
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -12,6 +15,7 @@ import threading
 import time
 
 import pytest
+import requests
 
 from futuresboard import auth
 from futuresboard import db
@@ -147,6 +151,115 @@ def test_vuelta_con_error_no_deja_latido_y_el_loop_sigue(loop_app):
     scraper.run_loop(app, interval=0, detener=threading.Event(), max_vueltas=2)
     latido = scraper.read_latido(data_dir / "futures.db")
     assert latido["vuelta"] == 2  # la 1 falló (HTTP), la 2 dejó latido
+
+
+# --------------------------------------------------------------------------------------
+# Binance colgado: timeout de conexión y lectura
+# --------------------------------------------------------------------------------------
+# Sin timeout, un Binance que acepta la conexión y no responde dejaba la vuelta trabada para siempre (contenedor
+# "Up", sin latido nuevo).
+
+
+@pytest.fixture
+def app_real(dirs, monkeypatch):
+    """App del loop con el send_signed_request de verdad (el HTTP se simula más abajo)."""
+    config_dir, data_dir = dirs
+    monkeypatch.setenv(ENV_DATABASE, str(data_dir / "futures.db"))
+    return scraper.build_app(Config.from_config_dir(config_dir)), data_dir
+
+
+class _RespuestaVacia:
+    headers = {"X-MBX-USED-WEIGHT-1M": "1"}
+
+    def json(self):
+        return []
+
+
+def test_pedidos_a_binance_llevan_timeout_de_conexion_y_lectura(app_real, monkeypatch):
+    app, _ = app_real
+    timeouts = []
+
+    def grabar(self, method, url, **kw):
+        timeouts.append(kw.get("timeout"))
+        return _RespuestaVacia()
+
+    monkeypatch.setattr(requests.Session, "request", grabar)
+    with app.app_context():
+        scraper.send_signed_request("GET", "/fapi/v1/openOrders")
+        scraper.send_public_request("/fapi/v1/premiumIndex")
+    assert timeouts == [(5, 20), (5, 20)]  # (conexión, lectura) en segundos
+
+
+@pytest.mark.parametrize("exc", [requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout])
+def test_timeout_de_binance_es_una_vuelta_fallida_sin_firma(app_real, monkeypatch, exc):
+    # Un ReadTimeout salía crudo de scrape(): en el hilo del web (_auto_scrape) eso mataba el hilo.
+    app, data_dir = app_real
+
+    def colgado(self, method, url, **kw):
+        raise exc("tardó demasiado")
+
+    monkeypatch.setattr(requests.Session, "request", colgado)
+    with app.app_context():
+        with pytest.raises(scraper.HTTPRequestError) as firmado:
+            scraper.send_signed_request("GET", "/fapi/v1/openOrders")
+        with pytest.raises(scraper.HTTPRequestError) as publico:
+            scraper.send_public_request("/fapi/v1/premiumIndex")
+        assert scraper.scrape(app=app) is False
+    for error in (firmado.value, publico.value):
+        texto = str(error)
+        assert "timeout" in texto.lower(), texto
+        assert not re.search(r"signature=[0-9a-f]{16}", texto), texto
+    estado = scraper.read_scrape_state(data_dir / "futures.db")
+    assert "last_success_at" not in estado and estado["last_error"]
+    assert scraper.read_latido(data_dir / "futures.db") == {}
+
+
+def test_binance_colgado_no_traba_el_loop(app_real, monkeypatch, caplog):
+    app, data_dir = app_real
+    servidor = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    servidor.bind(("127.0.0.1", 0))
+    servidor.listen()
+    servidor.settimeout(0.1)
+    conexiones, cerrar = [], threading.Event()
+
+    def aceptar():  # acepta y nunca responde: Binance colgado
+        while not cerrar.is_set():
+            try:
+                conexiones.append(servidor.accept()[0])
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+
+    threading.Thread(target=aceptar, daemon=True).start()
+    app.config["API_BASE_URL"] = f"http://127.0.0.1:{servidor.getsockname()[1]}"
+    monkeypatch.setattr(scraper, "BINANCE_TIMEOUT", (0.5, 0.5), raising=False)
+    real, fake, pedidos = scraper.send_signed_request, FakeBinance(), []
+
+    def primero_colgado(*a, **kw):  # vuelta 1: el server colgado; vuelta 2: Binance responde
+        pedidos.append(a)
+        return real(*a, **kw) if len(pedidos) == 1 else fake(*a, **kw)
+
+    monkeypatch.setattr(scraper, "send_signed_request", primero_colgado)
+    detener = threading.Event()
+    hilo = threading.Thread(target=scraper.run_loop, args=(app,), daemon=True,
+                            kwargs={"interval": 0, "detener": detener, "max_vueltas": 2})
+    try:
+        with caplog.at_level(logging.INFO):
+            hilo.start()
+            hilo.join(timeout=15)
+            assert not hilo.is_alive(), "Binance colgado dejó el loop trabado"
+    finally:
+        detener.set()
+        cerrar.set()
+        servidor.close()
+        for conexion in conexiones:
+            conexion.close()
+        hilo.join(timeout=5)
+    assert scraper.read_latido(data_dir / "futures.db")["vuelta"] == 2  # la 1 cortó por timeout, sin latido
+    mensajes = [r.getMessage() for r in caplog.records]
+    assert any("timeout" in m.lower() and "/fapi/v1/openOrders" in m for m in mensajes), mensajes
+    assert any("Vuelta 1 sin éxito" in m and "sin latido" in m for m in mensajes), mensajes
 
 
 def test_cuenta_sin_positions_no_cuenta_como_ok_ni_deja_latido(loop_app, monkeypatch):

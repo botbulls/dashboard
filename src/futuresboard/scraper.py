@@ -29,6 +29,10 @@ SCRAPE_STATE_FILE = "scrape_state.json"
 # Latido del loop dedicado (python -m futuresboard.scraper): junto a la DB, en el directorio de datos.
 LATIDO_FILE = "scraper_latido.json"
 
+# Tope de cada pedido a Binance, (conexión, lectura) en segundos. Sin esto un Binance colgado dejaba la vuelta trabada
+# para siempre (contenedor "Up", sin latido). Un timeout es una vuelta fallida (HTTPRequestError) y el loop sigue.
+BINANCE_TIMEOUT = (5, 20)
+
 # Lo setea SIGTERM/SIGINT en el loop dedicado. En el hilo del web nunca se setea: ahí las esperas
 # por peso de API son un sleep común.
 _DETENER = threading.Event()
@@ -214,6 +218,11 @@ def dispatch_request(http_method, signature=None, timestamp=None):
     }.get(http_method, "GET")
 
 
+def _msg_timeout(exc) -> str:
+    conexion, lectura = BINANCE_TIMEOUT
+    return f"timeout: Binance no respondió ({exc.__class__.__name__}; tope {conexion} s conexión / {lectura} s lectura)"
+
+
 # used for sending request requires the signature
 def send_signed_request(http_method, url_path, payload={}, exchange="binance"):
     if exchange == "binance":
@@ -228,7 +237,7 @@ def send_signed_request(http_method, url_path, payload={}, exchange="binance"):
         url += f"&signature={hashing(query_string, exchange)}"
 
     # print("{} {}".format(http_method, url))
-    params = {"url": url, "params": {}}
+    params = {"url": url, "params": {}, "timeout": BINANCE_TIMEOUT}
     try:
         timestamp = get_timestamp()
         response = dispatch_request(
@@ -251,6 +260,8 @@ def send_signed_request(http_method, url_path, payload={}, exchange="binance"):
                     url=url, code=json_response["retCode"], msg=json_response["retMsg"]
                 )
         return headers, json_response
+    except requests.exceptions.Timeout as e:
+        raise HTTPRequestError(url=url, code=-4, msg=_msg_timeout(e))
     except requests.exceptions.ConnectionError as e:
         raise HTTPRequestError(url=url, code=-1, msg=f"{e}")
 
@@ -263,7 +274,7 @@ def send_public_request(url_path, payload={}):
         url = url + "?" + query_string
     # print("{}".format(url))
     try:
-        response = dispatch_request("GET")(url=url)
+        response = dispatch_request("GET")(url=url, timeout=BINANCE_TIMEOUT)
         headers = response.headers
         try:
             json_response = response.json()
@@ -274,6 +285,8 @@ def send_public_request(url_path, payload={}):
                 url=url, code=json_response["code"], msg=json_response["msg"]
             )
         return headers, json_response
+    except requests.exceptions.Timeout as e:
+        raise HTTPRequestError(url=url, code=-4, msg=_msg_timeout(e))
     except requests.exceptions.ConnectionError as e:
         raise HTTPRequestError(url=url, code=-2, msg=f"{e}")
 
