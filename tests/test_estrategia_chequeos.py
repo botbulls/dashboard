@@ -89,6 +89,23 @@ def test_manifiesto_no_usable(manif, red, cambio, motivo):
     assert estrategia.chequear_par("SOLUSDT", ctx(manif), lw=0.8)["bloquea"]
 
 
+def test_manifiesto_de_antes_del_arranque_no_se_usa(manif):
+    """forager reescribe el manifiesto al arrancar. Uno de antes del StartedAt (passivbot corriendo) es de una corrida
+    anterior, quizás de otra imagen (el rollback a una imagen sin writer lo deja): no se usa (revisión, hallazgo 14)."""
+    m = manifiesto_fixture()  # generated_at 2026-10-25T22:30:00Z
+    (manif.parent / manifiesto.NOMBRE).write_text(json.dumps(m))
+    corriendo = {"status": "running", "running": True, "started_at": "2026-10-26T12:35:53.123456789Z"}
+    leido = manifiesto.leer(manif, contenedor=corriendo)
+    assert leido["estado"] == "viejo" and not leido["usable"]
+    assert "antes del último arranque de passivbot" in leido["motivo"]
+    assert manifiesto.config_de(leido, "BTCUSDT") is None
+    # Escrito después del arranque, detenido o sin StartedAt: se usa.
+    assert manifiesto.leer(manif, contenedor={**corriendo, "started_at": "2026-10-25T22:29:59Z"})["usable"]
+    assert manifiesto.leer(manif, contenedor={**corriendo, "running": False, "status": "exited"})["usable"]
+    assert manifiesto.leer(manif, contenedor={"status": "running", "running": True, "started_at": None})["usable"]
+    assert manifiesto.leer(manif)["usable"]
+
+
 def test_manifiesto_json_roto(manif):
     (manif.parent / manifiesto.NOMBRE).write_text("{roto")
     leido = manifiesto.leer(manif)

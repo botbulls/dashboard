@@ -1645,7 +1645,8 @@ def bot_status_payload(docker_timeout: float | None = None) -> tuple[dict, int]:
         est = out.get("estrategia") or {}
         detalle = perfiles.detectar_detalle(
             {"twe_long": out.get("twe_long"), "n_longs": out.get("n_longs"), "n_shorts": out.get("n_shorts"),
-             "approved_symbols_long": est.get("pares_long")}, rescate_cfg, manifiesto.leer(settings.forager_config))
+             "approved_symbols_long": est.get("pares_long")}, rescate_cfg,
+            manifiesto.leer(settings.forager_config, out.get("container")))
     out["perfil_vigente"] = detalle["perfil"]
     out["perfil_motivo"] = detalle["motivo"]
     out["perfil_ultimo"] = rescate_cfg.get("perfil")
@@ -2304,7 +2305,7 @@ def bot_estrategia():
     except bot_control.BotControlError as exc:
         return _json_response({"ok": False, "error": str(exc)}, exc.status_code)
     balance = _balance_estrategia()
-    manif = manifiesto.leer(path)
+    manif = manifiesto.leer(path, _container_rapido())
     ctx = _contexto_estrategia(cfg, path, balance["para_dimensionar"], manif)
     vigente = bot_control.resumen_estrategia(cfg)
     rescate_cfg, _err = rescate.load_config(_bot_store().data_dir)
@@ -2367,7 +2368,7 @@ def bot_estrategia_candidatos():
         _settings, path, cfg = _leer_forager()
     except bot_control.BotControlError as exc:
         return _json_response({"ok": False, "error": str(exc)}, exc.status_code)
-    manif = manifiesto.leer(path)
+    manif = manifiesto.leer(path, _container_rapido())
     ctx = _contexto_estrategia(cfg, path, _balance_estrategia()["para_dimensionar"], manif)
     try:
         universo = {s for s in ctx.operativo.simbolos() if s.endswith("USDT")}
@@ -2412,7 +2413,7 @@ def _armador_estrategia(objetivo: dict, origen: str = "estrategia", titulo: str 
         except OSError as exc:
             raise bot_control.ConfigError(f"No se pudo leer la config de forager: {exc}") from exc
         cfg = bot_control.read_forager_config(path)
-        manif = manifiesto.leer(path)
+        manif = manifiesto.leer(path, info)
         balance = estrategia.balance_dimensionar(db_path, data_dir)
         ctx = estrategia.Contexto.armar(cfg, path, testnet, base, balance["para_dimensionar"], manif=manif)
         rescate_cfg, _err = rescate.load_config(data_dir)

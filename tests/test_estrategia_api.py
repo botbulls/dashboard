@@ -199,6 +199,17 @@ def test_candidatos_q_invalido(client, forager, red, docker, q):  # noqa: F811
     assert resp.status_code == 400
 
 
+def test_estrategia_con_manifiesto_viejo_no_deja_agregar(client, forager, red, docker):  # noqa: F811
+    docker.running = True
+    docker.started_at = "2026-10-26T12:35:53.000000000Z"
+    data = client.get("/api/bot/estrategia").get_json()
+    assert data["manifiesto"]["estado"] == "viejo" and not data["manifiesto"]["usable"]
+    cand = client.get("/api/bot/estrategia/candidatos?q=SOL").get_json()
+    assert cand["manifiesto"]["estado"] == "viejo"
+    sol = next(r for r in cand["resultados"] if r["symbol"] == "SOLUSDT")
+    assert sol["bloquea"]
+
+
 def test_candidatos_sin_manifiesto_bloquea_con_motivo(client, forager, red, docker):  # noqa: F811
     (forager.parent / manifiesto.NOMBRE).unlink()
     d = client.get("/api/bot/estrategia/candidatos?q=SOL").get_json()
