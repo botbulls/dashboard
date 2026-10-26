@@ -103,9 +103,60 @@
     </div>
 </section>
 
-{#- Conexión con Binance (spec § 10): API key enmascarada, quién la usa y "Cambiar API key…" (/bot/credenciales).
-    Lugar reservado: la sección la arma GET /api/bot/credenciales, que todavía no existe. -#}
-<section class="bb-seccion" id="bbConexionBinance" data-bot-conexion-binance hidden aria-hidden="true"></section>
+{#- Conexión con Binance (spec § 10.4, paso 1): la key enmascarada (4 + … + 4) y quién la usa. Se arma en el server
+    (blueprint.conexion_binance → futuresboard.conexion), sin llamar a Binance y sin key, secret ni uid. -#}
+{%- set cx = conexion %}
+<section class="bb-seccion" id="bbConexionBinance" data-bot-conexion-binance aria-labelledby="bbTituloBinance">
+    <h2 class="bb-seccion__titulo" id="bbTituloBinance">Conexión con Binance <span class="bb-seccion__sub">la API key que usan passivbot y el panel</span></h2>
+    {%- if not cx %}
+    <p class="bb-alerta bb-alerta--aviso" role="note"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i><span>No se pudo leer el estado de la API key. El resto del panel sigue igual.</span></p>
+    {%- else %}
+    {%- for a in cx.avisos %}
+    <p class="bb-alerta bb-alerta--aviso" role="note"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i><span>{{ a }}</span></p>
+    {%- endfor %}
+    <div class="bb-grilla">
+        <div class="card bb-ancho-6">
+            <div class="card-header"><h3 class="bb-card-titulo">API key en uso</h3>{% if cx.entorno == 'demo' %}<span class="badge bb-badge bb-badge--testnet"><i class="fas fa-vial" aria-hidden="true"></i> Binance Demo</span>{% else %}<span class="badge bb-badge bb-badge--real">Binance real</span>{% endif %}</div>
+            <div class="card-body" style="display:grid;gap:12px">
+                <div class="bb-key-vigente">
+                {%- if cx.key %}<code class="bb-key"><span class="bb-sr">API key que empieza con </span>{{ cx.key[:4] }}<span aria-hidden="true">…</span><span class="bb-sr"> y termina con </span>{{ cx.key[-4:] }}</code>
+                {%- else %}<span class="bb-etiqueta bb-etiqueta--peligro"><i class="fas fa-times" aria-hidden="true"></i> sin API key</span>{% endif %}
+                {%- if cx.validada %}<span class="bb-etiqueta bb-etiqueta--ok"><i class="fas fa-check" aria-hidden="true"></i> validada {{ cx.validada }} UTC</span>{% endif %}</div>
+                <ul class="bb-dato-lista">
+                    <li><span>Secret</span><span>{{ cx.secret }}</span></li>
+                    <li><span>Cuenta</span><span>{{ cx.cuenta.texto }}{% if cx.hedge %} · hedge mode{% endif %}</span></li>
+                    <li><span>Usuario de passivbot</span><span>{{ cx.usuario or '—' }}</span></li>
+                    <li><span>Configurada</span><span>{{ cx.configurada }}</span></li>
+                    <li><span>Permisos de la key</span><span>{{ cx.permisos.texto }}</span></li>
+                </ul>
+            </div>
+            <div class="card-footer">Se ven los primeros 4 y los últimos 4 caracteres de la API key. El secret no sale del servidor: ni acá, ni en el historial, ni en Telegram.{% if cx.origen == 'config' %} Por ahora la key sale de config.json: todavía no existe el directorio de credenciales.{% else %} "Configurada" es la fecha del archivo si el cambio no se hizo desde el panel.{% endif %} Horas en UTC.</div>
+        </div>
+        <div class="card bb-ancho-6">
+            <div class="card-header"><h3 class="bb-card-titulo">Quién la usa</h3><span class="bb-card-sub">{{ cx.con_esta_key }} de {{ cx.total }} con esta key</span></div>
+            <div class="card-body"><ul class="bb-consumidores" aria-label="Servicios que usan la API key">
+            {%- set icono = {'ok': 'fa-check-circle', 'atras': 'fa-times-circle', 'sin_confirmar': 'fa-exclamation-triangle', 'detenido': 'fa-pause-circle', 'sin_datos': 'fa-question-circle'} %}
+            {%- set clase = {'ok': 'ok', 'atras': 'rechazado', 'sin_confirmar': 'aviso', 'detenido': 'pregunta', 'sin_datos': 'pregunta'} %}
+            {%- for c in cx.consumidores %}
+                <li class="bb-consumidor" data-consumidor="{{ c.clave }}" data-estado="{{ c.estado }}"><span class="bb-consumidor__nombre"><strong>{{ c.nombre }}</strong><small>{{ c.detalle }}</small></span><span class="bb-resultado bb-resultado--{{ clase.get(c.estado, 'pregunta') }}"><i class="fas {{ icono.get(c.estado, 'fa-question-circle') }}" aria-hidden="true"></i> {{ c.texto }}</span></li>
+            {%- endfor %}
+            </ul></div>
+            <div class="card-footer">Panel, scraper y rescate publican en su latido una huella de la key con la que firman (nunca la key). passivbot cuenta cuando crea órdenes después de arrancar, no solo por estar corriendo. Si uno queda atrás, se marca en rojo.</div>
+        </div>
+        {%- if cx.web and (cx.web.habilitada or cx.web.motivo) %}
+        <div class="card bb-ancho-12"><div class="card-body bb-key-accion">
+            <div><h3>Cambiar la API key</h3><p>Para rotar la key de esta misma cuenta de Binance: vencida, expuesta o con otra restricción de IP. Se hace en una página aparte, sin scripts externos. Se valida con Binance antes de guardar, pide tu contraseña del panel y reinicia passivbot (~90 s sin gestionar órdenes). No pasa de Demo a real ni a otra cuenta.</p>
+            {%- if not cx.web.habilitada %}<span class="bb-motivo"><i class="fas fa-lock" aria-hidden="true"></i> {{ cx.web.motivo }}</span>{% endif %}</div>
+            {%- if cx.web.habilitada %}
+            <a class="btn btn-outline-secondary" href="{{ cx.web.url }}" data-bot-cambiar-key><i class="fas fa-key" aria-hidden="true"></i> Cambiar API key…</a>
+            {%- else %}
+            <button type="button" class="btn btn-outline-secondary" disabled aria-disabled="true"><i class="fas fa-key" aria-hidden="true"></i> Cambiar API key…</button>
+            {%- endif %}
+        </div></div>
+        {%- endif %}
+    </div>
+    {%- endif %}
+</section>
 
 <section class="bb-seccion" aria-labelledby="bbTituloAcciones">
     <h2 class="bb-seccion__titulo" id="bbTituloAcciones">Acciones</h2>

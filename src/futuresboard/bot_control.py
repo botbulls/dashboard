@@ -37,6 +37,8 @@ from urllib.parse import urlencode
 import hjson
 import requests
 
+from futuresboard import credenciales as credenciales_mod
+
 ENV_DOCKER_URL = "FUTURESBOARD_DOCKER_URL"
 ENV_CONTAINER = "FUTURESBOARD_PASSIVBOT_CONTAINER"
 ENV_FORAGER_CONFIG = "FUTURESBOARD_FORAGER_CONFIG"
@@ -343,15 +345,17 @@ class BinanceFuturesClient:
     X-MBX-APIKEY), pero con timeout, sesión reutilizada y errores sin URL/firma/credenciales.
     """
 
-    def __init__(self, base_url: str, api_key: str, api_secret: str,
-                 session: Optional[requests.Session] = None, algo_optional: bool = False) -> None:
-        if not base_url or not api_key or not api_secret:
+    def __init__(self, base_url: str, api_key: str = "", api_secret: str = "",
+                 session: Optional[requests.Session] = None, algo_optional: bool = False,
+                 credenciales: Optional[Any] = None) -> None:
+        # Key y secret se piden en CADA request (spec bot-estrategia § 10.3): con un proveedor
+        # (futuresboard.credenciales), un cambio de key llega a este cliente sin recrearlo.
+        self._cred = credenciales if credenciales is not None else credenciales_mod.Fijas(api_key, api_secret)
+        if not base_url or not self._cred.disponible():
             raise DisabledError(
                 "Apagar requiere API_KEY, API_SECRET y API_BASE_URL de Binance Futures configurados."
             )
         self.base_url = base_url.rstrip("/")
-        self._api_key = api_key
-        self._api_secret = api_secret.encode("utf-8")
         self.http = session or requests.Session()
         # Solo en demo/testnet: si el endpoint de órdenes algo no existe (404) se puede omitir.
         # En producción el endpoint existe, así que un 404 es un error de configuración.
@@ -361,14 +365,20 @@ class BinanceFuturesClient:
                  signed: bool = True) -> Any:
         query_params = dict(params or {})
         headers: Dict[str, str] = {}
+        cred = None
         if signed:
+            # Una sola lectura por pedido: la firma y el header salen de la misma key aunque el archivo cambie.
+            try:
+                cred = self._cred.actuales()
+            except credenciales_mod.SinCredenciales as exc:
+                raise DisabledError(f"Sin credenciales de Binance: {exc}") from exc
             query_params["recvWindow"] = BINANCE_RECV_WINDOW
             query_params["timestamp"] = int(time.time() * 1000)
         query = urlencode(query_params)
-        if signed:
-            signature = hmac.new(self._api_secret, query.encode("utf-8"), hashlib.sha256).hexdigest()
+        if cred is not None:
+            signature = hmac.new(cred.api_secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
             query = f"{query}&signature={signature}"
-            headers["X-MBX-APIKEY"] = self._api_key
+            headers["X-MBX-APIKEY"] = cred.api_key
         url = f"{self.base_url}{path}" + (f"?{query}" if query else "")
         try:
             resp = self.http.request(method, url, headers=headers, timeout=HTTP_TIMEOUT_SECONDS)
@@ -390,6 +400,8 @@ class BinanceFuturesClient:
             # 200 sin JSON (proxy, WAF, página de mantenimiento): no es una respuesta de Binance.
             raise BinanceError(f"Binance respondió {resp.status_code} sin JSON válido en {method} {path}.",
                                http_status=resp.status_code)
+        if cred is not None:
+            self._cred.firma_ok(cred)
         return data
 
     def _list(self, path: str) -> List[Dict[str, Any]]:

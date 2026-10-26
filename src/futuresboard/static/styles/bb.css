@@ -729,6 +729,7 @@ a.bb-moneda { transition: background-color var(--bb-dur) var(--bb-ease); }
 .bb-resultado--ok { color: var(--bb-gain); }
 .bb-resultado--rechazado { color: var(--bb-loss); }
 .bb-resultado--pregunta { color: var(--bb-text-2); }
+.bb-resultado--aviso { color: var(--bb-warn); }
 
 /* ------------------------------------------------------------------ 18d. Estrategia */
 .bb-vigente { display: flex; flex-wrap: wrap; align-items: center; gap: var(--bb-s2) var(--bb-s3); }

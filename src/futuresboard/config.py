@@ -94,8 +94,10 @@ class Config(BaseModel):
     DISABLE_AUTO_SCRAPE: bool = False
     HOST: Optional[IPvAnyInterface] = IPvAnyInterface.validate("0.0.0.0")  # type: ignore[assignment]
     PORT: Optional[int] = Field(5000, ge=1, le=65535)
-    API_KEY: str
-    API_SECRET: str
+    # Vacías = la key sale de /secretos/api-keys.json (futuresboard.credenciales). Mientras dure la migración siguen
+    # en config.json como respaldo; después se sacan de ahí y la app tiene que seguir arrancando.
+    API_KEY: str = ""
+    API_SECRET: str = ""
 
     CUSTOM: Optional[Custom] = Custom()
 

@@ -14,6 +14,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 import futuresboard.scraper
 from futuresboard import auth
 from futuresboard import blueprint
+from futuresboard import credenciales
 from futuresboard import db
 from futuresboard import formato
 from futuresboard import health
@@ -99,6 +100,8 @@ def init_app(config: Config | None = None):
     app.register_blueprint(vivo.vivo)  # /api/vivo/*: números en vivo sin recargar (static/js/en_vivo.js)
 
     _register_log_secrets(app, config)
+    # API key del proceso: /secretos/api-keys.json con recarga en caliente, config.json de respaldo (spec § 10.3).
+    credenciales.configurar_app(app)
 
     if config.DISABLE_AUTO_SCRAPE is False:
         futuresboard.scraper.auto_scrape(app)

@@ -9,6 +9,7 @@ import os
 import pathlib
 import re
 import secrets
+import time
 from datetime import date
 from datetime import datetime
 from datetime import timedelta
@@ -31,6 +32,8 @@ from futuresboard import binance_publico
 from futuresboard import bot_control
 from futuresboard import c3
 from futuresboard import chequeos_forager
+from futuresboard import conexion
+from futuresboard import credenciales
 from futuresboard import estrategia
 from futuresboard import jobs
 from futuresboard import manifiesto
@@ -1802,6 +1805,44 @@ def _chequeos_ciclo(aprobados) -> dict | None:
             "sin_chequear": [s for s in aprobados if s not in pares]}
 
 
+def _ultima_orden_ms() -> int | None:
+    """Creación de la orden abierta más nueva según el scraper (para "passivbot creó órdenes después de arrancar")."""
+    try:
+        with db.connect(current_app.config["DATABASE"]) as conn:
+            row = conn.execute("SELECT MAX(time) FROM orders").fetchone()
+    except Exception:  # noqa: BLE001 - sin DB, sin dato
+        return None
+    return int(row[0]) if row and row[0] is not None else None
+
+
+def conexion_binance(st: dict) -> dict:
+    """Bot → "Conexión con Binance" (spec § 10.4, paso 1). Solo lee archivos y la memoria del proceso: nunca llama a
+    Binance. Sin key, secret ni uid (``futuresboard.conexion``)."""
+    prov = credenciales.de_app(current_app._get_current_object())
+    data_dir = _bot_store().data_dir
+    ahora = time.time()
+    latido_scr = scraper.read_latido(current_app.config["DATABASE"])
+    intervalo = latido_scr.get("intervalo") if isinstance(latido_scr.get("intervalo"), int) else None
+    scr_vivo = bool(latido_scr) and ahora - float(latido_scr["at"]) <= 3 * (intervalo or 60)
+    try:
+        estado_r, _err = rescate.load_state(data_dir)
+        servicio = estado_r.get("servicio") if isinstance(estado_r.get("servicio"), dict) else {}
+    except Exception:  # noqa: BLE001
+        servicio = {}
+    hb = servicio.get("heartbeat")
+    try:
+        edad_r = ahora - datetime.fromisoformat(hb).timestamp() if hb else None
+        res_vivo = edad_r is not None and edad_r <= 3 * int(servicio.get("intervalo") or rescate.DEFAULT_INTERVAL) + 30
+    except (TypeError, ValueError):
+        res_vivo = False
+    return conexion.vista(
+        prov.estado(), modo_secretos=prov.modo_secretos(), testnet=bool(current_app.config.get("BINANCE_TESTNET")),
+        meta=credenciales.leer_meta(data_dir), scraper_latido=latido_scr, scraper_vivo=scr_vivo,
+        scraper_intervalo=intervalo, rescate_servicio=servicio, rescate_vivo=res_vivo,
+        container=st.get("container"), ultima_orden_ms=_ultima_orden_ms(), ahora=ahora,
+        key_enmascarada=prov.enmascarada())
+
+
 @app.route("/bot", methods=["GET"])
 def bot_page():
     st, _http = bot_status_payload(docker_timeout=BOT_STATUS_RAPIDO_S)
@@ -1813,7 +1854,13 @@ def bot_page():
             if ultima.get("fin") else _fecha_iso_utc(ultima.get("inicio"))
         ultima["duracion"] = _duracion(ultima.get("inicio"), ultima.get("fin")) if ultima.get("fin") else ""
     historial = acciones.historial(_bot_store().audit_path)
+    try:
+        conexion_ctx = conexion_binance(st)
+    except Exception:  # noqa: BLE001 - un archivo roto no tira la página
+        current_app.logger.exception("No se pudo armar la conexión con Binance")
+        conexion_ctx = None
     return render_template("bot.html", coin_list=get_coins(), custom=current_app.config["CUSTOM"], bot_status=st,
+                           conexion=conexion_ctx,
                            desde=_fecha_utc(desde),
                            hace=_hace((datetime.now().astimezone() - desde).total_seconds()) if desde else "",
                            latidos=latidos(), ultima=ultima, historial=historial,
@@ -2359,8 +2406,9 @@ def _binance_futures_client() -> bot_control.BinanceFuturesClient:
         err = bot_control.BotControlError("Apagar con cierre de posiciones solo está soportado para Binance Futures.")
         err.status_code = 409
         raise err
-    return bot_control.BinanceFuturesClient(cfg.get("API_BASE_URL") or "", cfg.get("API_KEY") or "",
-                                            cfg.get("API_SECRET") or "",
+    # La key sale del proveedor del proceso (credenciales.py): se relee antes de cada pedido si cambió el archivo.
+    return bot_control.BinanceFuturesClient(cfg.get("API_BASE_URL") or "",
+                                            credenciales=credenciales.de_app(current_app._get_current_object()),
                                             algo_optional=bool(cfg.get("BINANCE_TESTNET")))
 
 
