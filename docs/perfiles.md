@@ -60,7 +60,11 @@ Lo que la tabla no dice:
 En el panel: **PERFILES** → elegir → **Aplicar perfil**. El servidor arma el plan y lo muestra para confirmar (con
 una casilla). El plan dice:
 
-- qué cambia en forager (`twe_long` actual → nuevo, la lw con los pares de la config);
+- qué cambia en forager (`twe_long` actual → nuevo y la lw). Un perfil es el **paquete medido**: escribe también los
+  4 pares del backtest (BNB, BTC, ETH, XRP, en `approved_symbols_long` y `_short`) y `n_longs` 4 (supuesto S2 de
+  `diseno/bot-estrategia/spec.md`). Pasa por la regla de exposición de Estrategia: si hay un quinto par con posición,
+  `n_longs` queda en `max(4, |pares con posición ∪ pares del perfil con órdenes|)` hasta que cierre, para que la lw no
+  suba para nadie, y el plan lo dice;
 - si passivbot está **operando** (se reinicia: `docker restart`, y forager tarda `FUTURESBOARD_FORAGER_WARMUP_SECONDS`,
   ~90 s, en volver a abrir los pares; las posiciones y órdenes abiertas siguen en Binance) o **detenido** (se inicia);
 - qué queda en el rescate, el disparo por uPnL y el retiro;
@@ -119,8 +123,9 @@ reinició en el medio). Telegram avisa el resultado del job (`PERFIL con_rescate
 
 ### Perfil vigente
 
-`perfil_vigente` sale de los valores, no del último aplicado: forager con `n_shorts` 0 y el `twe_long` del perfil, y el
-rescate igual al del perfil (Conservador: rescate, disparo por uPnL y retiro apagados; Con rescate: todos los valores,
+`perfil_vigente` sale de los valores, no del último aplicado: forager con `n_shorts` 0, el `twe_long` del perfil, **los
+4 pares medidos, `n_longs` 4 y sus configs clock con el md5 medido** (manifiesto de configs de passivbot; sin
+manifiesto no se marca ningún perfil como medido y `perfil_motivo` dice por qué), y el rescate igual al del perfil (Conservador: rescate, disparo por uPnL y retiro apagados; Con rescate: todos los valores,
 con cualquier frecuencia de retiro distinta de `off`, que es configurable). `twe_short` no cuenta (forager no lo usa
 sin shorts). Si se toca algo a mano deja de ser el perfil; `perfil_ultimo` (`rescate_config.json` → `perfil`) dice
 cuál se aplicó por última vez y lo borra el próximo guardado del panel del rescate.

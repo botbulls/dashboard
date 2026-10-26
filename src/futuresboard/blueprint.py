@@ -1625,8 +1625,15 @@ def bot_status_payload(docker_timeout: float | None = None) -> tuple[dict, int]:
     # Perfiles de riesgo y TWE manual (docs/perfiles.md): definiciones y el perfil vigente según los valores.
     out.update(perfiles.catalogo())
     rescate_cfg, _err = rescate.load_config(data_dir)
-    out["perfil_vigente"] = (perfiles.detectar({k: out.get(k) for k in ("twe_long", "n_longs", "n_shorts")}, rescate_cfg)
-                             if out.get("config_available") else None)
+    # Un perfil es TWE + rescate + los 4 pares medidos, 4 a la vez y sus configs (manifiesto de passivbot).
+    detalle = {"perfil": None, "motivo": None}
+    if out.get("config_available"):
+        est = out.get("estrategia") or {}
+        detalle = perfiles.detectar_detalle(
+            {"twe_long": out.get("twe_long"), "n_longs": out.get("n_longs"), "n_shorts": out.get("n_shorts"),
+             "approved_symbols_long": est.get("pares_long")}, rescate_cfg, manifiesto.leer(settings.forager_config))
+    out["perfil_vigente"] = detalle["perfil"]
+    out["perfil_motivo"] = detalle["motivo"]
     out["perfil_ultimo"] = rescate_cfg.get("perfil")
     out["twe_manual"] = {"min": str(bot_control.TWE_MANUAL_MIN), "max": str(bot_control.TWE_MANUAL_MAX),
                          "paso": str(bot_control.TWE_MANUAL_PASO), "advertencia": str(bot_control.TWE_ADVERTENCIA)}
@@ -1654,7 +1661,8 @@ def _estrategia_vigente() -> tuple[dict | None, str | None]:
         return None, str(exc)
     vigente = bot_control.resumen_estrategia(cfg)
     rescate_cfg, _err = rescate.load_config(_bot_store().data_dir)
-    vigente["perfil"] = perfiles.detectar(cfg, rescate_cfg)
+    detalle = perfiles.detectar_detalle(cfg, rescate_cfg, manifiesto.leer(bot_control.Settings().forager_config))
+    vigente["perfil"], vigente["perfil_motivo"] = detalle["perfil"], detalle["motivo"]
     vigente["long_mode"], vigente["short_mode"] = cfg.get("long_mode"), cfg.get("short_mode")
     return vigente, None
 
@@ -1873,7 +1881,8 @@ def bot_estrategia():
     ctx = _contexto_estrategia(cfg, path, balance["para_dimensionar"], manif)
     vigente = bot_control.resumen_estrategia(cfg)
     rescate_cfg, _err = rescate.load_config(_bot_store().data_dir)
-    vigente["perfil"] = perfiles.detectar(cfg, rescate_cfg)
+    detalle = perfiles.detectar_detalle(cfg, rescate_cfg, manif)
+    vigente["perfil"], vigente["perfil_motivo"] = detalle["perfil"], detalle["motivo"]
     vigente["long_mode"], vigente["short_mode"] = cfg.get("long_mode"), cfg.get("short_mode")
     expo = estrategia.leer_exposicion(current_app.config["DATABASE"])
     ahora = _ahora_por_par(vigente)
@@ -1982,7 +1991,8 @@ def _armador_estrategia(objetivo: dict, origen: str = "estrategia", titulo: str 
         entrada = estrategia.Entrada(
             cfg=cfg, archivo_sha=hashlib.sha256(crudo).hexdigest(), objetivo=objetivo, ctx=ctx,
             expo=estrategia.leer_exposicion(db_path), rescate_cfg=rescate_cfg, running=bool(info.get("running")),
-            container=settings.container, detectar=lambda c: perfiles.detectar(c, rescate_cfg), nombres_perfil=nombres,
+            container=settings.container, detectar=lambda c: perfiles.detectar(c, rescate_cfg, manif),
+            nombres_perfil=nombres,
             warmup_s=bot_control.forager_warmup_seconds(), bloqueo_rescate=rescate.start_bloqueado(data_dir),
             origen=origen, titulo=titulo, todos_entran=todos_entran)
         return estrategia.armar_plan(entrada)
@@ -2195,9 +2205,10 @@ def bot_perfil():
         return _json_response({"ok": False, "error": str(exc)}, 400)
     nombre = parsed["perfil"]
     data_dir = _bot_store().data_dir
+    db_path = current_app.config["DATABASE"]
     if not parsed["confirmar"]:
         try:
-            plan = perfiles.plan(bot_control.Settings(), data_dir, nombre)
+            plan = perfiles.plan(bot_control.Settings(), data_dir, nombre, db_path=db_path)
         except ValueError as exc:
             _rescate_audit("perfil", params, "rechazado", str(exc))
             return _json_response({"ok": False, "error": str(exc)}, 400)
@@ -2215,7 +2226,7 @@ def bot_perfil():
         return settings, usuario
 
     def work(store, settings, user, rep):
-        return perfiles.aplicar(settings, store, nombre, user, reporter=rep)
+        return perfiles.aplicar(settings, store, nombre, user, reporter=rep, db_path=db_path)
 
     return _run_bot_action("perfil", params, validate, work)
 

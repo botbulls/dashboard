@@ -1479,7 +1479,8 @@ def validate_stop(settings: Settings, modo: Any) -> str:
 def start_bot(settings: Settings, store: Store, riesgo: Any,
               docker: Optional[DockerClient] = None, reporter: Optional[Reporter] = None,
               mantener_twe: bool = False, twe_long: Optional[decimal.Decimal] = None,
-              usuario: Optional[str] = None, origen: Optional[str] = None) -> Dict[str, Any]:
+              usuario: Optional[str] = None, origen: Optional[str] = None,
+              estrategia: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """START del panel: aplica el preset ``riesgo`` (twe_long/twe_short), modos normales y reinicia passivbot.
 
     ``mantener_twe=True`` (solo lo usa el reinicio automático de C3 con una config "personalizado") no toca
@@ -1488,6 +1489,9 @@ def start_bot(settings: Settings, store: Store, riesgo: Any,
     ``twe_long`` (TWE manual o un perfil, ver ``futuresboard.perfiles``): escribe ese ``twe_long`` en vez del preset
     (``riesgo`` se ignora). ``twe_short``: ``TWE_SHORT_SOLO_LONG`` con ``n_shorts`` 0 (forager no lo usa); con shorts
     se deja el que está. El resto es idéntico al START con preset.
+
+    ``estrategia`` (solo con ``twe_long``: un perfil, S2): claves de estrategia que se escriben junto con la TWE (los 4
+    pares medidos y ``n_longs``), en la misma escritura atómica.
 
     Con Docker OK deja el arranque en ``bot_arranques.jsonl`` (``registrar_arranque``: hash y resumen de la estrategia
     con la que arrancó, ``usuario`` y ``origen``). Si el registro falla, el arranque sigue igual.
@@ -1523,6 +1527,9 @@ def start_bot(settings: Settings, store: Store, riesgo: Any,
         updates = {"twe_long": twe_valor(twe_manual)}
         if n_pares(cfg)[1] == 0:
             updates["twe_short"] = TWE_SHORT_SOLO_LONG
+        if estrategia:
+            updates.update({k: v for k, v in estrategia.items()
+                            if k in ("n_longs", "approved_symbols_long", "approved_symbols_short")})
         updates.update(long_mode=MODE_NORMAL, short_mode=new_short)
         riesgo = detect_preset({**cfg, **updates})
     else:

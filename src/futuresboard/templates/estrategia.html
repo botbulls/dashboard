@@ -30,6 +30,9 @@
                         <span class="bb-etiqueta bb-etiqueta--neutra">se aplica al iniciar</span>
                     {% endif %}
                 </div>
+                {%- if v.perfil_motivo %}
+                <p class="bb-motivo mt-2 mb-0"><i class="fas fa-info-circle" aria-hidden="true"></i> <span>Personalizado: {{ v.perfil_motivo }}.</span></p>
+                {%- endif %}
                 <ul class="bb-dato-lista mt-3">
                     <li><span>Pares (approved_symbols_long)</span><span>{{ v.pares_long|join(', ') if v.pares_long else 'todos (lista vacía)' }}</span></li>
                     <li><span>Pares a la vez (n_longs)</span><span>{{ v.n_longs if v.n_longs is not none else '—' }}</span></li>

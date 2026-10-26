@@ -174,6 +174,9 @@ def test_twe_alta_y_personalizado_con_rescate_piden_casilla(client, app, forager
     assert aviso(plan, "twe_alta")["casilla"]
     assert aviso(plan, "rescate_personalizado")["casilla"] and "70 %" in aviso(plan, "rescate_personalizado")["texto"]
     assert "TWE 5 está por encima" in plan["casilla_texto"]
+    # Con rescate (TWE 4, los 4 pares, configs medidas) → Personalizado.
+    assert fila(plan, "perfil")["texto_antes"] == "Con rescate" and fila(plan, "perfil")["texto_despues"] == "Personalizado"
+    assert aviso(plan, "personalizado")["casilla"]
 
 
 # ---------------------------------------------------------------- job: escritura, reinicio y vuelta atrás

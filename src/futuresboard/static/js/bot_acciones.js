@@ -244,7 +244,9 @@
                 perfilSelect.value = vigente;
                 if (perfilVigente) perfilVigente.textContent = `Vigente: ${status.perfiles[vigente].nombre}.`;
             } else if (perfilVigente) {
-                perfilVigente.textContent = 'Vigente: ninguno (la config no coincide con un perfil).';
+                perfilVigente.textContent = status.perfil_motivo
+                    ? `Vigente: Personalizado. ${status.perfil_motivo}.`
+                    : 'Vigente: Personalizado (la config no coincide con un perfil medido).';
             }
             renderPerfil();
         }

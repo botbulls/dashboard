@@ -33,6 +33,8 @@ from typing import Optional
 
 from futuresboard import bot_control
 from futuresboard import c3
+from futuresboard import estrategia
+from futuresboard import manifiesto
 from futuresboard import rescate
 
 log = logging.getLogger("futuresboard.perfiles")
@@ -40,6 +42,9 @@ log = logging.getLogger("futuresboard.perfiles")
 CONSERVADOR = "conservador"
 CON_RESCATE = "con_rescate"
 PARES_MEDIDOS = 4  # BNB, BTC, ETH, XRP: lw = TWE / 4
+# Los 4 pares del backtest (con el md5 de su config clock en estrategia.MD5_MEDIDOS): un perfil es TWE + rescate + estos
+# 4 pares, 4 a la vez (spec bot-estrategia S2).
+PARES = list(estrategia.PARES_MEDIDOS)
 
 PERFILES: Dict[str, Dict[str, Any]] = {
     CONSERVADOR: {
@@ -115,13 +120,52 @@ def cuerpo_rescate(nombre: str, actual: Dict[str, Any]) -> Dict[str, Any]:
     return body
 
 
-def detectar(forager_cfg: Optional[Dict[str, Any]], rescate_cfg: Dict[str, Any]) -> Optional[str]:
-    """Perfil vigente según los valores (no según el último aplicado): None si no coincide con ninguno.
+def _pares_y_configs(forager_cfg: Dict[str, Any], manif: Optional[Dict[str, Any]]) -> Optional[str]:
+    """None si la cartera es la medida (los 4 pares, 4 a la vez, configs con el md5 medido); si no, el motivo."""
+    pares = forager_cfg.get("approved_symbols_long")
+    if not isinstance(pares, list) or sorted(pares) != sorted(PARES):
+        return "los pares no son los 4 medidos (BNB, BTC, ETH y XRP)"
+    if bot_control.n_pares(forager_cfg)[0] != PARES_MEDIDOS:
+        return f"no son {PARES_MEDIDOS} a la vez"
+    if not manif or not manif.get("usable"):
+        motivo = (manif or {}).get("motivo") or "sin manifiesto de configs"
+        return f"configs sin verificar contra las medidas ({motivo.rstrip('.')})"
+    for sym in PARES:
+        info = manifiesto.config_de(manif, sym)
+        if not manifiesto.config_propia_clock(info) or info.get("md5") != estrategia.MD5_MEDIDOS[sym]:
+            return f"la config de {sym} no es la medida en el backtest"
+    return None
+
+
+def detectar_detalle(forager_cfg: Optional[Dict[str, Any]], rescate_cfg: Dict[str, Any],
+                     manif: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """``{"perfil": nombre o None, "motivo": por qué no es un perfil medido o None}``. Ver ``detectar``."""
+    if not isinstance(forager_cfg, dict):
+        return {"perfil": None, "motivo": None}
+    nombre = _por_twe_y_rescate(forager_cfg, rescate_cfg)
+    if nombre is None:
+        return {"perfil": None, "motivo": None}
+    motivo = _pares_y_configs(forager_cfg, manif)
+    if motivo:
+        return {"perfil": None, "motivo": f"TWE y rescate de {PERFILES[nombre]['nombre']}, pero {motivo}: no es el "
+                                          "perfil medido"}
+    return {"perfil": nombre, "motivo": None}
+
+
+def detectar(forager_cfg: Optional[Dict[str, Any]], rescate_cfg: Dict[str, Any],
+             manif: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """Perfil vigente según los valores (no según el último aplicado): None (Personalizado) si no coincide con uno.
+
+    Un perfil es el paquete medido: TWE, rescate, **los 4 pares, 4 a la vez y sus configs clock con el md5 medido**
+    (manifiesto de passivbot, ``manif``). Sin un manifiesto usable no se marca ningún perfil como medido (el motivo
+    sale en ``detectar_detalle``): así no se muestran los números de Con rescate sobre una cartera que no se midió.
 
     No mira ``twe_short`` (con ``n_shorts`` 0 forager no lo usa). "Con rescate" acepta cualquier frecuencia de retiro
     que no sea off (es configurable); el resto tiene que ser exactamente el del perfil."""
-    if not isinstance(forager_cfg, dict):
-        return None
+    return detectar_detalle(forager_cfg, rescate_cfg, manif)["perfil"]
+
+
+def _por_twe_y_rescate(forager_cfg: Dict[str, Any], rescate_cfg: Dict[str, Any]) -> Optional[str]:
     if bot_control.n_pares(forager_cfg)[1] != 0:
         return None
     twe = forager_cfg.get("twe_long")
@@ -170,10 +214,29 @@ def _modos_servicio(data_dir: pathlib.Path) -> Dict[str, Any]:
             "prestamo": status.get("prestamo"), "prestamo_modo": status.get("prestamo_modo")}
 
 
+def cartera(forager: Dict[str, Any], db_path: Any) -> Dict[str, Any]:
+    """Pares y pares a la vez que escribe un perfil (S2): los 4 medidos y ``n_longs`` = max(4, |P ∪ O|), la regla de
+    exposición de Estrategia (``estrategia.lugares``): si hay un quinto par con posición, el perfil queda en 5 lugares
+    hasta que cierre, así la lw no sube para nadie. Sin posiciones legibles no se aplica (PerfilError)."""
+    if db_path is None:
+        expo: Dict[str, Any] = {"posiciones": {}, "ordenes": {}, "nocional": {},
+                                "error": "No se indicó la base del scraper."}
+    else:
+        expo = estrategia.leer_exposicion(db_path)
+    if expo.get("error"):
+        raise PerfilError(f"{expo['error']} Sin posiciones no se puede saber cuántos lugares están ocupados: el perfil "
+                          "no se aplica.")
+    lug = estrategia.lugares(PARES, expo, forager.get("symbols_to_ignore"))
+    n = max(PARES_MEDIDOS, len(lug["ocupados"]))
+    return {"pares": list(PARES), "n_longs": n, "lugares": lug,
+            "updates": {"n_longs": n, "approved_symbols_long": list(PARES), "approved_symbols_short": list(PARES)}}
+
+
 def plan(settings: bot_control.Settings, data_dir: pathlib.Path, nombre: str,
-         docker: Optional[bot_control.DockerClient] = None) -> Dict[str, Any]:
-    """Qué va a pasar si se aplica el perfil (para pedir la confirmación). Lee forager, Docker y los archivos del
-    rescate y de C3; no escribe nada. Errores que impiden aplicarlo: ``BotControlError`` (409/502/503) o ValueError."""
+         docker: Optional[bot_control.DockerClient] = None, db_path: Any = None) -> Dict[str, Any]:
+    """Qué va a pasar si se aplica el perfil (para pedir la confirmación). Lee forager, Docker, las posiciones (base
+    del scraper, ``db_path``) y los archivos del rescate y de C3; no escribe nada. Errores que impiden aplicarlo:
+    ``BotControlError`` (409/502/503) o ValueError."""
     perfil = PERFILES[nombre]
     settings.require_enabled()
     path = settings.require_config()
@@ -186,19 +249,18 @@ def plan(settings: bot_control.Settings, data_dir: pathlib.Path, nombre: str,
         raise PerfilError(bloqueo)
     actual, cfg_err = rescate.load_config(data_dir)
     parsed = rescate.validate_config_body(cuerpo_rescate(nombre, actual))
-    lineas = _lineas_plan(nombre, perfil, forager, info, data_dir, parsed, cfg_err)
+    cart = cartera(forager, db_path)
+    lineas = _lineas_plan(nombre, perfil, forager, info, data_dir, parsed, cfg_err, cart)
     return {"perfil": nombre, "nombre": perfil["nombre"], "texto": "\n".join(lineas), "lineas": lineas,
-            "corriendo": bool(info.get("running"))}
+            "corriendo": bool(info.get("running")), "n_longs": cart["n_longs"], "pares": cart["pares"]}
 
 
 def _validar_forager(forager: Dict[str, Any]) -> None:
     bot_control._mode(forager, "short")  # InvalidModeError (409): con ese short_mode forager no arranca
-    n_longs, n_shorts = bot_control.n_pares(forager)
+    _n_longs, n_shorts = bot_control.n_pares(forager)
     if n_shorts != 0:
         raise PerfilError(f"Los perfiles se midieron solo con longs (n_shorts 0) y la config de forager tiene "
                           f"n_shorts={forager.get('n_shorts')!r}: no se aplica (usá los presets o la TWE manual).")
-    if not n_longs:
-        raise PerfilError(f"La config de forager tiene n_longs={forager.get('n_longs')!r}: no se puede calcular la lw.")
 
 
 def _fmt(value: Any) -> str:
@@ -207,17 +269,28 @@ def _fmt(value: Any) -> str:
 
 
 def _lineas_plan(nombre: str, perfil: Dict[str, Any], forager: Dict[str, Any], info: Dict[str, Any],
-                 data_dir: pathlib.Path, parsed: Dict[str, Any], cfg_err: Optional[str]) -> List[str]:
+                 data_dir: pathlib.Path, parsed: Dict[str, Any], cfg_err: Optional[str],
+                 cart: Dict[str, Any]) -> List[str]:
     twe = perfil["twe_long"]
-    n_longs, _ = bot_control.n_pares(forager)
+    n_longs = cart["n_longs"]
     lw = (twe / n_longs).quantize(Decimal("0.0001"))
     num = perfil["numeros"]
     lineas = [f"Perfil {perfil['nombre']}: {perfil['resumen']}"]
     lineas.append(f"Forager: twe_long {forager.get('twe_long')} -> {bot_control.twe_valor(twe)} (lw {_fmt(lw)} con "
                   f"{n_longs} pares), twe_short {bot_control.TWE_SHORT_SOLO_LONG} (sin efecto con n_shorts 0).")
+    antes = bot_control.resumen_estrategia(forager)
+    lineas.append(f"Pares: {', '.join(PARES)}, {n_longs} a la vez (antes: "
+                  f"{', '.join(antes['pares_long']) if antes['pares_long'] else 'todos'}, {antes['n_longs']} a la vez). "
+                  "El perfil es el paquete medido: TWE, rescate y los 4 pares.")
+    lug = cart["lugares"]
+    if lug["salen_con_posicion"]:
+        lineas.append(f"ATENCIÓN: {', '.join(lug['salen_con_posicion'])} sale de la lista con posición: sigue en parada "
+                      f"gradual hasta cerrar, con la misma lw, y ocupa un lugar mientras tanto.")
     if n_longs != PARES_MEDIDOS:
-        lineas.append(f"ATENCIÓN: los números se midieron con {PARES_MEDIDOS} pares (lw {_fmt(twe / PARES_MEDIDOS)}); con "
-                      f"{n_longs} pares la exposición total es la misma pero por par cambia: no aplican tal cual.")
+        lineas.append(f"ATENCIÓN: hay {len(lug['ocupados'])} lugares ocupados ({', '.join(lug['ocupados'])}): el perfil "
+                      f"queda en {n_longs} a la vez (lw {_fmt(lw)}) hasta que cierren, para que la lw no suba para nadie. "
+                      f"Los números se midieron con {PARES_MEDIDOS} a la vez (lw {_fmt(twe / PARES_MEDIDOS)}): mientras "
+                      "tanto no aplican tal cual.")
     warmup = bot_control.forager_warmup_seconds()
     if info.get("running"):
         lineas.append(f"passivbot está OPERANDO: se reinicia (docker restart) y forager tarda ~{warmup} s en volver a "
@@ -313,7 +386,7 @@ class _SinValidar(bot_control.Reporter):
 
 def aplicar(settings: bot_control.Settings, store: bot_control.Store, nombre: str, usuario: str,
             docker: Optional[bot_control.DockerClient] = None,
-            reporter: Optional[bot_control.Reporter] = None) -> Dict[str, Any]:
+            reporter: Optional[bot_control.Reporter] = None, db_path: Any = None) -> Dict[str, Any]:
     """Aplica el perfil (ver docstring del módulo). Devuelve el resultado del START más ``perfil`` y ``rescate``."""
     if nombre not in PERFILES:
         raise ValueError(f"perfil inválido: usar {' o '.join(PERFILES)}.")
@@ -332,7 +405,9 @@ def aplicar(settings: bot_control.Settings, store: bot_control.Store, nombre: st
         raise PerfilError(bloqueo)
     actual, _cfg_err = rescate.load_config(data_dir)
     parsed = rescate.validate_config_body(cuerpo_rescate(nombre, actual))
-    rep.step("validar", bot_control.PASO_OK, f"{perfil['nombre']}: TWE {bot_control.twe_valor(perfil['twe_long'])}; "
+    cart = cartera(forager, db_path)
+    rep.step("validar", bot_control.PASO_OK, f"{perfil['nombre']}: TWE {bot_control.twe_valor(perfil['twe_long'])}, "
+                                            f"{', '.join(PARES)}, {cart['n_longs']} a la vez; "
                                             f"contenedor {settings.container}: {info.get('status')}")
 
     rep.step("rescate", bot_control.PASO_EN_CURSO)
@@ -351,7 +426,8 @@ def aplicar(settings: bot_control.Settings, store: bot_control.Store, nombre: st
               f"{'on' if cfg.get('upnl_habilitado') else 'off'}, retiro {cfg.get('retiro_frecuencia')}"))
     try:
         out = bot_control.start_bot(settings, store, None, docker=docker, reporter=_SinValidar(rep),
-                                    twe_long=perfil["twe_long"], usuario=usuario, origen="perfil")
+                                    twe_long=perfil["twe_long"], usuario=usuario, origen="perfil",
+                                    estrategia=cart["updates"])
     except Exception as exc:  # noqa: BLE001 - cualquier falla decide la vuelta atrás del rescate y se re-lanza
         incierto = isinstance(exc, bot_control.DockerError) and (
             exc.uncertain or bool(getattr(exc.__cause__, "uncertain", False)))
@@ -372,6 +448,14 @@ def aplicar(settings: bot_control.Settings, store: bot_control.Store, nombre: st
         raise err from exc
     out["perfil"] = nombre
     out["rescate"] = resumen_rescate
+    despues = {**forager, **(out.get("config") or {})}
+    cambios = bot_control.cambios_estrategia(bot_control.resumen_estrategia(forager), bot_control.resumen_estrategia(despues))
+    out["cambios_texto"] = f"perfil {perfil['nombre']}: TWE {bot_control.twe_valor(perfil['twe_long'])}, " \
+                           f"{cart['n_longs']} a la vez, {', '.join(p[:-4] for p in PARES)}"
+    estrategia.registrar_version(data_dir, {
+        "ts": rescate.now_iso(), "usuario": usuario, "accion": "perfil", "perfil": nombre, "backup": out.get("backup"),
+        "hash_antes": bot_control.estrategia_hash(forager), "hash_despues": bot_control.estrategia_hash(despues),
+        "resumen": out["cambios_texto"], "cambios": cambios, "resultado": "ok"})
     return out
 
 
