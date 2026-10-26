@@ -445,12 +445,6 @@ a.bb-moneda { transition: background-color var(--bb-dur) var(--bb-ease); }
    Sin la rueda flotante (#menu_admin): los controles viven en Inicio, Bot y Estrategia (static/js/bot_acciones.js). */
 .bb-panel__aviso { margin: 0; padding: var(--bb-s2) var(--bb-s3); border-radius: var(--bb-r); background: var(--bb-warn-bg); color: var(--bb-warn); font-size: var(--bb-fs-13); font-weight: 500; }
 .bb-panel__aviso.d-none { display: none !important; }
-/* La advertencia de TWE: el JS le pone text-warning / text-danger; acá se vuelve alerta con ícono (sin tocar el JS). */
-#botTweAdvertencia.text-warning, #botTweAdvertencia.text-danger { display: flex; gap: var(--bb-s2); align-items: flex-start; padding: var(--bb-s2) var(--bb-s3); border-radius: var(--bb-r); font-size: var(--bb-fs-14); font-style: normal; font-weight: 500; }
-#botTweAdvertencia.text-warning { background: var(--bb-warn-bg); }
-#botTweAdvertencia.text-danger { background: var(--bb-loss-bg); }
-#botTweAdvertencia::before { content: "\f071"; font-family: "Font Awesome 5 Free"; font-weight: 900; }
-#botTweAdvertencia.d-none { display: none !important; }
 /* Aviso de las acciones (región propia, arriba a la derecha): el JS le pone "bien" / "error" (o nada). */
 .bb-bot-aviso { position: fixed; top: var(--bb-s4); right: var(--bb-s4); z-index: 1060; max-width: 360px; }
 .bb-bot-aviso p { margin: 0; padding: var(--bb-s2) var(--bb-s3); border-radius: var(--bb-r); font-size: var(--bb-fs-14); background: var(--bb-surface); color: var(--bb-text); border: 1px solid var(--bb-border); box-shadow: var(--bb-shadow-float); cursor: pointer; }

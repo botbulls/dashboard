@@ -101,13 +101,6 @@ def test_confirmacion_con_casilla_y_boton_en_el_pie_fijo(client):  # noqa: F811
     assert 'data-bot-confirm="check-wrap"' in pie and 'id="botActionConfirmAccept"' in pie
 
 
-def test_advertencia_de_twe_conserva_las_clases_que_togglea_el_js(client):  # noqa: F811
-    html = _get(client, "/estrategia")
-    assert '<span class="d-none" id="botTweAdvertencia" data-bot-panel="twe-advertencia" role="alert"></span>' in html
-    css = (STATIC / "styles" / "bb.css").read_text(encoding="utf-8")
-    assert "#botTweAdvertencia.text-warning" in css and "#botTweAdvertencia.text-danger" in css
-
-
 
 def _sin_plegados(html):
     return re.sub(r"<details\b.*?</details>", "", html, flags=re.S)

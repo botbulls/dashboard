@@ -550,7 +550,7 @@ def test_telegram_titulos():
 def test_panel_muestra_perfiles_y_twe_manual(client, app, solo_long, docker):  # noqa: F811
     html = client.get("/estrategia").get_data(as_text=True)
     assert 'id="botPerfilSelect"' in html and 'data-bot-accion="perfil"' in html
-    assert 'id="botTweInput"' in html and 'min="0.5" max="8" step="0.25"' in html
+    assert 'id="botTweInput"' not in html  # la TWE va por Exposición, con el flujo de Estrategia (hallazgo 19)
     status = client.get("/api/bot/status").get_json()
     assert status["n_shorts"] == 0 and status["n_longs"] == 4
     assert status["twe_manual"] == {"min": "0.5", "max": "8", "paso": "0.25", "advertencia": "4"}

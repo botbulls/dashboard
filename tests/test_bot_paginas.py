@@ -140,11 +140,11 @@ def test_estrategia_muestra_lo_vigente_en_solo_lectura(client, env, docker):  # 
     assert "lw 1,00" in vigente
     # Vigente es solo lectura: lo que escribe la estrategia es el editor de abajo (POST /api/bot/estrategia).
     assert "/api/bot/estrategia" not in vigente and "<form" not in vigente
-    # Perfil y TWE manual siguen disponibles (mismos endpoints, mismos IDs que tenía la rueda).
+    # Perfil sigue disponible (mismo endpoint, mismos IDs que tenía la rueda).
     assert 'id="botPerfilSelect"' in html and 'data-bot-accion="perfil"' in html
-    assert 'id="botTweInput" name="twe_long" type="number" min="0.5" max="8" step="0.25"' in html
-    assert 'data-bot-accion="twe"' in html
-    assert '<span class="d-none" id="botTweAdvertencia" data-bot-panel="twe-advertencia" role="alert"></span>' in html
+    # Sin el atajo "Iniciar con esta TWE…": arrancaba passivbot sin el resumen ni la casilla de Iniciar (spec § 2.6:
+    # la TWE se edita con el flujo de Estrategia; revisión, hallazgo 19).
+    assert 'data-bot-accion="twe"' not in html and 'id="botTweInput"' not in html
     # Editor de la estrategia (borrador, exposición, pares, avanzado): lo arma static/js/estrategia.js con la API.
     assert 'data-estrategia-editor' in html and 'data-url="/api/bot/estrategia"' in html
     assert 'id="bbAgregarParModal"' in html and "js/estrategia.js" in html
@@ -162,8 +162,10 @@ def test_js_de_acciones_conserva_el_contrato():
     for hook in ("botActionConfirmModal", "botActionConfirmCheck", "botActionConfirmAccept", "botJobModal",
                  "[data-bot-accion]", "data-bot-confirm", "data-bot-job", "fbBotJobId", "/api/bot/jobs/activo",
                  "job.cancelable", "fb-bot-status", "data-bot-pildora", "data-bot-punto", "botPerfilSelect",
-                 "botTweInput", "/api/bot/perfil", "confirmar: true"):
+                 "/api/bot/perfil", "confirmar: true"):
         assert hook in js, hook
+    # Sin el atajo de TWE: la TWE se guarda con el flujo de Estrategia y el arranque va por Iniciar… (hallazgo 19).
+    assert "botTweInput" not in js and "twe: () =>" not in js
     # Los presets no se ofrecen (S3): no hay acción "start" con riesgo en el JS.
     assert "riesgo:" not in js and "botRiesgoSelect" not in js
 

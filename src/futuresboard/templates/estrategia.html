@@ -48,8 +48,9 @@
     {% endif %}
 </section>
 
-{#- 1. Perfil (y el atajo de la TWE manual): los mismos controles e IDs que tenía la rueda (bot_acciones.js), con su
-    confirmación y su job.
+{#- 1. Perfil: los mismos controles e IDs que tenía la rueda (bot_acciones.js), con su confirmación y su job. La TWE
+    se edita en Exposición (spec § 2.6); el atajo "Iniciar con esta TWE…" salió porque arrancaba passivbot sin el
+    resumen ni la casilla de Iniciar (revisión, hallazgo 19).
     data-bot-controles: en_vivo.js no toca la página con el foco en estos campos. -#}
 <section class="bb-seccion" aria-labelledby="bbTituloPerfil" data-bot-controles><div class="bb-paso"><span class="bb-paso__num" aria-hidden="true">1</span><div>
     <h2 id="bbTituloPerfil">Perfil</h2>
@@ -68,14 +69,6 @@
             </details>
             <button type="button" class="btn btn-primary" data-bot-accion="perfil">Aplicar perfil…</button>
             <p>TWE de forager + rescate, disparo por uPnL y retiro en una sola acción. Antes de aplicar se muestra qué cambia. Backtest, no promesa: herramienta, no asesor.</p>
-        </div>
-        <div class="bb-accion">
-            <h3><label for="botTweInput">Atajo: solo la TWE e iniciar</label></h3>
-            <p id="botTweAyuda">TWE long de {{ twe_manual.min|num }} a {{ twe_manual.max|num }}, en pasos de {{ twe_manual.paso|num }}. Para cambiar TWE, pares o pares a la vez sin arrancar el bot, usá Exposición y Pares, abajo.</p>
-            <input id="botTweInput" name="twe_long" type="number" min="0.5" max="8" step="0.25" inputmode="decimal" class="form-control" aria-describedby="botTweAyuda botTweAdvertencia">
-            <span class="d-none" id="botTweAdvertencia" data-bot-panel="twe-advertencia" role="alert"></span>
-            <button type="button" class="btn btn-outline-secondary" data-bot-accion="twe">Iniciar con esta TWE…</button>
-            <p>Escribe twe_long en la config de forager, pone los modos en normal y arranca o reinicia passivbot (la TWE manual de siempre).</p>
         </div>
     </div>
     <p class="bb-motivo"><i class="fas fa-info-circle" aria-hidden="true"></i> Backtest OOS (ventanas de 12 meses desde 2023-11-10, sobre los 10.000 de futuros) con BNB, BTC, ETH y XRP y sus configs clock. Es un backtest, no una promesa: herramienta, no asesor.</p>

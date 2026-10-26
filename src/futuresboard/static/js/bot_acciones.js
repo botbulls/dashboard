@@ -20,9 +20,6 @@
     const perfilSelect = document.getElementById('botPerfilSelect');
     const perfilDesc = q('[data-bot-panel="perfil-desc"]');
     const perfilVigente = q('[data-bot-panel="perfil-vigente"]');
-    const tweInput = document.getElementById('botTweInput');
-    const tweAdvertencia = document.getElementById('botTweAdvertencia');
-    let tweEditado = false;
     const buttons = () => document.querySelectorAll('[data-bot-accion]');
     const confirmCheck = document.getElementById('botActionConfirmCheck');
     const confirmAccept = document.getElementById('botActionConfirmAccept');
@@ -35,7 +32,6 @@
     // Números que se muestran (no los que se mandan): es-AR.
     const n = (v) => (window.BB && window.BB.fmt ? window.BB.fmt.num(v) : String(v));
     const CHECK_APAGAR = 'Entiendo que se cierran TODAS las posiciones a mercado y se cancelan TODAS las órdenes abiertas en Binance Futures, y que no se puede deshacer.';
-    const AVISO_TWE_ALTA = (t) => `TWE ${n(t)} está por encima de 4: en el backtest 2021–2026 aparecen liquidaciones desde TWE 6, y los perfiles medidos son TWE 3 y TWE 4.`;
     const ICONOS = { ok: '✓', error: '✗', omitido: '–', pendiente: '·' };
     const ESTADOS_PASO = { ok: 'listo', error: 'error', omitido: 'omitido', pendiente: 'pendiente', en_curso: 'en curso' };
     let jobId = null;       // job que muestra el modal
@@ -159,35 +155,12 @@
             b.disabled = (bloquear && !apagarPermitido) || b.hasAttribute('data-bot-bloqueado');
         });
         if (perfilSelect) perfilSelect.disabled = bloquear;
-        if (tweInput) tweInput.disabled = bloquear;
     }
     const boton = (accion) => document.querySelector(`[data-bot-accion="${accion}"]`);
     const deshabilitar = (accion) => { const b = boton(accion); if (b) b.disabled = true; };
 
-    // ---- Perfiles y TWE manual (Estrategia; docs/perfiles.md) ----
-    function tweLimites() {
-        const t = (lastStatus && lastStatus.twe_manual) || { min: '0.5', max: '8', paso: '0.25', advertencia: '4' };
-        return { min: Number(t.min), max: Number(t.max), paso: Number(t.paso), adv: Number(t.advertencia) };
-    }
-    function tweValida(v) {
-        const l = tweLimites();
-        if (!Number.isFinite(v)) return 'Ingresá un número.';
-        if (v < l.min || v > l.max) return `Tiene que estar entre ${n(l.min)} y ${n(l.max)}.`;
-        if (Math.abs(v / l.paso - Math.round(v / l.paso)) > 1e-9) return `Va en pasos de ${n(l.paso)}.`;
-        return null;
-    }
-    function actualizarTwe() {
-        if (!tweInput || !tweAdvertencia) return;
-        const v = tweInput.value === '' ? NaN : Number(tweInput.value);
-        const error = tweInput.value === '' ? null : tweValida(v);
-        const alta = !error && v > tweLimites().adv;
-        tweAdvertencia.textContent = error ? error : (alta ? AVISO_TWE_ALTA(v) + ' Se pide confirmación.' : '');
-        tweAdvertencia.classList.toggle('d-none', !error && !alta);
-        tweAdvertencia.classList.toggle('text-danger', !!error);
-        tweAdvertencia.classList.toggle('text-warning', !error && alta);
-        tweInput.classList.toggle('is-invalid', !!error);
-    }
-    if (tweInput) tweInput.addEventListener('input', () => { tweEditado = true; actualizarTwe(); });
+    // ---- Perfiles (Estrategia; docs/perfiles.md). La TWE se edita en Exposición, con el flujo de Estrategia
+    // (spec § 2.6): el atajo "Iniciar con esta TWE…" salió porque arrancaba sin el resumen de Iniciar. ----
     function renderPerfil() {
         if (!perfilSelect || !perfilDesc) return;
         const st = lastStatus || {};
@@ -209,11 +182,11 @@
             if (perfilVigente) perfilVigente.textContent = `Perfiles no disponibles: se midieron solo con longs y la config de forager tiene n_shorts ${status.n_shorts}.`;
         }
         if (!status.config_available) {
-            ['perfil', 'twe', 'iniciar', 'reanudar', 'reiniciar'].forEach(deshabilitar);
+            ['perfil', 'iniciar', 'reanudar', 'reiniciar'].forEach(deshabilitar);
         }
         if (status.rescate_start_bloqueado) {
             // Tope de pérdida del rescate sin reconocer: el backend responde 409 a START (y a los perfiles).
-            ['perfil', 'twe', 'iniciar', 'reanudar', 'reiniciar'].forEach(deshabilitar);
+            ['perfil', 'iniciar', 'reanudar', 'reiniciar'].forEach(deshabilitar);
             if (disabledLi && disabledMsg) {
                 disabledLi.classList.remove('d-none');
                 disabledMsg.textContent = status.rescate_start_bloqueado;
@@ -251,10 +224,6 @@
             }
             renderPerfil();
         }
-        if (tweInput && !tweEditado && status.twe_long !== null && status.twe_long !== undefined) {
-            tweInput.value = status.twe_long;
-        }
-        actualizarTwe();
         aplicarRestricciones(status);
     }
 
@@ -282,20 +251,6 @@
     }
 
     const ACCIONES = {
-        twe: () => {
-            const v = Number(tweInput.value);
-            const alta = v > tweLimites().adv;
-            const body = { twe_long: v };
-            if (alta) body.confirmar_twe_alta = true;
-            return {
-                url: '/api/bot/start',
-                body,
-                titulo: `Confirmar TWE long ${n(v)}`,
-                texto: `Se escribirá twe_long ${n(v)} en la config de forager (modo normal; twe_short 1 si n_shorts es 0) y passivbot se ${ultimoArranque()}: forager tarda ~90 s en volver a operar los pares.` + (alta ? '\n\n' + AVISO_TWE_ALTA(v) + ' Herramienta, no asesor.' : ''),
-                check: alta,
-                checkLabel: `Entiendo que TWE ${n(v)} está por encima de lo medido en el backtest y que puede liquidar la cuenta.`,
-            };
-        },
         graceful: () => ({
             url: '/api/bot/stop',
             body: { modo: 'graceful' },
@@ -847,10 +802,6 @@
             jobEl.addEventListener('hidden.bs.modal', () => pedirConfirmacion(accion), { once: true });
             ocultarJobEnCurso();
             return;
-        }
-        if (accion === 'twe') {
-            const error = tweValida(tweInput.value === '' ? NaN : Number(tweInput.value));
-            if (error) { aviso('error', `TWE manual: ${error}`); actualizarTwe(); return; }
         }
         if (accion === 'perfil') {
             pedirPlanPerfil();
