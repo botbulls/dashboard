@@ -1973,7 +1973,7 @@ def _armador_estrategia(objetivo: dict, origen: str = "estrategia", titulo: str 
     base = current_app.config.get("API_BASE_URL")
     nombres = {k: v["nombre"] for k, v in perfiles.PERFILES.items()}
 
-    def armar() -> dict:
+    def armar(en_job: bool = False) -> dict:
         settings = bot_control.Settings()
         settings.require_enabled()
         path = settings.require_config()
@@ -1994,7 +1994,7 @@ def _armador_estrategia(objetivo: dict, origen: str = "estrategia", titulo: str 
             container=settings.container, detectar=lambda c: perfiles.detectar(c, rescate_cfg, manif),
             nombres_perfil=nombres,
             warmup_s=bot_control.forager_warmup_seconds(), bloqueo_rescate=rescate.start_bloqueado(data_dir),
-            origen=origen, titulo=titulo, estricto=estricto)
+            origen=origen, titulo=titulo, estricto=estricto, estimar_rotacion=not en_job)
         return estrategia.armar_plan(entrada)
 
     return armar

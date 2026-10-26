@@ -642,6 +642,9 @@ class Entrada:
     titulo: str = "Revisar y aplicar la estrategia"
     # Volver a una versión: un par que ya está y forager descartaría bloquea (en un cambio común es un aviso).
     estricto: bool = False
+    # La estimación de rotación es solo texto del aviso (no cambia plan_hash): en el job, con el lock tomado, no se pide
+    # (más pedidos a Binance con el lock harían esperar a un Apagar).
+    estimar_rotacion: bool = True
 
 
 def _pares_texto(pares: List[str]) -> str:
@@ -826,7 +829,7 @@ def armar_plan(e: Entrada) -> Dict[str, Any]:
                              frase="los umbrales del rescate dejan de estar medidos"))
     if len(validos) > n:
         estimado = ""
-        if not e.expo.get("error"):
+        if e.estimar_rotacion and not e.expo.get("error"):
             try:
                 rot = estimar_rotacion(ctx, validos, n, e.expo, ambos=False)
                 estimado = " Con las velas de ahora, " + rot["estimaciones"][0]["texto"] + " (estimación)."
@@ -921,7 +924,7 @@ def aplicar(settings: Any, store: Any, armar: Any, plan_hash: str, usuario: str,
     arranca (los pasos de Docker quedan "omitido: se aplica al iniciar")."""
     rep = reporter or bot_control.NULL_REPORTER
     rep.step("validar", bot_control.PASO_EN_CURSO)
-    plan = armar()
+    plan = armar(en_job=True)
     if plan["plan_hash"] != plan_hash:
         raise EstrategiaError(["El plan cambió desde que lo revisaste (estrategia, posiciones o estado del bot): no se "
                                "escribió nada. Revisalo de nuevo."])

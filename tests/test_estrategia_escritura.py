@@ -342,3 +342,13 @@ def test_rotacion_va_en_el_aviso_del_plan(client, forager, red, docker):  # noqa
                                 "pares=BTCUSDT&n=x"])
 def test_rotacion_parametros_invalidos(client, forager, red, docker, qs):  # noqa: F811
     assert client.get(f"/api/bot/estrategia/rotacion?{qs}").status_code == 400
+
+
+def test_el_job_no_pide_la_estimacion_de_rotacion_con_el_lock(client, forager, red, docker, monkeypatch):  # noqa: F811
+    docker.running = True
+    llamadas = []
+    original = estrategia.estimar_rotacion
+    monkeypatch.setattr(estrategia, "estimar_rotacion", lambda *a, **k: llamadas.append(1) or original(*a, **k))
+    res, _plan = confirmar(client, CUATRO + ["SOLUSDT"], 4)
+    assert res.status_code == 200, res.get_json()
+    assert len(llamadas) == 2  # el plan y la confirmación (pedidos web); el job, con el lock, no

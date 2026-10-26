@@ -107,9 +107,12 @@ def _chequeo(par, clave):
 # ---------------------------------------------------------------- GET /api/bot/estrategia
 
 
-@pytest.mark.parametrize("url", ["/api/bot/estrategia", "/api/bot/estrategia/candidatos?q=SOL"])
-def test_requieren_login(app, url):
-    resp = app.test_client().get(url)
+@pytest.mark.parametrize("metodo,url", [
+    ("get", "/api/bot/estrategia"), ("get", "/api/bot/estrategia/candidatos?q=SOL"),
+    ("get", "/api/bot/estrategia/versiones"), ("get", "/api/bot/estrategia/rotacion?pares=BTCUSDT&n=1"),
+    ("post", "/api/bot/estrategia"), ("post", "/api/bot/estrategia/volver")])
+def test_requieren_login(app, metodo, url):
+    resp = getattr(app.test_client(), metodo)(url, json={})
     assert resp.status_code in (302, 401)
 
 
