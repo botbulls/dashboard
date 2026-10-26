@@ -485,6 +485,24 @@ def test_limite_de_validaciones_429(client, cambio):  # noqa: F811
     assert len(cambio.fake.calls) == llamadas  # el 6.º no llega a Binance
 
 
+def test_los_intentos_con_429_no_agrandan_el_set_de_redaccion(client, cambio):  # noqa: F811
+    """register_secret corría antes del limitador: cada 429 sumaba 2 valores al set que redact() recorre en cada línea
+    de log, para siempre (revisión, hallazgo 5)."""
+    from futuresboard import logs
+
+    for _ in range(cambio_key.VALIDACIONES_MAX):
+        assert validar(client, *nueva(cambio)).status_code == 200
+    antes = len(logs._secrets)
+    for _ in range(7):
+        k, s = par()
+        assert validar(client, k, s).status_code == 429
+    assert len(logs._secrets) == antes
+    k, s = nueva(cambio)
+    cambio.app.extensions["futuresboard_cambio_key"]["limite"] = cambio_key.Limitador()
+    assert validar(client, k, s).status_code == 200
+    assert k in logs._secrets and s in logs._secrets  # las que pasan el límite sí, antes de llegar a Binance
+
+
 def test_limitador_y_pendientes_en_el_tiempo():
     t = [0.0]
     lim = cambio_key.Limitador(maximo=2, ventana=60, clock=lambda: t[0])
@@ -904,6 +922,38 @@ def test_historial_dice_validada_y_telegram_avisa_cada_intento(client, cambio, m
     ultima = acciones.historial(bot_control.Store(cambio.data_dir).audit_path)["acciones"][0]
     assert ultima["estado"] == "validada" and ultima["estado_texto"] == "Validada"
     assert ultima["titulo"].startswith("API key nueva: validación (")
+
+
+def test_volver_avisa_por_telegram_y_audita_tambien_el_429(client, cambio, monkeypatch):  # noqa: F811
+    """Volver validaba el respaldo sin Telegram en el OK y respondía 429 sin auditar ni avisar (§ 10.6: Telegram en
+    cada intento, fallo y cambio; revisión, hallazgo 6)."""
+    from futuresboard import logs
+
+    k, s = nueva(cambio)
+    assert confirmar(client, validar(client, k, s).get_json()["pendiente_id"]).status_code == 200
+    avisos = []
+    monkeypatch.setattr(telegram_notify, "notify_bot_action", lambda *a, **kw: avisos.append(a))
+    # Como después de un reinicio del panel: el set de redacción arranca vacío (se restaura al terminar el test).
+    monkeypatch.setattr(logs, "_secrets", set())
+    resp = jpost(client, "/api/bot/credenciales/volver", {})
+    assert resp.status_code == 409 and resp.get_json()["requiere_confirmacion"]
+    assert ("credenciales_validar", "ok") in [(a[0], a[2]) for a in avisos]
+    assert cambio.k0 in logs._secrets and cambio.s0 in logs._secrets  # el respaldo, tapado en los logs
+    mascara = f"{cambio.k0[:4]}…{cambio.k0[-4:]}"
+    aviso_ok = next(a for a in avisos if a[0] == "credenciales_validar")
+    assert aviso_ok[1] == {"key": mascara, "cuenta": "misma", "entorno": "demo", "volver": True}
+
+    avisos.clear()
+    lleno = cambio_key.Limitador(maximo=1)
+    lleno.intentar("cliente17")
+    cambio.app.extensions["futuresboard_cambio_key"]["limite"] = lleno
+    resp = jpost(client, "/api/bot/credenciales/volver", {})
+    assert resp.status_code == 429
+    linea = audit_lines(cambio.app)[-1]
+    assert linea["action"] == "credenciales_validar" and linea["result"] == "rechazado"
+    assert linea["params"] == {"key": mascara, "entorno": "demo", "volver": True}
+    assert [(a[0], a[1], a[2]) for a in avisos] == [("credenciales_validar", linea["params"], "error")]
+    assert cambio.k0 not in json.dumps(linea) and cambio.s0 not in json.dumps(linea)
 
 
 def test_titulos_y_telegram_con_la_key_enmascarada():

@@ -2054,9 +2054,6 @@ def credenciales_validar():
         telegram_notify.notify_bot_action("credenciales_validar", {}, "error", {"error": str(exc)}, usuario)
         return _json_response({"ok": False, "error": str(exc),
                                "chequeos": [{"clave": "formato", "estado": cambio_key.BLOQUEA, "texto": str(exc)}]}, 400)
-    # Apenas llegan y con formato válido: desde acá cualquier log que los nombre sale tapado.
-    logs.register_secret(api_key)
-    logs.register_secret(api_secret)
     enmascarada = credenciales.enmascarar(api_key)
     est = _cambio_estado()
     espera = est["limite"].intentar(usuario)
@@ -2067,6 +2064,11 @@ def credenciales_validar():
         telegram_notify.notify_bot_action("credenciales_validar", {"key": enmascarada}, "error", {"error": texto},
                                           usuario)
         return _json_response({"ok": False, "error": texto}, 429)
+    # Pasaron el límite y van a llegar a Binance: desde acá cualquier log que los nombre sale tapado. Después del
+    # limitador, así los 429 no agrandan para siempre el set que redact() recorre en cada línea de log (≤ 10 valores
+    # cada 15 min por usuario).
+    logs.register_secret(api_key)
+    logs.register_secret(api_secret)
     env = _cambio_entorno()
     try:
         original = cambio_key.leer_archivo(env.dir_secretos)
@@ -2187,7 +2189,15 @@ def credenciales_volver():
     if espera is not None:
         texto = (f"Hasta {cambio_key.VALIDACIONES_MAX} validaciones cada 15 minutos: probá de nuevo en "
                  f"{max(1, espera // 60)} min.")
+        # Params propios y enmascarados: nunca ``r``, que trae key y secret del respaldo.
+        p429 = {"key": r["key"], "entorno": "demo" if env.testnet else "real", "volver": True}
+        _audit_cambio("credenciales_validar", p429, "rechazado", texto)
+        telegram_notify.notify_bot_action("credenciales_validar", p429, "error", {"error": texto}, usuario)
         return _json_response({"ok": False, "error": texto}, 429)
+    # Como en /validar: antes de llegar a Binance, que los logs tapen key y secret del respaldo (después de un
+    # reinicio del panel nadie los registró).
+    logs.register_secret(r["api_key"])
+    logs.register_secret(r["api_secret"])
     try:
         original = cambio_key.leer_archivo(env.dir_secretos)
     except OSError as exc:
@@ -2205,6 +2215,7 @@ def credenciales_volver():
                                 archivo_sha=cambio_key.sha(original), origen="volver", hedge=res.hedge,
                                 permisos=res.permisos, chequeos=res.chequeos, huella_clave_id=res.huella_clave_id)
     _audit_cambio("credenciales_validar", params, "ok", "respaldo validado: misma cuenta")
+    telegram_notify.notify_bot_action("credenciales_validar", params, "ok", {}, usuario)
     out = _cambio_confirmar({"pendiente_id": p.id}, "volver")
     data = json.loads(out.get_data(as_text=True))
     data["chequeos"] = res.chequeos
