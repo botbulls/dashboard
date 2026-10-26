@@ -2683,7 +2683,12 @@ def _bot_reanudar(body: dict):
         _rescate_audit("start", params, "rechazado", str(exc))
         return _json_response({**exc.payload, "ok": False, "error": str(exc)}, exc.status_code)
     params["como"] = plan["como"]
-    if plan["requiere_plan"] and (not confirmar or enviado != plan["plan_hash"]):
+    # Con confirmar (o un plan_hash), el hash tiene que ser el del plan de ahora aunque este estado no pida plan: si el
+    # bot arrancó mientras el modal de Iniciar estaba abierto, un hash viejo lanzaba un Reiniciar que nadie confirmó
+    # (revisión, hallazgo 21). El hash incluye "como": pasar de iniciar a reiniciar lo invalida. Reanudar y Reiniciar
+    # de un toque no mandan confirmar.
+    confirma_un_plan = confirmar or enviado is not None
+    if (plan["requiere_plan"] or confirma_un_plan) and (not confirmar or enviado != plan["plan_hash"]):
         if confirmar:
             texto = ("El resumen ya no corresponde: cambió la estrategia o el estado del bot desde que se armó. "
                      "Revisalo de nuevo.\n\n" + plan["texto"])

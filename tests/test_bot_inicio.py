@@ -175,6 +175,28 @@ def test_plan_hash_viejo_no_arranca(client, app, env, docker):  # noqa: F811
     assert docker.actions() == []
 
 
+def test_confirmar_con_un_plan_viejo_no_reinicia_si_ya_corre(client, app, env, docker):  # noqa: F811
+    """Detenido: el modal de Iniciar muestra su plan. Mientras está abierto, otra pestaña (o C3) lo arranca. Confirmar
+    con el hash viejo lanzaba un Reiniciar que nadie confirmó: con el bot corriendo el hash no se comparaba
+    (revisión, hallazgo 21)."""
+    escribir(env, long_mode="normal", short_mode="normal")
+    docker.running = False
+    h = plan(client).get_json()["plan_hash"]
+    docker.running = True  # lo inició otra pestaña
+    resp = post(client, "/api/bot/start", {"reanudar": True, "confirmar": True, "plan_hash": h})
+    assert resp.status_code == 409 and resp.get_json()["requiere_confirmacion"] is True
+    assert resp.get_json()["plan"]["como"] == "reiniciar" and resp.get_json()["plan_hash"] != h
+    assert docker.actions() == []
+    assert audit_lines(app)[-1]["result"] == "rechazado"
+    # Un hash inventado tampoco.
+    resp = post(client, "/api/bot/start", {"reanudar": True, "confirmar": True, "plan_hash": "no-es-el-plan"})
+    assert resp.status_code == 409 and docker.actions() == []
+    # El hash del plan nuevo sí (el modal reabierto como Reiniciar).
+    resp = post(client, "/api/bot/start", {"reanudar": True, "confirmar": True,
+                                           "plan_hash": resp.get_json()["plan_hash"]})
+    assert resp.status_code == 200 and docker.actions() == ["restart"]
+
+
 def test_el_job_vuelve_a_mirar_el_plan_con_el_lock(client, app, env, docker, monkeypatch):  # noqa: F811
     escribir(env)
     docker.running = False
