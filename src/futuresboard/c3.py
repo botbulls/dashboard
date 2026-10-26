@@ -1103,6 +1103,11 @@ class C3Watcher:
             if simulado:
                 return {"descripcion": "la config de forager tal como quedó (sin leerla: modo dry_run)"}
             return {"error": "no se pudo leer la config de forager (falta FUTURESBOARD_FORAGER_CONFIG)."}
+        if al_corte and al_corte.get("estrategia_hash") and actual.get("estrategia_hash") != al_corte["estrategia_hash"]:
+            cambios = bot_control.cambios_estrategia(al_corte.get("estrategia"), actual.get("estrategia") or {})
+            que = ", ".join(c["titulo"].lower() for c in cambios) or "pares, pares a la vez o TWE"
+            return {"error": (f"la estrategia de forager cambió desde el corte ({que}): no se reinicia solo. "
+                              "Revisala y usá Iniciar desde el panel, que muestra qué cambió.")}
         if al_corte and (str(al_corte.get("twe_long")) != str(actual.get("twe_long"))
                          or str(al_corte.get("twe_short")) != str(actual.get("twe_short"))):
             return {"error": (f"la config de forager cambió desde el corte (twe {al_corte.get('twe_long')}/"
@@ -1287,8 +1292,12 @@ class C3Watcher:
             long_mode = bot_control.normalize_mode(cfg.get("long_mode"), "long_mode")
         except bot_control.InvalidModeError:
             long_mode = str(cfg.get("long_mode"))
+        # estrategia_hash: twe_*, n_longs y approved_symbols_* (sin los modos, que el Apagar de C3 cambia a
+        # graceful_stop): si cambia en el corte, el reinicio automático no la aplica sin que nadie la vea.
         return {"preset": bot_control.detect_preset(cfg), "twe_long": cfg.get("twe_long"),
-                "twe_short": cfg.get("twe_short"), "long_mode": long_mode}
+                "twe_short": cfg.get("twe_short"), "long_mode": long_mode,
+                "estrategia_hash": bot_control.estrategia_hash(cfg),
+                "estrategia": bot_control.resumen_estrategia(cfg)}
 
     def _leer_forager(self) -> Optional[Dict[str, Any]]:
         if self._forager is None:

@@ -445,7 +445,10 @@ def test_stop_apagar(client, app, env, docker, binance):
     assert data["resumen"]["completo"] is True
     assert data["resumen"]["rondas"] == 0  # no había nada abierto
     assert docker.actions() == ["stop"]
-    assert env.read_text() == FORAGER_HJSON  # apagar no toca la config
+    # Apagar solo deja forager en parada gradual (spec bot-estrategia § 3.4); la estrategia no cambia.
+    cfg = hjson.loads(env.read_text())
+    assert (cfg["long_mode"], cfg["short_mode"]) == ("graceful_stop", "graceful_stop")
+    assert {k: v for k, v in cfg.items() if not k.endswith("_mode")} == hjson.loads(FORAGER_HJSON)
     assert audit_lines(app)[-1]["params"] == {"modo": "apagar"}
 
 

@@ -64,7 +64,7 @@ Browser ──(sesión + CSRF)──> dashboard (Flask)
 | GET | `/api/bot/status` | – | Estado del contenedor, preset de riesgo deducido (`bajo`/`medio`/`alto`/`personalizado`/`desconocido`), `twe_long`, `twe_short`, `long_mode`, `short_mode`, `enabled`, `modes_supported`, `config_pending`. |
 | POST | `/api/bot/start` | `{"riesgo": "bajo"\|"medio"\|"alto"}` o `{"twe_long": n}` (TWE manual, ver [perfiles.md](perfiles.md#twe-manual)) | Escribe `twe_long`/`twe_short` del preset (o la TWE manual), `long_mode=normal`, `short_mode` (ver abajo); `start` si está detenido, `restart` si corre. |
 | POST | `/api/bot/perfil` | `{"perfil": "conservador"\|"con_rescate"}` (+ `"confirmar": true`) | Perfil de riesgo: TWE de forager + rescate, disparo por uPnL y retiro en una sola acción (ver [perfiles.md](perfiles.md)). |
-| POST | `/api/bot/stop` | `{"modo": "graceful"\|"apagar"}` | `graceful`: `long_mode=short_mode=graceful_stop` + start o restart (requiere `FUTURESBOARD_FORAGER_SUPPORTS_MODES=1`, si no 409). `apagar`: `stop` del contenedor y después cancela **todas** las órdenes y cierra **todas** las posiciones de USDⓈ-M Futures a mercado (ver "Apagar" abajo); no toca la config. |
+| POST | `/api/bot/stop` | `{"modo": "graceful"\|"apagar"}` | `graceful`: `long_mode=short_mode=graceful_stop` + start o restart (requiere `FUTURESBOARD_FORAGER_SUPPORTS_MODES=1`, si no 409). `apagar`: `stop` del contenedor y después cancela **todas** las órdenes y cierra **todas** las posiciones de USDⓈ-M Futures a mercado (ver "Apagar" abajo). Antes del stop deja `long_mode`/`short_mode` en `graceful_stop` en la config; si no puede escribirla, sigue igual. |
 
 Presets (históricos del guardian): bajo 4/1, medio 6/2, alto 8/3 (`twe_long`/`twe_short`).
 
@@ -110,6 +110,12 @@ El log de auditoría guarda el mensaje de error completo, incluida la restauraci
 
 `POST /api/bot/stop {"modo": "apagar"}` hace, en este orden y bajo el lock de acciones:
 
+0. **Deja forager en parada gradual**: escribe `long_mode` y `short_mode` en `graceful_stop` (backup y escritura
+   atómica, como Parada gradual; guarda `short_mode_before_stop` para el próximo START). Si algo vuelve a arrancar
+   passivbot (por ejemplo un `docker compose up -d`), no abre pares nuevos; Iniciar los vuelve a `normal`. **Nunca
+   frena el Apagar**: si no puede escribir (archivo de solo lectura, HJSON roto, sin `FUTURESBOARD_FORAGER_CONFIG`),
+   el paso queda en error u omitido, el aviso va al resultado (`warning`) y a Telegram, y sigue con el stop. Vale
+   igual para el Apagar del tope del rescate y el de C3 (todos llaman a `stop_bot(..., "apagar")`).
 1. **Detiene passivbot** con el cliente Docker (`POST /containers/{name}/stop`, `304` = ya estaba
    detenido) y confirma con `GET /containers/{name}/json` que no corre. Si el stop falla (error
    HTTP, timeout, contenedor inexistente) o sigue corriendo: **502 y no se toca Binance**. Cerrar

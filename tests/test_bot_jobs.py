@@ -282,7 +282,8 @@ def test_apagar_falla_al_detener(client, env, docker, binance):  # noqa: F811
     docker.fail_action = 500
     resp = post(client, "/api/bot/stop", {"modo": "apagar"})
     assert resp.status_code == 502
-    assert estados(resp.job) == {"detener": "error", "verificar_detenido": "omitido", "cancelar_ordenes": "omitido",
+    assert estados(resp.job) == {"parada_gradual": "ok", "detener": "error", "verificar_detenido": "omitido",
+                                 "cancelar_ordenes": "omitido",
                                  "cancelar_condicionales": "omitido", "cerrar_posiciones": "omitido",
                                  "verificacion": "omitido"}
     assert binance.calls == []
@@ -578,7 +579,7 @@ def test_porcentaje_avanza():
     job.step("detener", "ok")
     job.step("verificar_detenido", "ok")
     job.step("cancelar_ordenes", "en_curso", "1/2", 1, 2)
-    assert job.porcentaje() == int(2.5 * 100 / 6)
+    assert job.porcentaje() == int(2.5 * 100 / len(bot_control.APAGAR_STEPS))
     job.finish("ok", {"ok": True}, 200)
     assert job.porcentaje() == 100
     assert {p["estado"] for p in job.to_dict()["pasos"]} == {"ok", "omitido"}

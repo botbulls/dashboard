@@ -125,6 +125,8 @@ START_STEPS: List[tuple] = [
 ]
 GRACEFUL_STEPS: List[tuple] = list(START_STEPS)
 APAGAR_STEPS: List[tuple] = [
+    # Antes del stop (decisión 2, spec bot-estrategia § 3.4): si algo vuelve a arrancar passivbot, no abre pares nuevos.
+    ("parada_gradual", "Dejar forager en parada gradual"),
     ("detener", "Detener passivbot"),
     ("verificar_detenido", "Verificar que passivbot está detenido"),
     ("cancelar_ordenes", "Cancelar órdenes"),
@@ -1552,7 +1554,7 @@ def stop_bot(settings: Settings, store: Store, modo: Any,
     docker = docker or DockerClient(settings.docker_url)
 
     if modo == "apagar":
-        return _apagar(settings, docker, binance, reporter)
+        return _apagar(settings, docker, binance, reporter, store=store)
 
     (reporter or NULL_REPORTER).step("validar", PASO_EN_CURSO)
     path = settings.require_config()
@@ -1578,25 +1580,82 @@ def stop_bot(settings: Settings, store: Store, modo: Any,
             "backup": backup.name}
 
 
-def _apagar(settings: Settings, docker: DockerClient,
-            binance: Optional[BinanceFuturesClient], reporter: Optional[Reporter] = None) -> Dict[str, Any]:
-    """Detiene passivbot y después cancela todas las órdenes y cierra todas las posiciones.
+def _dejar_en_parada_gradual(settings: Settings, store: Optional[Store], rep: Reporter) -> Optional[str]:
+    """Paso 1 de Apagar: ``long_mode`` y ``short_mode`` en ``graceful_stop`` (backup y escritura atómica, como Parada
+    gradual), para que un arranque externo (``docker compose up -d``) no vuelva a operar.
 
-    Si el stop falla (error HTTP, timeout, contenedor inexistente) o el contenedor sigue
-    corriendo, se corta con error SIN tocar Binance: cerrar con el bot vivo haría que reabra.
+    **Nunca lanza ni frena el Apagar**, que es una acción de emergencia: si no puede escribir, marca el paso (error u
+    omitido) y devuelve el aviso, que va al resultado y a Telegram. Guarda ``short_mode_before_stop`` igual que
+    Parada gradual, así Iniciar vuelve al short_mode de antes. Si ya estaba en parada gradual no escribe."""
+    clave = "parada_gradual"
+    rep.step(clave, PASO_EN_CURSO)
+    path = settings.forager_config
+    if path is None:
+        aviso = (f"No se dejó forager en parada gradual: falta {ENV_FORAGER_CONFIG}. Se sigue con el Apagar; si algo "
+                 "vuelve a arrancar passivbot, opera normal.")
+        rep.step(clave, PASO_OMITIDO, aviso)
+        return aviso
+    try:
+        cfg = read_forager_config(path)
+        modos = []
+        for side in ("long", "short"):
+            try:
+                modos.append(_mode(cfg, side))
+            except InvalidModeError:
+                modos.append(None)
+        if modos == [MODE_GRACEFUL_STOP, MODE_GRACEFUL_STOP]:
+            rep.step(clave, PASO_OK, "Ya estaba en parada gradual: no se escribió nada.")
+            return None
+        state = store.load_state() if store is not None else None
+        backup = write_forager_config(path, {"long_mode": MODE_GRACEFUL_STOP, "short_mode": MODE_GRACEFUL_STOP})
+        if state is not None and modos[1] is not None and modos[1] not in STOP_MODE_VALUES:
+            state["short_mode_before_stop"] = modos[1]
+            with contextlib.suppress(OSError):
+                store.save_state(state)
+        rep.step(clave, PASO_OK, f"long_mode y short_mode en graceful_stop (backup {backup.name}). Si algo vuelve a "
+                                 "arrancar passivbot, no abre pares nuevos; Iniciar los vuelve a normal.")
+        return None
+    except Exception as exc:  # noqa: BLE001 - la escritura nunca frena el Apagar
+        motivo = str(exc)[:200] if isinstance(exc, BotControlError) else exc.__class__.__name__
+        aviso = (f"No se pudo dejar forager en parada gradual ({motivo}). Se siguió con el Apagar; si algo vuelve a "
+                 "arrancar passivbot, opera normal.")
+        rep.step(clave, PASO_ERROR, aviso)
+        return aviso
+
+
+def _sumar_aviso(payload: Dict[str, Any], aviso: Optional[str]) -> Dict[str, Any]:
+    if aviso:
+        payload["warning"] = f"{payload['warning']} {aviso}" if payload.get("warning") else aviso
+    return payload
+
+
+def _apagar(settings: Settings, docker: DockerClient,
+            binance: Optional[BinanceFuturesClient], reporter: Optional[Reporter] = None,
+            store: Optional[Store] = None) -> Dict[str, Any]:
+    """Deja forager en parada gradual, detiene passivbot y después cancela todas las órdenes y cierra todas las
+    posiciones.
+
+    Lo primero nunca frena lo demás (``_dejar_en_parada_gradual``). Si el stop falla (error HTTP, timeout,
+    contenedor inexistente) o el contenedor sigue corriendo, se corta con error SIN tocar Binance: cerrar con el bot
+    vivo haría que reabra.
     """
     if binance is None:
         raise DisabledError("Apagar requiere el cliente de Binance Futures configurado.")
     rep = reporter or NULL_REPORTER
-    rep.step("detener", PASO_EN_CURSO, f"docker stop {settings.container} (hasta {STOP_TIMEOUT_SECONDS} s)")
-    result = docker.stop(settings.container)
-    rep.step("detener", PASO_OK, "Detenido." if result == "ok" else "Ya estaba detenido.")
-    rep.step("verificar_detenido", PASO_EN_CURSO)
-    info = docker.inspect(settings.container)
-    if info["status"] == "not_found":
-        raise DockerError(f"El contenedor {settings.container} no existe. No se cerró nada en Binance.")
-    if info["running"]:
-        raise DockerError("passivbot sigue corriendo después del stop. No se cerró nada en Binance.")
+    aviso = _dejar_en_parada_gradual(settings, store, rep)
+    try:
+        rep.step("detener", PASO_EN_CURSO, f"docker stop {settings.container} (hasta {STOP_TIMEOUT_SECONDS} s)")
+        result = docker.stop(settings.container)
+        rep.step("detener", PASO_OK, "Detenido." if result == "ok" else "Ya estaba detenido.")
+        rep.step("verificar_detenido", PASO_EN_CURSO)
+        info = docker.inspect(settings.container)
+        if info["status"] == "not_found":
+            raise DockerError(f"El contenedor {settings.container} no existe. No se cerró nada en Binance.")
+        if info["running"]:
+            raise DockerError("passivbot sigue corriendo después del stop. No se cerró nada en Binance.")
+    except DockerError as exc:
+        _sumar_aviso(exc.payload, aviso)
+        raise
     rep.step("verificar_detenido", PASO_OK, f"Estado: {info.get('status')}")
 
     resumen = close_all_futures(binance, rep)
@@ -1604,12 +1663,12 @@ def _apagar(settings: Settings, docker: DockerClient,
     if not resumen["completo"]:
         raise PartialCloseError(
             "passivbot quedó detenido pero el cierre fue parcial: revisar lo que quedó abierto en Binance.",
-            payload=base,
+            payload=_sumar_aviso(base, aviso),
         )
     if not resumen.get("algo_verificado", True):
         base["warning"] = ("Órdenes condicionales sin verificar: el endpoint no existe en demo/testnet. "
                            "Revisar en Binance.")
-    return {"ok": True, **base}
+    return {"ok": True, **_sumar_aviso(base, aviso)}
 
 
 # --------------------------------------------------------------------------------------

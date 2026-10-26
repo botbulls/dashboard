@@ -122,7 +122,7 @@
         <div class="bb-accion bb-accion--peligro">
             {%- if c.get('running') %}
             <h3>Apagar</h3>
-            <p>Detiene passivbot, cancela TODAS las órdenes (también las condicionales) y cierra TODAS las posiciones a mercado. Irreversible: pide confirmación con casilla.</p>
+            <p>Deja forager en parada gradual, detiene passivbot, cancela TODAS las órdenes (también las condicionales) y cierra TODAS las posiciones a mercado. Irreversible: pide confirmación con casilla. Si algo lo vuelve a arrancar (por ejemplo, un docker compose up), no abre pares nuevos.</p>
             <button type="button" class="btn btn-danger" data-bot-accion="apagar"><i class="fas fa-power-off" aria-hidden="true"></i> Apagar…</button>
             {%- else %}
             <h3>Cerrar todo</h3>

@@ -313,7 +313,7 @@
             url: '/api/bot/stop',
             body: { modo: 'apagar' },
             titulo: 'Cerrar todo en Binance',
-            texto: 'passivbot ya está detenido. Se cancelarán TODAS las órdenes abiertas (incluidas las condicionales) y se cerrarán TODAS las posiciones de USDⓈ-M Futures A MERCADO, en ambos lados. Es irreversible: el precio de cierre puede ser peor que el esperado (slippage) y se realizan las ganancias o pérdidas actuales.',
+            texto: 'passivbot ya está detenido (forager queda en parada gradual). Se cancelarán TODAS las órdenes abiertas (incluidas las condicionales) y se cerrarán TODAS las posiciones de USDⓈ-M Futures A MERCADO, en ambos lados. Es irreversible: el precio de cierre puede ser peor que el esperado (slippage) y se realizan las ganancias o pérdidas actuales.',
             check: true,
             boton: 'Cerrar todo',
         }),
@@ -321,7 +321,7 @@
             url: '/api/bot/stop',
             body: { modo: 'apagar' },
             titulo: 'Confirmar apagado de passivbot',
-            texto: 'Se detendrá passivbot y después se cancelarán TODAS las órdenes abiertas (incluidas las condicionales) y se cerrarán TODAS las posiciones de USDⓈ-M Futures A MERCADO, en ambos lados. Es irreversible: el precio de cierre puede ser peor que el esperado (slippage) y se realizan las ganancias o pérdidas actuales.',
+            texto: 'Primero deja forager en parada gradual (si algo lo vuelve a arrancar, no abre pares nuevos). Después se detendrá passivbot y se cancelarán TODAS las órdenes abiertas (incluidas las condicionales) y se cerrarán TODAS las posiciones de USDⓈ-M Futures A MERCADO, en ambos lados. Es irreversible: el precio de cierre puede ser peor que el esperado (slippage) y se realizan las ganancias o pérdidas actuales.',
             check: true,
         }),
     };
