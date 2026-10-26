@@ -252,7 +252,6 @@
             tweInput.value = status.twe_long;
         }
         actualizarTwe();
-        if (gracefulNota) gracefulNota.textContent = 'No abre nuevas posiciones; sigue gestionando las abiertas.';
         aplicarRestricciones(status);
     }
 
@@ -300,6 +299,14 @@
             titulo: 'Confirmar parada gradual',
             texto: 'passivbot se reiniciará en parada gradual (graceful stop): no abrirá nuevas posiciones y seguirá gestionando las abiertas hasta cerrarlas.',
             check: false,
+        }),
+        // Reiniciar operando: la misma API que Reanudar; se confirma sin casilla (~90 s sin gestionar órdenes).
+        reiniciar: () => ({
+            titulo: 'Reiniciar passivbot',
+            texto: 'passivbot se reinicia con la estrategia guardada (sin cambiar TWE, pares ni rescate): forager tarda ~90 s en volver a operar los pares y mientras tanto no gestiona órdenes.',
+            check: false,
+            boton: 'Reiniciar',
+            alAceptar: () => pedirInicio(),
         }),
         // Detenido con posiciones u órdenes sin bot: es el mismo Apagar (funciona con passivbot ya detenido).
         cerrar_todo: () => ({
@@ -655,6 +662,11 @@
         const p = pending;
         pending = null;
         bootstrap.Modal.getOrCreateInstance(confirmEl).hide();
+        if (typeof p.alAceptar === 'function') {
+            // El plan lo arma el server después de cerrar esta confirmación (no se apilan modales).
+            confirmEl.addEventListener('hidden.bs.modal', () => p.alAceptar(), { once: true });
+            return;
+        }
         ejecutar(p);
     });
 
@@ -834,7 +846,7 @@
             pedirPlanPerfil();
             return;
         }
-        if (accion === 'iniciar' || accion === 'reanudar' || accion === 'reiniciar') {
+        if (accion === 'iniciar' || accion === 'reanudar') {
             pedirInicio();
             return;
         }

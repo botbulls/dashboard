@@ -57,6 +57,9 @@ class FakeDocker:
         self.fail_action = None      # codigo HTTP con el que fallan start/restart/stop
         self.timeout_action = False  # start/restart/stop sin respuesta (timeout)
         self.started_at = None
+        self.finished_at = None
+        self.restart_count = None    # RestartCount (nivel superior del inspect, no en State)
+        self.image = None            # Config.Image
 
     def request(self, method, url, **kwargs):
         import requests
@@ -69,7 +72,14 @@ class FakeDocker:
             state = {"Status": status, "Running": self.running}
             if self.started_at:
                 state["StartedAt"] = self.started_at
-            return FakeResponse(200, {"State": state})
+            if self.finished_at:
+                state["FinishedAt"] = self.finished_at
+            data = {"State": state}
+            if self.restart_count is not None:
+                data["RestartCount"] = self.restart_count
+            if self.image:
+                data["Config"] = {"Image": self.image}
+            return FakeResponse(200, data)
         if self.timeout_action:
             raise requests.ReadTimeout("timeout")
         if self.fail_action:
@@ -332,7 +342,7 @@ def audit_lines(app):
     "method,url",
     [("get", "/api/bot/status"), ("post", "/api/bot/start"), ("post", "/api/bot/stop"),
      ("get", "/api/bot/jobs/activo"), ("get", "/api/bot/jobs/0123456789abcdef"), ("get", "/bot"),
-     ("get", "/estrategia")],
+     ("get", "/estrategia"), ("get", "/api/bot/acciones")],
 )
 def test_auth_required(app, env, docker, method, url):
     resp = getattr(app.test_client(), method)(url)

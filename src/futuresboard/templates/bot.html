@@ -1,41 +1,182 @@
 {% extends "base.html" %}
+{% import "_bot.html" as bot_ui %}
 {% block title %}Bot{% endblock %}
-{% block bajada %}<p>passivbot (forager): estado y acciones. Herramienta, no asesor.</p>{% endblock %}
+{% block bajada %}<p>passivbot (forager){% if config.get('BINANCE_TESTNET') %} en Binance Demo (testnet){% endif %}: estado, acciones e historial. Herramienta, no asesor.</p>{% endblock %}
 {% block content %}
 {% set st = bot_status or {} %}
 {% set c = st.get('container') or {} %}
+{% set e = st.get('estado_bot') %}
+{% set pa = st.get('pares_ahora') or {} %}
+{#- data-bot-recargar: después de una acción la página se vuelve a armar en el server (bot_acciones.js). -#}
 <div data-bot-recargar hidden></div>
 
 <section class="bb-seccion" aria-labelledby="bbTituloEstado">
     <h2 class="bb-seccion__titulo" id="bbTituloEstado">Estado</h2>
-    <div class="card">
-        <div class="card-header"><h3 class="bb-card-titulo">passivbot</h3><span class="bb-card-sub">{{ c.get('name') or 'forager' }}</span></div>
-        <div class="card-body">
-            <ul class="bb-dato-lista">
-                <li><span>Contenedor</span><span>{{ c.get('status') or 'sin datos' }}</span></li>
-                <li><span>Modos long / short</span><span>{% if st.get('modes_supported') %}{{ st.get('long_mode') or '—' }} / {{ st.get('short_mode') or '—' }}{% else %}n/a (forager no los lee){% endif %}</span></li>
-                <li><span>Config de forager</span><span>{% if st.get('config_pending') %}pendiente de reinicio{% elif c.get('running') %}en efecto{% else %}se aplica al iniciar{% endif %}</span></li>
-            </ul>
-            {% if st.get('message') or st.get('error') %}<p class="bb-alerta bb-alerta--aviso mt-3" role="note"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i><span>{{ st.get('error') or st.get('message') }}</span></p>{% endif %}
+    <div class="bb-grilla">
+        <div class="card bb-ancho-6">
+            <div class="card-header"><h3 class="bb-card-titulo">passivbot</h3><span class="bb-card-sub">forager{% if config.get('BINANCE_TESTNET') %}, Binance Demo{% endif %}</span></div>
+            <div class="card-body" style="display:grid;gap:12px">
+                <div class="bb-estado-grande">
+                    {{ bot_ui.insignia(st) }}
+                    {%- if st.get('modes_supported') %}
+                    <span class="badge bb-badge bb-badge--neutro">long: {{ st.get('long_mode') or '—' }}</span>
+                    <span class="badge bb-badge bb-badge--neutro">short: {{ st.get('short_mode') or '—' }}{% if st.get('n_shorts') == 0 %} · sin pares{% endif %}</span>
+                    {%- endif %}
+                </div>
+                <ul class="bb-dato-lista">
+                    <li><span>Contenedor</span><span>{{ c.get('name') or '—' }} · {{ c.get('status') or 'sin datos' }}</span></li>
+                    <li><span>Desde</span><span>{% if desde %}{{ desde }} · hace {{ hace }}{% else %}{{ 'detenido' if c.get('status') and not c.get('running') else '—' }}{% endif %}{% if st.get('restart_count') is not none %} · {{ st.get('restart_count') }} {{ 'reinicio' if st.get('restart_count') == 1 else 'reinicios' }}{% endif %}</span></li>
+                    <li><span>Config de forager</span><span>{% if st.get('config_pending') %}pendiente de reinicio{% elif c.get('running') %}en efecto{% else %}se aplica al iniciar{% endif %}</span></li>
+                    <li><span>Imagen</span><span>{{ c.get('image') or '—' }}</span></li>
+                    <li><span>Parada gradual</span><span>{{ 'disponible (forager lee long_mode / short_mode)' if st.get('modes_supported') else 'no disponible (forager no lee los modos)' }}</span></li>
+                </ul>
+                {% if st.get('error') or st.get('message') %}<p class="bb-alerta bb-alerta--aviso" role="note"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i><span>{{ st.get('error') or st.get('message') }}</span></p>{% endif %}
+            </div>
+            <div class="card-footer">Docker por el proxy del panel (inspect). Horas en UTC.</div>
         </div>
+        <div class="card bb-ancho-6">
+            {%- set total = pa.get('lugares_total') or 0 %}
+            {%- set ocupados = pa.get('lugares_ocupados') or 0 %}
+            <div class="card-header"><h3 class="bb-card-titulo">Pares ahora</h3><span class="bb-card-sub"><span class="bb-lugares" aria-hidden="true">{% for _ in range([total, ocupados, 0]|max) %}<span{% if loop.index <= ocupados %} class="is-ocupado"{% endif %}></span>{% endfor %}</span>{{ ocupados }} de {{ total or '—' }} lugares ocupados</span></div>
+            <div class="card-body" style="display:grid;gap:12px">
+                <ul class="bb-dato-lista">
+                {%- for p in pa.get('pares') or [] %}
+                    <li><span><strong>{{ p.symbol }}</strong> <small class="text-muted">
+                        {%- if p.compras or p.ventas %}{{ p.compras }} {{ 'compra' if p.compras == 1 else 'compras' }} · {{ p.ventas }} {{ 'venta' if p.ventas == 1 else 'ventas' }}{% else %}sin órdenes abiertas{% endif %}
+                        {%- if p.fuera_de_lista %} · fuera de la lista: en parada gradual hasta cerrar{% endif %}</small></span>
+                        <span>{% if p.posicion %}<span class="bb-num" data-value="{{ p.posicion }}">{{ p.posicion|num }}</span>{% if p.pct_balance is not none %} · <span class="bb-num" data-value="{{ p.pct_balance }}">{{ p.pct_balance|pct(0) }}</span>{% endif %}{% else %}sin posición{% endif %}</span></li>
+                {%- else %}
+                    <li><span>Sin pares aprobados ni posiciones.</span><span></span></li>
+                {%- endfor %}
+                </ul>
+                {#- Chequeos de forager por ciclo sobre los aprobados (mínimo contra max_min_cost, edad, velas, TRADING):
+                    necesitan exchangeInfo y velas cacheados (spec § 2.3 y § 5.2). Van acá, con aviso por Telegram. -#}
+                <ul class="bb-chequeos bb-chequeos--lista" data-bot-chequeos-forager hidden aria-hidden="true"></ul>
+            </div>
+            <div class="card-footer">Posiciones y órdenes abiertas según el scraper. Para forager, una orden abierta ocupa un lugar igual que una posición.</div>
+        </div>
+
+        {%- set l = latidos %}
+        {%- set punto = {'late': 'ok', 'viejo': 'aviso', 'no_late': 'peligro', 'sin_latido': 'gris'} %}
+        <div class="card" data-latido="scraper"><div class="card-body" style="display:grid;gap:6px">
+            <span class="bb-tarjeta__etiqueta">Scraper</span>
+            <span class="bb-estado-grande"><span class="bb-punto bb-punto--{{ punto.get(l.scraper.estado, 'gris') }}" aria-hidden="true"></span><strong>{{ {'late': 'Late', 'viejo': 'Atrasado', 'sin_latido': 'Sin latido'}.get(l.scraper.estado) }}</strong></span>
+            <span class="bb-motivo">posiciones, órdenes e ingresos cada {{ l.scraper.intervalo }} s</span></div><div class="card-footer">{{ ('latido hace ' ~ l.scraper.edad) if l.scraper.edad else 'sin latido' }}</div></div>
+        <div class="card" data-latido="rescate"><div class="card-body" style="display:grid;gap:6px">
+            <span class="bb-tarjeta__etiqueta">Servicio rescate</span>
+            <span class="bb-estado-grande"><span class="bb-punto bb-punto--{{ punto.get(l.rescate.estado, 'gris') }}" aria-hidden="true"></span><strong>{{ {'late': 'Late', 'no_late': 'No late', 'sin_latido': 'Sin latido'}.get(l.rescate.estado) }}</strong>{% if l.rescate.modo %}<span class="badge bb-badge {{ 'bb-badge--sim' if l.rescate.modo == 'dry_run' else ('bb-badge--real' if l.rescate.modo == 'real' else 'bb-badge--neutro') }}">{{ l.rescate.modo }}</span>{% endif %}</span>
+            <span class="bb-motivo">lectura de la cuenta, tope de pérdida y C3</span></div><div class="card-footer">{{ ('latido hace ' ~ l.rescate.edad) if l.rescate.edad else 'sin latido' }}</div></div>
+        <div class="card" data-latido="c3"><div class="card-body" style="display:grid;gap:6px">
+            <span class="bb-tarjeta__etiqueta">C3 (stop con reinicio)</span>
+            {%- set c3e = l.c3.estado %}
+            <span class="bb-estado-grande"><span class="bb-punto bb-punto--{{ {'operando': 'ok', 'parado': 'peligro', 'bloqueado': 'peligro', 'en_confirmacion': 'aviso', 'sin_observacion': 'aviso', 'base_pendiente': 'aviso'}.get(c3e, 'gris') }}" aria-hidden="true"></span><strong>{{ {'operando': 'Vigilando', 'parado': 'Parado', 'bloqueado': 'Bloqueado', 'en_confirmacion': 'En confirmación', 'sin_observacion': 'Sin observar', 'base_pendiente': 'Base pendiente', 'off': 'Apagado', 'deshabilitado': 'Apagado'}.get(c3e, 'Sin datos') }}</strong></span>
+            <span class="bb-motivo">{% if l.c3.parado and l.c3.corte %}cortó el {{ l.c3.corte[8:10] }}/{{ l.c3.corte[5:7] }} {{ l.c3.corte[11:16] }} UTC{% else %}se configura en <a href="{{ url_for('main.rescate_page') }}#c3">Rescate</a>{% endif %}</span></div><div class="card-footer">{{ 'el servicio late' if l.c3.servicio_vivo else 'sin latido del servicio' }}</div></div>
+        <div class="card" data-latido="acciones"><div class="card-body" style="display:grid;gap:6px">
+            <span class="bb-tarjeta__etiqueta">Acciones del panel</span>
+            <span class="bb-estado-grande"><span class="bb-punto bb-punto--{{ 'aviso' if l.acciones.estado == 'en_curso' else 'ok' }}" aria-hidden="true"></span><strong>{{ 'En curso' if l.acciones.estado == 'en_curso' else 'Libre' }}</strong></span>
+            <span class="bb-motivo">{{ ('acción en curso: ' ~ l.acciones.accion) if l.acciones.estado == 'en_curso' else 'ninguna acción en curso' }}</span></div><div class="card-footer">un solo cambio a la vez (lock)</div></div>
     </div>
 </section>
+
+{#- Conexión con Binance (spec § 10): API key enmascarada, quién la usa y "Cambiar API key…" (/bot/credenciales).
+    Lugar reservado: la sección la arma GET /api/bot/credenciales, que todavía no existe. -#}
+<section class="bb-seccion" id="bbConexionBinance" data-bot-conexion-binance hidden aria-hidden="true"></section>
 
 <section class="bb-seccion" aria-labelledby="bbTituloAcciones">
     <h2 class="bb-seccion__titulo" id="bbTituloAcciones">Acciones</h2>
     <p class="bb-panel__aviso d-none" data-bot-panel="deshabilitado"><span data-bot-panel="deshabilitado-msg"></span></p>
+    {%- set bloqueo = st.get('rescate_start_bloqueado') %}
+    {%- set bloqueado = ' data-bot-bloqueado disabled' if bloqueo else '' %}
     <div class="bb-acciones-bot">
         <div class="bb-accion">
+        {%- if e == 'gradual' %}
+            <h3>Reanudar</h3>
+            <p>Vuelve a operar con la estrategia guardada: pone los modos en normal y reinicia passivbot, sin cambiar TWE ni pares. De un toque.</p>
+            <button type="button" class="btn btn-primary" data-bot-accion="reanudar"{{ bloqueado|safe }}><i class="fas fa-play" aria-hidden="true"></i> Reanudar</button>
+        {%- elif e == 'operando' %}
+            <h3>Reiniciar con la estrategia guardada</h3>
+            <p>Reinicia passivbot sin cambiar nada (TWE, pares, rescate). Sirve si quedó trabado. Con el bot detenido este botón dice <strong>Iniciar…</strong>; en parada gradual, <strong>Reanudar</strong>.</p>
+            <button type="button" class="btn btn-outline-secondary" data-bot-accion="reiniciar"{{ bloqueado|safe }}><i class="fas fa-redo" aria-hidden="true"></i> Reiniciar…</button>
+        {%- elif e in ('detenido', 'expuesto') %}
+            <h3>Iniciar</h3>
+            <p>Abre un resumen de lo que va a operar (TWE, pares y qué cambió desde el último arranque) y recién ahí arranca passivbot en modo normal. No cambia la estrategia ni el rescate.</p>
+            <button type="button" class="btn btn-primary" data-bot-accion="iniciar"{{ bloqueado|safe }}><i class="fas fa-play" aria-hidden="true"></i> Iniciar…</button>
+        {%- else %}
+            <h3>Iniciar</h3>
+            <p>Sin el estado del bot no se ofrecen acciones.</p>
+        {%- endif %}
+            {%- if bloqueo %}<span class="bb-motivo"><i class="fas fa-lock" aria-hidden="true"></i> START bloqueado: {{ bloqueo }}</span>
+            {%- else %}<span class="bb-motivo"><i class="fas fa-info-circle" aria-hidden="true"></i> forager tarda ~90 s en volver a operar los pares.</span>{% endif %}
+        </div>
+        <div class="bb-accion">
             <h3>Parada gradual</h3>
-            <p data-bot-panel="graceful-nota">No abre nuevas posiciones; sigue gestionando las abiertas.</p>
+            <p data-bot-panel="graceful-nota">No abre pares nuevos. Las posiciones abiertas siguen operando (pueden promediar hasta su límite) hasta cerrarse con ganancia; después no vuelven a abrir.</p>
+            {%- if e == 'operando' %}
             <button type="button" class="btn btn-outline-secondary" data-bot-accion="graceful"><i class="fas fa-pause" aria-hidden="true"></i> Parada gradual</button>
+            {%- elif e == 'gradual' %}
+            <span class="bb-motivo"><i class="fas fa-info-circle" aria-hidden="true"></i> Ya está en parada gradual.</span>
+            {%- else %}
+            <span class="bb-motivo"><i class="fas fa-info-circle" aria-hidden="true"></i> passivbot no está corriendo.</span>
+            {%- endif %}
         </div>
         <div class="bb-accion bb-accion--peligro">
+            {%- if c.get('running') %}
             <h3>Apagar</h3>
-            <p>Detiene passivbot, cancela TODAS las órdenes abiertas y cierra TODAS las posiciones a mercado. Irreversible: pide confirmación con casilla.</p>
+            <p>Detiene passivbot, cancela TODAS las órdenes (también las condicionales) y cierra TODAS las posiciones a mercado. Irreversible: pide confirmación con casilla.</p>
             <button type="button" class="btn btn-danger" data-bot-accion="apagar"><i class="fas fa-power-off" aria-hidden="true"></i> Apagar…</button>
+            {%- else %}
+            <h3>Cerrar todo</h3>
+            <p>passivbot ya está detenido. Cancela TODAS las órdenes y cierra TODAS las posiciones a mercado (el Apagar de siempre, que funciona con passivbot detenido). Irreversible: pide confirmación con casilla.</p>
+            <button type="button" class="btn btn-danger" data-bot-accion="cerrar_todo"><i class="fas fa-power-off" aria-hidden="true"></i> Cerrar todo…</button>
+            {%- endif %}
         </div>
     </div>
-    <p class="bb-motivo"><i class="fas fa-lock" aria-hidden="true"></i> Para cambiar perfil o TWE, <a href="{{ url_for('main.estrategia_page') }}">Estrategia</a>.</p>
+    <p class="bb-motivo"><i class="fas fa-lock" aria-hidden="true"></i> Los modos manual, tp_only y panic por lado existen en forager pero el panel no los ofrece. Para cambiar perfil o TWE, <a href="{{ url_for('main.estrategia_page') }}">Estrategia</a>.</p>
 </section>
+
+<section class="bb-seccion" id="bbUltimaAccion" aria-labelledby="bbTituloUltima">
+    <h2 class="bb-seccion__titulo" id="bbTituloUltima">Última acción</h2>
+    <div class="card"><div class="card-body" style="display:grid;gap:12px">
+    {%- if ultima %}
+        {%- set ok = ultima.estado == 'ok' %}
+        <div class="bb-estado-grande"><span class="bb-resultado bb-resultado--{{ 'ok' if ok else ('pregunta' if ultima.estado == 'en_curso' else 'rechazado') }}"><i class="fas {{ 'fa-check-circle' if ok else ('fa-spinner' if ultima.estado == 'en_curso' else 'fa-times-circle') }}" aria-hidden="true"></i> {{ ultima.estado_texto|capitalize }}</span><strong>{{ ultima.titulo|capitalize }}</strong><span class="bb-motivo">{{ ultima.rango }} UTC{% if ultima.duracion %} · {{ ultima.duracion }}{% endif %} · {{ ultima.usuario or '?' }}</span></div>
+        {%- if ultima.resultado and ultima.resultado.error %}<p class="bb-alerta bb-alerta--peligro"><i class="fas fa-times-circle" aria-hidden="true"></i><span>{{ ultima.resultado.error }}</span></p>{% endif %}
+        {%- if ultima.resultado and ultima.resultado.warning %}<p class="bb-alerta bb-alerta--aviso"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i><span>{{ ultima.resultado.warning }}</span></p>{% endif %}
+        <details class="bb-detalle" open><summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Pasos</summary>
+            <ol class="bb-pasos">
+            {%- for p in ultima.pasos or [] %}
+                <li data-estado="{{ p.estado }}"><span aria-hidden="true">{{ {'ok': '✓', 'error': '✗', 'omitido': '–', 'pendiente': '·', 'en_curso': '…'}.get(p.estado, '·') }}</span><span><strong>{{ p.titulo }}</strong><span class="bb-sr"> — {{ {'ok': 'listo', 'error': 'error', 'omitido': 'omitido', 'pendiente': 'pendiente', 'en_curso': 'en curso'}.get(p.estado, p.estado) }}</span>{% if p.detalle %} · {{ p.detalle }}{% endif %}</span></li>
+            {%- endfor %}
+            </ol>
+        </details>
+    {%- else %}
+        <p class="mb-0">Todavía no hay acciones del panel registradas.</p>
+    {%- endif %}
+    </div></div>
+</section>
+
+<section class="bb-seccion" id="bbHistorial" aria-labelledby="bbTituloHistorial" data-acciones-url="{{ url_for('main.bot_acciones') }}">
+    <h2 class="bb-seccion__titulo" id="bbTituloHistorial">Historial de acciones <span class="bb-seccion__sub">quién, cuándo y cómo terminó (horas UTC)</span></h2>
+    <div class="bb-filtros" role="group" aria-label="Filtrar el historial">
+        <button type="button" aria-pressed="true" data-filtro="todas">Todas</button>
+        <button type="button" aria-pressed="false" data-filtro="aplicadas">Aplicadas</button>
+        <button type="button" aria-pressed="false" data-filtro="rechazadas">Rechazadas o sin confirmar</button>
+    </div>
+    <div class="card bb-tabla-card">
+        <table class="table bb-historial mb-0">
+            <thead><tr><th scope="col">Cuándo</th><th scope="col">Quién</th><th scope="col">Acción</th><th scope="col">Resultado</th></tr></thead>
+            <tbody data-historial-filas>
+            {%- for a in historial.acciones %}
+                <tr><td class="bb-cuando">{{ a.ts[8:10] }}/{{ a.ts[5:7] }} {{ a.ts[11:19] }}</td><td class="bb-col-quien">{{ a.usuario }}</td><td class="bb-col-que"><span class="bb-que">{{ a.titulo }}</span>{% if a.detalle %}<span class="bb-detalle-fila">{{ a.detalle }}</span>{% endif %}</td><td class="bb-col-resultado"><span class="bb-resultado bb-resultado--{{ 'ok' if a.estado == 'aplicado' else ('pregunta' if a.estado in ('plan_mostrado', 'sin_confirmar') else 'rechazado') }}"><i class="{{ 'fas fa-check-circle' if a.estado == 'aplicado' else ('far fa-question-circle' if a.estado in ('plan_mostrado', 'sin_confirmar') else 'fas fa-times-circle') }}" aria-hidden="true"></i> {{ a.estado_texto }}</span></td></tr>
+            {%- else %}
+                <tr><td colspan="4">Sin acciones registradas.</td></tr>
+            {%- endfor %}
+            </tbody>
+        </table>
+        <div class="card-footer"><span data-historial-cuenta>{{ historial.acciones|length }} de {{ historial.total }}, las más nuevas</span>
+            <button type="button" class="btn btn-link btn-sm p-0 align-baseline{% if historial.siguiente is none %} d-none{% endif %}" data-historial-mas data-desde="{{ historial.siguiente or '' }}">Ver más</button>
+            · la IP que guarda el log no se muestra</div>
+    </div>
+</section>
+<script src="{{ estatico('js/bot_pagina.js') }}" defer></script>
 {% endblock %}

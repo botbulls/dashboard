@@ -121,7 +121,8 @@ def test_api_de_presets_se_conserva(client, env, docker):  # noqa: F811
 # ---------------------------------------------------------------- Bot y Estrategia
 
 
-def test_bot_tiene_parada_gradual_y_apagar(client):  # noqa: F811
+def test_bot_tiene_parada_gradual_y_apagar(client, env, docker):  # noqa: F811
+    docker.running = True
     html = _html(client, "/bot")
     for accion in ("graceful", "apagar"):
         assert f'data-bot-accion="{accion}"' in html

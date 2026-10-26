@@ -267,16 +267,22 @@ class DockerClient:
     def inspect(self, name: str) -> Dict[str, Any]:
         resp = self._request("GET", self._url(name, "/json"))
         if resp.status_code == 404:
-            return {"name": name, "status": "not_found", "running": False, "started_at": None, "finished_at": None}
+            return {"name": name, "status": "not_found", "running": False, "started_at": None, "finished_at": None,
+                    "restart_count": None, "image": None}
         if resp.status_code != 200:
             raise DockerError(f"Docker respondio {resp.status_code} al consultar el contenedor.")
-        state = (resp.json() or {}).get("State") or {}
+        data = resp.json() or {}
+        state = data.get("State") or {}
+        restart_count = data.get("RestartCount")  # nivel superior del inspect, no adentro de State
         return {
             "name": name,
             "status": state.get("Status") or "unknown",
             "running": bool(state.get("Running")),
             "started_at": state.get("StartedAt"),
             "finished_at": state.get("FinishedAt"),
+            "restart_count": restart_count if isinstance(restart_count, int) and not isinstance(restart_count, bool)
+            else None,
+            "image": (data.get("Config") or {}).get("Image"),
         }
 
     def _action(self, name: str, action: str, params: Optional[Dict[str, Any]] = None) -> str:
@@ -1047,6 +1053,8 @@ def get_status(settings: Settings, docker: Optional[DockerClient] = None) -> Dic
         "config_available": False,
         # True: la config cambio despues del ultimo arranque de passivbot (no esta en efecto).
         "config_pending": None,
+        "started_at": None,
+        "restart_count": None,
         "message": "",
         "presets": {k: {"twe_long": v[0], "twe_short": v[1]} for k, v in RISK_PRESETS.items()},
     }
@@ -1079,6 +1087,9 @@ def get_status(settings: Settings, docker: Optional[DockerClient] = None) -> Dic
 
     docker = docker or DockerClient(settings.docker_url)
     out["container"] = docker.inspect(settings.container)
+    # Desde cuándo corre y cuántas veces lo reinició Docker (un bucle de reinicios se ve acá, spec § 8 H17).
+    out["started_at"] = out["container"].get("started_at")
+    out["restart_count"] = out["container"].get("restart_count")
     if out["config_available"] and settings.forager_config is not None:
         out["config_pending"] = config_pending(settings.forager_config, out["container"])
     out["message"] = " ".join(messages)

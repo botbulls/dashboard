@@ -10,6 +10,7 @@ import secrets
 from datetime import date
 from datetime import datetime
 from datetime import timedelta
+from datetime import timezone
 from typing import Any
 
 import requests
@@ -23,6 +24,7 @@ from flask.helpers import url_for
 from flask import current_app
 from typing_extensions import TypedDict
 
+from futuresboard import acciones
 from futuresboard import bot_control
 from futuresboard import c3
 from futuresboard import jobs
@@ -1546,6 +1548,52 @@ def exposicion_scraper() -> dict:
     }
 
 
+def pares_ahora(estrategia: dict | None, exposicion: dict) -> dict:
+    """Lugares ocupados y, por par, posición (% del balance) y órdenes abiertas (base del scraper).
+
+    Para forager una orden abierta ocupa un lugar igual que una posición (``forager.py:130``): ocupados = pares con
+    posición ∪ pares con órdenes. ``fuera_de_lista``: con posición u órdenes y fuera de ``approved_symbols_long`` (sigue
+    en parada gradual hasta cerrar, spec § 1.2). Los chequeos de forager por ciclo (mínimo, edad, velas, TRADING)
+    necesitan exchangeInfo y velas cacheados (spec § 5.2): no van acá todavía."""
+    est = estrategia or {}
+    aprobados = list(est.get("pares_long") or [])
+    try:
+        fila = db.query("SELECT totalWalletBalance FROM account WHERE AID = 1", one=True)
+        balance = float(fila[0]) if fila is not None and fila[0] else None
+        ordenes = db.query("SELECT symbol, side FROM orders")
+    except Exception:  # noqa: BLE001 - defensivo: el estado no se cae por la base
+        balance, ordenes = None, []
+    por: dict = {}
+
+    def par(sym: str) -> dict:
+        return por.setdefault(sym, {"symbol": sym, "aprobado": sym in aprobados, "posicion": 0.0, "nocional": 0.0,
+                                    "pct_balance": None, "compras": 0, "ventas": 0})
+
+    for sym in aprobados:
+        par(sym)
+    for p in exposicion.get("detalle") or []:
+        if str(p.get("lado")).upper() == "SHORT":
+            continue
+        d = par(p["symbol"])
+        d["posicion"] += abs(p["cantidad"])
+        d["nocional"] += abs(p["cantidad"] * p["precio_entrada"])
+    for sym, side in ordenes:
+        d = par(sym)
+        d["compras" if side == "BUY" else "ventas"] += 1
+    ocupados = 0
+    for d in por.values():
+        d["nocional"] = round(d["nocional"], 2)
+        if balance:
+            d["pct_balance"] = round(d["nocional"] / balance * 100, 2)
+        con_algo = d["posicion"] > 0 or d["compras"] or d["ventas"]
+        d["estado"] = "posicion" if d["posicion"] > 0 else ("orden" if con_algo else "libre")
+        d["fuera_de_lista"] = bool(con_algo) and not d["aprobado"]
+        ocupados += 1 if con_algo else 0
+    orden = {s: i for i, s in enumerate(aprobados)}
+    pares = sorted(por.values(), key=lambda d: (not d["aprobado"], orden.get(d["symbol"], 0), d["symbol"]))
+    return {"lugares_total": est.get("n_longs"), "lugares_ocupados": ocupados, "pares": pares, "balance": balance}
+
+
 def bot_status_payload(docker_timeout: float | None = None) -> tuple[dict, int]:
     """Estado del bot y HTTP status: lo devuelven /api/bot/status y, dentro de su JSON, /api/vivo/inicio.
 
@@ -1565,6 +1613,7 @@ def bot_status_payload(docker_timeout: float | None = None) -> tuple[dict, int]:
                 "exposicion": exposicion}, exc.status_code
     out["exposicion"] = exposicion
     out["estado_bot"] = bot_control.estado_del_bot(out, exposicion)
+    out["pares_ahora"] = pares_ahora(out.get("estrategia"), exposicion)
     data_dir = _bot_store().data_dir
     out["rescate_start_bloqueado"] = rescate.start_bloqueado(data_dir)
     # Perfiles de riesgo y TWE manual (docs/perfiles.md): definiciones y el perfil vigente según los valores.
@@ -1667,10 +1716,86 @@ def contexto_control(st: dict) -> dict:
     }
 
 
+def latidos() -> dict:
+    """Latidos para Bot: scraper, servicio rescate, C3 y acciones del panel. Solo lee archivos y la memoria del
+    proceso: el de acciones mira el registro de jobs y el último persistido, nunca el lock de archivo (tomarlo, aunque
+    sea un instante, podría hacer que un Apagar responda 409)."""
+    data_dir = _bot_store().data_dir
+    f = scraper.frescura_web(current_app.config)
+    edad, intervalo = f["edad_segundos"], f["intervalo_segundos"] or 60
+    scr = {"estado": "sin_latido" if edad is None else ("late" if edad <= 3 * intervalo else "viejo"),
+           "edad": _hace(edad) if edad is not None else None, "intervalo": intervalo}
+    try:
+        r = rescate.panel_status(data_dir)
+        svc = r.get("servicio") or {}
+        hb = svc.get("heartbeat")
+        edad_r = (datetime.now().astimezone() - datetime.fromisoformat(hb)).total_seconds() if hb else None
+        res = {"estado": "late" if svc.get("vivo") else ("sin_latido" if not hb else "no_late"), "modo": svc.get("modo"),
+               "edad": _hace(edad_r) if edad_r is not None else None}
+    except Exception:  # noqa: BLE001 - un archivo roto no tira la página
+        res = {"estado": "sin_latido", "modo": None, "edad": None}
+    try:
+        c = c3.panel_status(data_dir)
+        c3_ = {"estado": c.get("estado"), "servicio_vivo": c.get("servicio_vivo"), "modo": c.get("modo"),
+               "parado": c.get("c3_parado"), "corte": (c.get("corte") or {}).get("en")}
+    except Exception:  # noqa: BLE001
+        c3_ = {"estado": None, "servicio_vivo": False, "modo": None, "parado": False, "corte": None}
+    activo = _bot_jobs().active()
+    persistido = _bot_jobs().load_persisted() or {}
+    if activo is not None:
+        acc = {"estado": "en_curso", "accion": activo.accion, "desde": activo.inicio}
+    elif persistido.get("estado") == jobs.ESTADO_EN_CURSO:
+        acc = {"estado": "en_curso", "accion": persistido.get("accion"), "desde": persistido.get("inicio")}
+    else:
+        acc = {"estado": "libre", "accion": None, "desde": None}
+    return {"scraper": scr, "rescate": res, "c3": c3_, "acciones": acc}
+
+
+def _fecha_iso_utc(valor) -> str:
+    try:
+        return f"{datetime.fromisoformat(str(valor)).astimezone(timezone.utc):%d/%m %H:%M:%S}"
+    except ValueError:
+        return str(valor or "")
+
+
+def _duracion(inicio, fin) -> str:
+    try:
+        s = (datetime.fromisoformat(str(fin)) - datetime.fromisoformat(str(inicio))).total_seconds()
+    except ValueError:
+        return ""
+    s = max(0, int(s))
+    return f"{s // 60} min {s % 60} s" if s >= 60 else f"{s} s"
+
+
 @app.route("/bot", methods=["GET"])
 def bot_page():
     st, _http = bot_status_payload(docker_timeout=BOT_STATUS_RAPIDO_S)
-    return render_template("bot.html", coin_list=get_coins(), custom=current_app.config["CUSTOM"], bot_status=st)
+    c = st.get("container") or {}
+    desde = bot_control.parse_docker_time(st.get("started_at")) if c.get("running") else None
+    ultima = ultima_accion()
+    if ultima:
+        ultima["rango"] = f"{_fecha_iso_utc(ultima.get('inicio'))} → {_fecha_iso_utc(ultima.get('fin'))[6:]}" \
+            if ultima.get("fin") else _fecha_iso_utc(ultima.get("inicio"))
+        ultima["duracion"] = _duracion(ultima.get("inicio"), ultima.get("fin")) if ultima.get("fin") else ""
+    historial = acciones.historial(_bot_store().audit_path)
+    return render_template("bot.html", coin_list=get_coins(), custom=current_app.config["CUSTOM"], bot_status=st,
+                           desde=_fecha_utc(desde),
+                           hace=_hace((datetime.now().astimezone() - desde).total_seconds()) if desde else "",
+                           latidos=latidos(), ultima=ultima, historial=historial)
+
+
+@app.route("/api/bot/acciones", methods=["GET"])
+def bot_acciones():
+    """Historial de acciones del panel, paginado y en palabras (``?desde=0&limite=12&filtro=todas``). Nunca devuelve
+    ``remote_addr`` ni los parámetros crudos (``futuresboard.acciones``)."""
+    try:
+        desde = int(request.args.get("desde", "0"))
+        limite = int(request.args.get("limite", str(acciones.LIMITE_DEFECTO)))
+        data = acciones.historial(_bot_store().audit_path, desde=desde, limite=limite,
+                                  filtro=request.args.get("filtro", "todas"))
+    except ValueError as exc:
+        return _json_response({"ok": False, "error": str(exc)}, 400)
+    return _json_response(data)
 
 
 @app.route("/estrategia", methods=["GET"])
