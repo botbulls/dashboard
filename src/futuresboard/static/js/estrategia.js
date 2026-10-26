@@ -423,12 +423,13 @@
         nodos.push(av);
         return nodos;
     }
-    function pedirPlanEstrategia(cuerpo, titulo) {
+    function pedirPlanEstrategia(cuerpo, titulo, destino, alBloquear) {
         limpiarBloqueos();
+        const urlPost = destino || url;
         const acciones = window.BB && window.BB.botAcciones;
         const revisarBtn = raiz.querySelector('[data-estrategia-accion="revisar"]');
         if (revisarBtn) revisarBtn.disabled = true;
-        return fetch(url, {
+        return fetch(urlPost, {
             method: 'POST', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrf() },
             body: JSON.stringify(cuerpo),
@@ -441,7 +442,7 @@
                 if (status === 409 && d.requiere_confirmacion && d.plan && acciones) {
                     const plan = d.plan;
                     acciones.pedirConfirmacion({
-                        url,
+                        url: urlPost,
                         body: Object.assign({}, cuerpo, { confirmar: true, plan_hash: d.plan_hash }),
                         titulo: titulo || plan.titulo,
                         texto: '',
@@ -453,11 +454,11 @@
                     });
                     return;
                 }
-                if (d && d.bloqueos) { mostrarBloqueos(d.bloqueos); return; }
+                if (d && d.bloqueos) { (alBloquear || mostrarBloqueos)(d.bloqueos); return; }
                 if (status === 409 && d.job_id && acciones) { acciones.aviso('error', d.error); return; }
                 throw new Error((d && d.error) || 'No se pudo preparar el cambio.');
             })
-            .catch((e) => mostrarBloqueos([e.message || 'No se pudo preparar el cambio.']))
+            .catch((e) => (alBloquear || mostrarBloqueos)([e.message || 'No se pudo preparar el cambio.']))
             .finally(() => { if (revisarBtn) revisarBtn.disabled = false; });
     }
     function revisar() {
@@ -592,6 +593,104 @@
         pintar();
     });
 
+    // ---------------------------------------------------------------- versiones (spec § 2.4 paso 6)
+    const urlVersiones = raiz.getAttribute('data-url-versiones');
+    const urlVolver = raiz.getAttribute('data-url-volver');
+    const fechaUtc = (iso) => (iso ? `${iso.slice(8, 10)}/${iso.slice(5, 7)} ${iso.slice(11, 16)}` : '');
+    const valorResumen = (clave, v) => (clave.startsWith('pares') ? (Array.isArray(v) && v.length ? v.map(corto).join(', ') : 'todos')
+        : (v === null || v === undefined ? '—' : num(Number(v))));
+    function tablaDiferencias(v) {
+        const div = el('div', 'bb-version__diff');
+        if (!(v.diferencias || []).length) {
+            div.appendChild(el('p', 'bb-motivo mb-0', 'Misma TWE, pares y pares a la vez que la vigente (cambian solo otras claves).'));
+            return div;
+        }
+        const tabla = el('table', 'bb-diff');
+        const thead = el('thead');
+        const trh = el('tr');
+        ['Qué', 'Esa versión', 'Vigente'].forEach((x) => { const th = el('th', '', x); th.scope = 'col'; trh.appendChild(th); });
+        thead.appendChild(trh);
+        const tbody = el('tbody');
+        v.diferencias.forEach((c) => {
+            const tr = el('tr');
+            const th = el('th', '', c.titulo);
+            th.scope = 'row';
+            tr.append(th, el('td', '', valorResumen(c.clave, c.antes)), el('td', '', valorResumen(c.clave, c.ahora)));
+            tbody.appendChild(tr);
+        });
+        tabla.append(thead, tbody);
+        div.appendChild(tabla);
+        return div;
+    }
+    function filaVersion(v, i) {
+        const li = el('li', 'bb-version');
+        li.appendChild(el('span', 'bb-version__cuando', v.desde ? fechaUtc(v.desde) : (v.antes_de ? `antes del ${fechaUtc(v.antes_de)}` : '—')));
+        const que = el('div', 'bb-version__que');
+        que.appendChild(el('strong', '', v.titulo));
+        const r = v.resumen || {};
+        const detalle = [v.cambios_texto || `TWE ${num(Number(r.twe_long))} · ${valorResumen('pares', r.pares_long)} · ${r.n_longs} a la vez`];
+        if (v.usuario && v.usuario !== '?') detalle.push(v.usuario);
+        que.appendChild(el('small', '', detalle.join(' · ')));
+        li.appendChild(que);
+        const botones = el('div', 'bb-version__botones');
+        if (v.vigente) {
+            botones.appendChild(el('span', 'bb-etiqueta bb-etiqueta--vigente', 'vigente'));
+        } else {
+            const id = `bbVersionDiff${i}`;
+            const ver = el('button', 'btn btn-sm btn-outline-secondary', 'Ver diferencias');
+            ver.type = 'button';
+            ver.setAttribute('aria-expanded', 'false');
+            ver.setAttribute('aria-controls', id);
+            const volver = el('button', 'btn btn-sm btn-outline-secondary', 'Volver a esta');
+            volver.type = 'button';
+            volver.setAttribute('aria-label', `Volver a la versión ${v.desde ? `del ${fechaUtc(v.desde)}` : 'más vieja'}`);
+            const diff = tablaDiferencias(v);
+            diff.id = id;
+            diff.hidden = true;
+            ver.addEventListener('click', () => {
+                diff.hidden = !diff.hidden;
+                ver.setAttribute('aria-expanded', diff.hidden ? 'false' : 'true');
+            });
+            const avisos = el('ul', 'bb-avisos d-none');
+            avisos.setAttribute('role', 'alert');
+            volver.addEventListener('click', () => {
+                if (!srv) return;
+                pedirPlanEstrategia({ backup: v.backup, base_hash: srv.base_hash }, null, urlVolver, (lista) => {
+                    avisos.replaceChildren(...lista.map((x) => {
+                        const item = el('li', 'bb-alerta bb-alerta--peligro');
+                        const ic = el('i', 'fas fa-times-circle');
+                        ic.setAttribute('aria-hidden', 'true');
+                        item.append(ic, el('span', '', x));
+                        return item;
+                    }));
+                    avisos.classList.remove('d-none');
+                });
+            });
+            botones.append(ver, volver);
+            li.append(botones, diff, avisos);
+            diff.style.gridColumn = '1 / -1';
+            avisos.style.gridColumn = '1 / -1';
+            return li;
+        }
+        li.appendChild(botones);
+        return li;
+    }
+    function cargarVersiones() {
+        if (!urlVersiones) return;
+        fetch(urlVersiones, { credentials: 'same-origin', cache: 'no-cache' })
+            .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+            .then(({ ok, d }) => {
+                const ul = q('versiones');
+                if (!ok || !d.ok) { ul.replaceChildren(el('li', 'bb-version', d.error || 'No se pudieron leer las versiones.')); return; }
+                ul.replaceChildren(...d.versiones.map(filaVersion));
+                q('versiones-pie').textContent = `Se guardan las últimas ${d.max_backups} copias. Las de Parada gradual, Apagar (deja forager en parada gradual) e Iniciar / Reanudar solo cambian modos: se agrupan con la anterior. Horas UTC.`;
+                const vig = d.versiones.find((v) => v.vigente);
+                const guardada = document.querySelector('[data-estrategia-guardada]');
+                if (vig && guardada && vig.desde) guardada.textContent = `guardada el ${fechaUtc(vig.desde)} UTC${vig.usuario && vig.usuario !== '?' ? ` por ${vig.usuario}` : ''}`;
+            })
+            .catch(() => q('versiones').replaceChildren(el('li', 'bb-version', 'No se pudieron leer las versiones.')));
+    }
+
     // ---------------------------------------------------------------- carga
     function error(msg) {
         q('cargando').classList.add('d-none');
@@ -613,6 +712,7 @@
             raiz.querySelectorAll('[data-estrategia="seccion"]').forEach((s) => s.classList.remove('d-none'));
             pintarAvanzado();
             pintar();
+            cargarVersiones();
             raiz.dispatchEvent(new CustomEvent('bb-estrategia-cargada', { detail: d, bubbles: true }));
         })
         .catch((e) => error(e.message || 'No se pudo leer la estrategia.'));

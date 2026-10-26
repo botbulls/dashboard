@@ -1964,7 +1964,7 @@ def bot_estrategia_candidatos():
 
 
 def _armador_estrategia(objetivo: dict, origen: str = "estrategia", titulo: str = "Revisar y aplicar la estrategia",
-                        todos_entran: bool = False):
+                        estricto: bool = False):
     """Función que arma el plan (``estrategia.armar_plan``) con lo que hay en ese momento. Captura acá lo que sale de la
     app (rutas, Demo o real) porque el job la vuelve a llamar desde su hilo, con el lock y sin contexto de Flask."""
     data_dir = _bot_store().data_dir
@@ -1994,7 +1994,7 @@ def _armador_estrategia(objetivo: dict, origen: str = "estrategia", titulo: str 
             container=settings.container, detectar=lambda c: perfiles.detectar(c, rescate_cfg, manif),
             nombres_perfil=nombres,
             warmup_s=bot_control.forager_warmup_seconds(), bloqueo_rescate=rescate.start_bloqueado(data_dir),
-            origen=origen, titulo=titulo, todos_entran=todos_entran)
+            origen=origen, titulo=titulo, estricto=estricto)
         return estrategia.armar_plan(entrada)
 
     return armar
@@ -2053,6 +2053,65 @@ def bot_estrategia_aplicar():
         return _json_response({"ok": False, "error": str(exc)}, 400)
     params = estrategia.params_audit(objetivo)
     return _estrategia_plan_o_job(objetivo, params, _armador_estrategia(objetivo))
+
+
+@app.route("/api/bot/estrategia/versiones", methods=["GET"])
+def bot_estrategia_versiones():
+    """Versiones de la estrategia con cuándo, quién, qué cambió y la diferencia con la vigente (spec § 2.4 paso 6)."""
+    try:
+        _settings, path, _cfg = _leer_forager()
+    except bot_control.BotControlError as exc:
+        return _json_response({"ok": False, "error": str(exc)}, exc.status_code)
+    nombres = {k: v["nombre"] for k, v in perfiles.PERFILES.items()}
+    data = estrategia.listar_versiones(path, _bot_store().data_dir, _bot_store().audit_path, nombres)
+    return _json_response({"ok": True, **data})
+
+
+@app.route("/api/bot/estrategia/volver", methods=["POST"])
+@csrf_protect
+def bot_estrategia_volver():
+    """Volver a una versión: ``{backup, base_hash}`` arma el mismo plan que un cambio de estrategia con los valores de
+    estrategia de ese backup (TWE, pares a la vez y pares; nada más) y repite confirmación y job. Bloquea si un par de
+    esa versión ya no pasa los chequeos o si viola la regla de exposición con las posiciones de ahora (spec § 3.3)."""
+    body = request.get_json(silent=True)
+    params: dict = {"volver": body.get("backup") if isinstance(body, dict) else None}
+    try:
+        if not isinstance(body, dict):
+            raise ValueError("Body inválido: se esperaba un objeto JSON.")
+        desconocidos = sorted(set(body) - {"backup", "base_hash", "confirmar", "plan_hash"})
+        if desconocidos:
+            raise ValueError(f"Campos desconocidos: {', '.join(desconocidos)}.")
+        _settings, path, _cfg = _leer_forager()
+        if not estrategia.backup_valido(path, body.get("backup")):
+            raise ValueError("backup inválido: tiene que ser un backup con fecha de new.json.")
+    except ValueError as exc:
+        _rescate_audit("estrategia", params, "rechazado", str(exc))
+        return _json_response({"ok": False, "error": str(exc)}, 400)
+    except bot_control.BotControlError as exc:
+        return _json_response({"ok": False, "error": str(exc)}, exc.status_code)
+    nombre = body["backup"]
+    try:
+        version = estrategia.leer_backup(path, nombre)
+        n_longs, _n_shorts = bot_control.n_pares(version)
+        objetivo = estrategia.validar_objetivo({
+            "twe_long": version.get("twe_long"), "n_longs": n_longs,
+            "pares": version.get("approved_symbols_long") if isinstance(version.get("approved_symbols_long"), list)
+            else None, "base_hash": body.get("base_hash"), "confirmar": body.get("confirmar", False),
+            "plan_hash": body.get("plan_hash")})
+    except estrategia.EstrategiaError as exc:
+        _rescate_audit("estrategia", params, "rechazado", str(exc))
+        return _json_response({"ok": False, "error": "No se puede volver: " + " ".join(exc.bloqueos),
+                               "bloqueos": exc.bloqueos}, 409)
+    except ValueError as exc:
+        texto = f"Esa versión no se puede restaurar con Estrategia: {exc}"
+        _rescate_audit("estrategia", params, "rechazado", texto)
+        return _json_response({"ok": False, "error": texto, "bloqueos": [texto]}, 409)
+    params = {"volver": nombre, **estrategia.params_audit(objetivo)}
+    sello = estrategia._sello(nombre)
+    titulo = f"Volver a la versión del {sello:%d/%m %H:%M} UTC" if sello else "Volver a una versión"
+    armar = _armador_estrategia(objetivo, origen="volver", titulo=titulo, estricto=True)
+    return _estrategia_plan_o_job(objetivo, params, armar, origen="volver",
+                                  extra_version={"accion": "volver", "volver_a": nombre})
 
 
 @app.route("/estrategia", methods=["GET"])

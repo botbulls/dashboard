@@ -640,7 +640,8 @@ class Entrada:
     bloqueo_rescate: Optional[str] = None
     origen: str = "estrategia"
     titulo: str = "Revisar y aplicar la estrategia"
-    todos_entran: bool = False  # Volver: cada par de la versión se chequea como si entrara
+    # Volver a una versión: un par que ya está y forager descartaría bloquea (en un cambio común es un aviso).
+    estricto: bool = False
 
 
 def _pares_texto(pares: List[str]) -> str:
@@ -700,7 +701,7 @@ def armar_plan(e: Entrada) -> Dict[str, Any]:
     if malos:
         bloqueos.append(f"Formato inválido ({', '.join(malos)}): tiene que ser como BTCUSDT.")
     validos = [p for p in dict.fromkeys(pares) if FORMATO.match(p)]
-    entran = [p for p in validos if e.todos_entran or p not in vigente["pares_long"]]
+    entran = [p for p in validos if p not in vigente["pares_long"]]
     salen = [p for p in vigente["pares_long"] if p not in pares]
     lw = float(twe) / n
     resultados = {r["symbol"]: r for r in chequear_varios(validos, ctx, lw=lw)}
@@ -713,7 +714,9 @@ def armar_plan(e: Entrada) -> Dict[str, Any]:
             continue
         malos_forager = [c["texto"] for c in r["chequeos"] if c["estado"] == BLOQUEA and c["clave"] in BLOQUEANTES
                          and not (c["clave"] == "config" and not ctx.manifiesto.get("usable"))]
-        if malos_forager:
+        if malos_forager and e.estricto:
+            bloqueos.append(f"{p} ya no pasa los chequeos: {'; '.join(malos_forager)}.")
+        elif malos_forager:
             avisos.append(_aviso(f"descarta:{p}", f"forager descartaría {p}, que ya está en la lista.",
                                  "; ".join(malos_forager) + ". Si tiene posición, queda en parada gradual y no reabre.",
                                  casilla=True, frase=f"forager descartaría {p}"))
@@ -959,3 +962,166 @@ def aplicar(settings: Any, store: Any, armar: Any, plan_hash: str, usuario: str,
         out["warning"] = "passivbot está detenido: la estrategia queda guardada y se aplica al iniciar."
     registrar_version(store.data_dir, {**version, "resultado": "ok"})
     return out
+
+
+# --------------------------------------------------------------------------------------
+# Versiones de la estrategia (spec § 2.4 paso 6 y § 3.3): los backups de new.json + quién y qué
+# --------------------------------------------------------------------------------------
+
+_SELLO = re.compile(r"\.bak-(\d{8})-(\d{6})-(\d{6})$")
+# Acciones del log que escriben new.json (para atribuir un backup viejo, anterior a estrategia_versiones.jsonl).
+_ACCIONES_QUE_ESCRIBEN = ("start", "perfil", "stop", "estrategia")
+VENTANA_AUDITORIA_S = 15 * 60
+
+
+def backup_valido(forager_config: pathlib.Path, nombre: Any) -> bool:
+    """Solo backups con fecha (``new.json.bak-AAAAMMDD-HHMMSS-µs``) del mismo directorio: sin rutas ni otros nombres."""
+    return isinstance(nombre, str) and re.fullmatch(
+        re.escape(pathlib.Path(forager_config).name) + r"\.bak-\d{8}-\d{6}-\d{6}", nombre) is not None
+
+
+def leer_backup(forager_config: pathlib.Path, nombre: Any) -> Dict[str, Any]:
+    """Config de un backup. ValueError (400) si el nombre no es válido; EstrategiaError (409) si no está o no se lee."""
+    if not backup_valido(forager_config, nombre):
+        raise ValueError("backup inválido: tiene que ser un backup con fecha de new.json.")
+    carpeta = pathlib.Path(forager_config).parent
+    path = carpeta / nombre
+    if path.parent.resolve() != carpeta.resolve() or not path.is_file():
+        raise EstrategiaError([f"No está el backup {nombre}: se guardan los últimos {bot_control.MAX_BACKUPS}."])
+    try:
+        return bot_control.read_forager_config(path)
+    except bot_control.BotControlError as exc:
+        raise EstrategiaError([f"No se pudo leer el backup {nombre}: {exc}"]) from exc
+
+
+def _sello(nombre: str) -> Optional[dt.datetime]:
+    m = _SELLO.search(nombre)
+    if not m:
+        return None
+    try:
+        # Hora del contenedor del panel, que corre en UTC.
+        return dt.datetime.strptime("".join(m.groups()), "%Y%m%d%H%M%S%f").replace(tzinfo=dt.timezone.utc)
+    except ValueError:
+        return None
+
+
+def leer_registro_versiones(data_dir: pathlib.Path) -> List[Dict[str, Any]]:
+    try:
+        lineas = (pathlib.Path(data_dir) / VERSIONES_FILE).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    out = []
+    for linea in lineas:
+        try:
+            e = json.loads(linea)
+        except ValueError:
+            continue
+        if isinstance(e, dict) and isinstance(e.get("backup"), str):
+            out.append(e)
+    return out
+
+
+def _quien(backup: str, cuando: Optional[dt.datetime], registro: Dict[str, Dict[str, Any]],
+           auditoria: List[Dict[str, Any]], nombres_perfil: Dict[str, str]) -> Dict[str, Any]:
+    from futuresboard import acciones
+
+    e = registro.get(backup)
+    if e:
+        accion = e.get("accion")
+        titulo = {"estrategia": "Estrategia", "volver": "Volver a una versión"}.get(accion) or (
+            f"Perfil {nombres_perfil.get(e.get('perfil'), e.get('perfil') or '')}".strip() if accion == "perfil"
+            else str(accion))
+        return {"titulo": titulo, "usuario": e.get("usuario") or "?", "fuente": "registro"}
+    if cuando is not None:
+        for a in auditoria:
+            if a.get("result") != "ok" or a.get("action") not in _ACCIONES_QUE_ESCRIBEN:
+                continue
+            try:
+                ts = dt.datetime.fromisoformat(str(a.get("ts")))
+            except ValueError:
+                continue
+            if -5 <= (ts - cuando).total_seconds() <= VENTANA_AUDITORIA_S:
+                return {"titulo": acciones.titulo(a.get("action"), a.get("params")), "usuario": a.get("user") or "?",
+                        "fuente": "auditoria"}
+    return {"titulo": "Cambio sin registro (a mano o anterior al registro)", "usuario": "?", "fuente": None}
+
+
+def _texto_cambios(cambios: List[Dict[str, Any]]) -> str:
+    partes = []
+    for c in cambios:
+        if c["clave"] == "pares_short":
+            continue
+        if c["clave"].startswith("pares"):
+            antes, ahora = set(c["antes"] or []), set(c["ahora"] or [])
+            partes += [f"+{corto(p)}" for p in sorted(ahora - antes)] + [f"−{corto(p)}" for p in sorted(antes - ahora)]
+        else:
+            partes.append(f"{c['titulo']} {bot_control._fmt_num(c['antes'])} → {bot_control._fmt_num(c['ahora'])}")
+    return " · ".join(partes)
+
+
+def listar_versiones(forager_config: pathlib.Path, data_dir: pathlib.Path, audit_path: pathlib.Path,
+                     nombres_perfil: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    """Versiones de la estrategia, de la más nueva a la más vieja.
+
+    Cada backup ``new.json.bak-<sello>`` guarda la config **de antes** de la escritura de ese momento: la versión que
+    creó esa escritura es la del backup siguiente (o la vigente). Las escrituras que solo cambian modos (Parada gradual,
+    Apagar, Iniciar / Reanudar) no cambian ``estrategia_hash`` y se agrupan con la anterior. "Volver a esta" usa el
+    backup que tiene esa versión; quién y qué salen de ``estrategia_versiones.jsonl`` o, para backups de antes, del
+    log de auditoría (la acción OK más cercana después del sello)."""
+    from futuresboard import acciones
+
+    nombres_perfil = nombres_perfil or {}
+    carpeta = pathlib.Path(forager_config).parent
+    try:
+        nombres = sorted(p.name for p in carpeta.iterdir() if backup_valido(forager_config, p.name))
+    except OSError:
+        nombres = []
+    estados = []
+    for nombre in nombres:
+        try:
+            cfg = bot_control.read_forager_config(carpeta / nombre)
+        except bot_control.BotControlError:
+            continue
+        estados.append({"backup": nombre, "cfg": cfg, "hash": bot_control.estrategia_hash(cfg), "sello": _sello(nombre)})
+    actual = bot_control.read_forager_config(pathlib.Path(forager_config))
+    estados.append({"backup": None, "cfg": actual, "hash": bot_control.estrategia_hash(actual), "sello": None})
+    registro = {e["backup"]: e for e in leer_registro_versiones(data_dir)}
+    auditoria = acciones.leer(audit_path)
+    # Corridas de estados con la misma estrategia: una versión cada una.
+    corridas: List[List[int]] = []
+    for i, st in enumerate(estados):
+        if corridas and estados[corridas[-1][-1]]["hash"] == st["hash"]:
+            corridas[-1].append(i)
+        else:
+            corridas.append([i])
+    vigente = bot_control.resumen_estrategia(actual)
+    versiones = []
+    previo: Optional[Dict[str, Any]] = None
+    for corrida in corridas:
+        primero, ultimo = estados[corrida[0]], estados[corrida[-1]]
+        resumen = bot_control.resumen_estrategia(primero["cfg"])
+        es_vigente = ultimo["backup"] is None
+        escritura = estados[corrida[0] - 1] if corrida[0] > 0 else None  # el backup de la escritura que la creó
+        cuando = escritura["sello"] if escritura else None
+        quien = (_quien(escritura["backup"], cuando, registro, auditoria, nombres_perfil) if escritura
+                 else {"titulo": "Versión más vieja guardada", "usuario": None, "fuente": None})
+        cambios = bot_control.cambios_estrategia(previo, resumen) if previo else []
+        versiones.append({
+            "hash": primero["hash"],
+            "desde": cuando.isoformat() if cuando else None,
+            "antes_de": (estados[corrida[0]]["sello"].isoformat() if not escritura and estados[corrida[0]]["sello"]
+                         else None),
+            "titulo": quien["titulo"],
+            "usuario": quien["usuario"],
+            "fuente": quien["fuente"],
+            "cambios": cambios,
+            "cambios_texto": _texto_cambios(cambios),
+            "resumen": resumen,
+            "vigente": es_vigente,
+            # Volver: cualquier backup de la corrida tiene esta estrategia (se usa el más nuevo).
+            "backup": None if es_vigente else ultimo["backup"],
+            "diferencias": [] if es_vigente else bot_control.cambios_estrategia(resumen, vigente),
+        })
+        previo = resumen
+    versiones.reverse()
+    return {"versiones": versiones, "max_backups": bot_control.MAX_BACKUPS}
