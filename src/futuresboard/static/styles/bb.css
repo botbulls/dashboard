@@ -629,7 +629,7 @@ a.bb-moneda { transition: background-color var(--bb-dur) var(--bb-ease); }
   .bb-tabla-chica td a { display: inline-flex; align-items: center; min-height: var(--bb-tap); }
   .bb-bot-aviso { top: calc(var(--bb-topbar-h) + env(safe-area-inset-top, 0px) + var(--bb-s2)); left: var(--bb-s2); right: var(--bb-s2); max-width: none; }
   .bb .btn { min-height: var(--bb-tap); }
-  .bb .btn-close { width: var(--bb-tap); height: var(--bb-tap); padding: 0; margin: -8px -8px -8px auto; background-size: 14px; }
+  .bb .btn-close { width: var(--bb-tap); height: var(--bb-tap); padding: 0; margin: -8px -8px -8px auto; background-size: 14px; flex: none; }
   .bb .form-control, .bb .form-select { font-size: var(--bb-fs-16); min-height: var(--bb-tap); }
   .bb-confirmacion__botones .btn { flex: 1 1 0; }
   .bb .dataTables_wrapper .dataTables_filter input, .bb .dataTables_wrapper .dataTables_length select { min-height: var(--bb-tap); font-size: var(--bb-fs-16); }
