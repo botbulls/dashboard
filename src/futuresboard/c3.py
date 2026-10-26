@@ -1048,6 +1048,15 @@ class C3Watcher:
             self._reanudar(state, c3, cfg, capital, "reinicio", "passivbot en ejecución después de un START automático "
                            "que había dado error (cuenta como reinicio automático)", self._now_ms())
             return True
+        forager = self._leer_forager() or {}
+        if forager.get("long_mode") == bot_control.MODE_GRACEFUL_STOP:
+            # Arrancó por fuera del panel (docker compose up) con los modos que dejó el Apagar: no abre pares y C3 ya
+            # no lo va a reiniciar solo. Solo cambia el aviso (revisión, hallazgo 20).
+            self._reanudar(state, c3, cfg, capital, "reinicio_manual",
+                           "passivbot volvió a correr por fuera del panel en parada gradual (no abre pares). C3 re-ancló "
+                           "la base y no lo va a reiniciar solo: usá Reanudar desde el panel", self._now_ms(),
+                           contar=False, icono="⚠️")
+            return True
         self._reanudar(state, c3, cfg, capital, "reinicio_manual", "passivbot en ejecución otra vez (START a mano)",
                        self._now_ms(), contar=False)
         return True
@@ -1185,7 +1194,7 @@ class C3Watcher:
         self._notify(f"❌ <b>C3</b>: {esc(texto)}")
 
     def _reanudar(self, state: Dict[str, Any], c3: Dict[str, Any], cfg: Dict[str, Any], capital: Decimal,
-                  tipo: str, titulo: str, now_ms: int, contar: bool = True) -> None:
+                  tipo: str, titulo: str, now_ms: int, contar: bool = True, icono: str = "▶️") -> None:
         corte = c3.get("corte") or {}
         modo = corte.get("modo") or self.mode
         if contar:
@@ -1199,7 +1208,7 @@ class C3Watcher:
                  f"(tope {_pct_txt(pct)}%).")
         self._historial(c3, tipo, texto, modo, capital=money(capital), piso=money(piso), corte=corte.get("id"))
         self._event(state, texto, modo)
-        self._notify(f"▶️ <b>C3</b>: {esc(texto)}", modo == MODE_DRY_RUN)
+        self._notify(f"{icono} <b>C3</b>: {esc(texto)}", modo == MODE_DRY_RUN)
 
     # -- índice de rebote ---------------------------------------------------------------
     def _indice_nuevo(self, now_ms: int) -> Dict[str, Any]:

@@ -324,6 +324,37 @@ def test_c3_no_reinicia_solo_si_cambio_la_estrategia_en_el_corte(h, cambio):
     assert h.starts == []
 
 
+def test_compose_up_en_parada_gradual_con_c3_parado_lo_avisa(h):
+    """Con C3 parado tras su Apagar (graceful_stop), un docker compose up levanta passivbot en parada gradual: C3 lo
+    toma como START a mano y ya no lo reinicia solo. Antes avisaba "▶️ passivbot en ejecución otra vez (START a mano)",
+    sin decir que no abre pares ni que el reinicio automático se perdió (revisión, hallazgo 20). Solo cambia el
+    aviso: conservar el reinicio automático es una decisión aparte."""
+    h.forager_cfg = dict(ESTRATEGIA)
+    _apagar_real(h)
+    svc = operando(h, politica="cooldown", cooldown=1)
+    cortar(h, svc)
+    h.running = True  # docker compose up -d: passivbot arranca con los modos en graceful_stop
+    h.capital("6500")
+    h.avanzar(15)
+    svc.tick()
+    st = h.c3()
+    assert st["c3_parado"] is False and st["base"]["motivo"] == "reinicio_manual" and h.starts == []
+    aviso = h.sent[-1]
+    assert aviso.startswith("⚠️") and "parada gradual" in aviso and "no abre pares" in aviso
+    assert "Reanudar" in aviso and "no lo va a reiniciar solo" in aviso
+
+
+def test_start_a_mano_en_normal_sigue_avisando_igual(h):
+    h.forager_cfg = dict(ESTRATEGIA)
+    svc = operando(h, politica="cooldown", cooldown=1)
+    cortar(h, svc)
+    h.running = True
+    h.capital("6500")
+    h.avanzar(15)
+    svc.tick()
+    assert h.sent[-1].startswith("▶️") and "START a mano" in h.sent[-1]
+
+
 def test_c3_corte_viejo_sin_hash_usa_la_comparacion_de_twe(h):
     h.forager_cfg = dict(ESTRATEGIA)
     svc = operando(h, politica="cooldown", cooldown=1)
