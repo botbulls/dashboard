@@ -84,7 +84,7 @@
 {#- Editor de la estrategia (spec § 2.4, pasos 2-5): un borrador que no se guarda hasta "Revisar y aplicar". Lo arma
     static/js/estrategia.js con GET /api/bot/estrategia (chequeos contra Binance, con caché): la página no llama a Binance
     al armarse. Aplica con POST /api/bot/estrategia (plan 409 → confirmación → job con el mismo lock que el resto). -#}
-<div data-estrategia-editor data-url="{{ url_for('main.bot_estrategia') }}" data-url-candidatos="{{ url_for('main.bot_estrategia_candidatos') }}" data-url-versiones="{{ url_for('main.bot_estrategia_versiones') }}" data-url-volver="{{ url_for('main.bot_estrategia_volver') }}" data-bot-controles>
+<div data-estrategia-editor data-url="{{ url_for('main.bot_estrategia') }}" data-url-candidatos="{{ url_for('main.bot_estrategia_candidatos') }}" data-url-versiones="{{ url_for('main.bot_estrategia_versiones') }}" data-url-volver="{{ url_for('main.bot_estrategia_volver') }}" data-url-rotacion="{{ url_for('main.bot_estrategia_rotacion') }}" data-bot-controles>
     <p class="bb-alerta bb-alerta--info" data-estrategia="cargando" role="status"><i class="fas fa-circle-notch fa-spin" aria-hidden="true"></i><span>Cargando la estrategia y los chequeos de cada par (Binance{{ ' Demo' if config.get('BINANCE_TESTNET') }})…</span></p>
     <p class="bb-alerta bb-alerta--aviso d-none" data-estrategia="error" role="alert"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i><span data-estrategia="error-texto"></span></p>
 

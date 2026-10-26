@@ -825,9 +825,17 @@ def armar_plan(e: Entrada) -> Dict[str, Any]:
                              "esta cartera no están medidos: revisalos en Rescate.", casilla=True,
                              frase="los umbrales del rescate dejan de estar medidos"))
     if len(validos) > n:
+        estimado = ""
+        if not e.expo.get("error"):
+            try:
+                rot = estimar_rotacion(ctx, validos, n, e.expo, ambos=False)
+                estimado = " Con las velas de ahora, " + rot["estimaciones"][0]["texto"] + " (estimación)."
+            except Exception:  # noqa: BLE001 - la estimación es informativa: nunca frena el plan
+                estimado = ""
         avisos.append(_aviso("rotacion", f"Rotando: {n} de {len(validos)} a la vez.",
                              f"Cada {cfg.get('update_interval_minutes') or 15} min forager elige {n} pares por volumen, "
-                             "unilateralidad y ruido; el que queda afuera pasa a parada gradual y no abre nada nuevo."))
+                             "unilateralidad y ruido; el que queda afuera pasa a parada gradual y no abre nada nuevo."
+                             + estimado))
     libres = max(0, n - len(ocupados))
     for p in [x for x in validos if x not in vigente["pares_long"]]:
         avisos.append(_aviso(f"entra:{p}", f"{p} entra {'apenas arranque forager' if libres else 'cuando se libere un lugar'}.",
@@ -1125,3 +1133,49 @@ def listar_versiones(forager_config: pathlib.Path, data_dir: pathlib.Path, audit
         previo = resumen
     versiones.reverse()
     return {"versiones": versiones, "max_backups": bot_control.MAX_BACKUPS}
+
+
+# --------------------------------------------------------------------------------------
+# Rotación (S1): qué elegiría forager hoy con más pares que lugares
+# --------------------------------------------------------------------------------------
+
+
+def estimar_rotacion(ctx: Contexto, pares: List[str], n_longs: int, expo: Dict[str, Any],
+                     ambos: bool = True, presupuesto_s: float = PRESUPUESTO_S) -> Dict[str, Any]:
+    """Réplica de ``forager.sort_symbols`` y de sus lugares (``futuresboard.rotacion``) con las velas de 15 m de ahora,
+    en el endpoint que opera y (con ``ambos`` y en Demo) también en Binance real, donde el volumen es otro.
+
+    Solo entran los pares que pasan los filtros de forager en ese endpoint; las posiciones y órdenes abiertas
+    (``expo``) conservan su lugar, como en forager. Es una estimación: cada ciclo forager vuelve a elegir."""
+    from futuresboard import rotacion
+
+    ign = set(ctx.cfg.get("symbols_to_ignore") or [])
+    posiciones = [s for s in expo.get("posiciones", {}) if s not in ign]
+    ordenes = [s for s in expo.get("ordenes", {}) if s not in ign]
+    gradual = False
+    try:
+        gradual = bot_control._mode(ctx.cfg, "long") == bot_control.MODE_GRACEFUL_STOP
+    except bot_control.InvalidModeError:
+        pass
+    mercados = [ctx.operativo] + ([ctx.real] if ambos and ctx.en_demo else [])
+    out: Dict[str, Any] = {"n_longs": n_longs, "pares": list(pares), "estimaciones": []}
+    for mercado in mercados:
+        sub = Contexto(cfg=ctx.cfg, operativo=mercado, real=mercado, manifiesto=ctx.manifiesto, balance=ctx.balance,
+                       hoy=ctx.hoy)
+        res = chequear_varios(list(pares), sub, claves=DE_CICLO, presupuesto_s=presupuesto_s)
+        validos = [r["symbol"] for r in res if r["estado"] not in (BLOQUEA, SIN_DATOS)]
+        velas: Dict[str, Any] = {}
+        for s in validos:
+            try:
+                velas[s] = mercado.velas_15m(s)
+            except binance_publico.SinRespuesta:
+                continue
+        est = rotacion.estimar(velas, ctx.cfg, list(pares), n_longs, posiciones, ordenes, parada_gradual=gradual)
+        est["endpoint"] = mercado.nombre
+        est["descartados"] = [r["symbol"] for r in res if r["estado"] == BLOQUEA]
+        est["sin_datos"] = [r["symbol"] for r in res if r["estado"] == SIN_DATOS] + [s for s in validos if s not in velas]
+        est["texto"] = rotacion.texto(est, mercado.nombre, corto)
+        if gradual:
+            est["texto"] = f"En parada gradual forager no abre pares nuevos ({mercado.nombre})."
+        out["estimaciones"].append(est)
+    return out

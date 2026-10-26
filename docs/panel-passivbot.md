@@ -68,6 +68,7 @@ Browser ──(sesión + CSRF)──> dashboard (Flask)
 
 | GET | `/api/bot/estrategia` | – | Estrategia vigente, derivados (lw, máximos, caída que liquida), lugares ocupados, pares con sus chequeos, avanzado y `base_hash`. Consulta la API pública de Binance (con caché). |
 | GET | `/api/bot/estrategia/candidatos?q=SOL` | – | Hasta 10 pares del endpoint que opera (y del manifiesto de configs) con sus chequeos. |
+| GET | `/api/bot/estrategia/rotacion?pares=A,B,C&n=2` | – | Qué elegiría forager hoy con más pares que lugares: réplica de `sort_symbols` y de sus lugares con las velas de 15 m de ahora, en el endpoint que opera y, en Demo, también en real. Estimación (S1). |
 | GET | `/api/bot/estrategia/versiones` | – | Versiones de la estrategia (backups de `new.json` agrupados: los que solo cambian modos van con la anterior), con cuándo, quién, qué cambió y la diferencia con la vigente. |
 | POST | `/api/bot/estrategia/volver` | `{"backup", "base_hash"}` (+ `"confirmar": true, "plan_hash"`) | Volver a una versión: el mismo plan, confirmación y job que un cambio de estrategia, con TWE, pares a la vez y pares de ese backup (nada más). Bloquea si un par de esa versión ya no pasa los chequeos o si viola la regla de exposición. |
 | POST | `/api/bot/estrategia` | `{"twe_long", "n_longs", "pares", "base_hash"}` (+ `"confirmar": true, "plan_hash"`) | Cambio de estrategia: sin `confirmar`, 409 con el plan (diff, avisos, `plan_hash`) o con los `bloqueos`; con `confirmar`, el job. Escribe también `approved_symbols_short` (= long) y `twe_short` 1; no toca los modos. Reinicia passivbot si corre; detenido, escribe y no arranca. Ver [Estrategia](#estrategia-pares-y-pares-a-la-vez). |
@@ -253,6 +254,10 @@ Diseño completo en `diseno/bot-estrategia/spec.md` (§ 2.4 y § 3). En corto:
   Personalizado con rescate, un par que forager descartaría) → job con el mismo lock, backup y escritura atómica.
   Si Docker rechaza el reinicio se restaura el backup. Cada cambio queda en `bot_actions.log` (acción `estrategia`,
   con el diff resumido) y en `estrategia_versiones.jsonl` (quién, qué, backup y hash antes y después).
+- **Rotación** (`futuresboard/rotacion.py`): con más pares que lugares, la vista previa de qué elegiría forager es una
+  réplica en Python puro de `forager.sort_symbols` y de los lugares de `generate_yaml`. `tests/test_rotacion.py` la
+  compara con el resultado del código real de forager sobre las mismas velas (`tests/fixtures/rotacion/generar.py`
+  regenera el fixture con el intérprete de passivbot).
 - **Chequeos por ciclo** (`futuresboard/chequeos_forager.py`): un hilo del worker de gunicorn repite los filtros de
   forager sobre los aprobados cada `update_interval_minutes`, deja el resultado en `chequeos_forager.json` (Bot → Pares
   ahora) y avisa por Telegram solo cuando un par cambia de estado. Binance caído es "sin datos": no avisa.

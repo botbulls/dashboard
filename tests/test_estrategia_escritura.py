@@ -307,3 +307,38 @@ def test_telegram_de_la_estrategia(monkeypatch):
                                               {"docker_action": "restart", "cambios_texto": "+SOLUSDT · pares a la vez 4 → 5"},
                                               "cliente17")
     assert "ESTRATEGIA" in texto and "+SOLUSDT" in texto
+
+
+# ---------------------------------------------------------------- rotación (S1)
+
+
+def _velas_de_fixture(red):
+    fix = json.loads((pathlib.Path(__file__).resolve().parent / "fixtures" / "rotacion" / "sort_symbols.json")
+                     .read_text(encoding="utf-8"))
+    for lado in (red.demo, red.real):
+        for s, v in fix["velas"].items():
+            lado.velas_15m[s] = v
+    # En real el volumen de SOL es otro: ahí queda afuera BNB (spec § 1.5).
+    red.real.velas_15m["SOLUSDT"] = [r[:5] + [r[5] * 100] for r in fix["velas"]["SOLUSDT"]]
+
+
+def test_rotacion_estima_que_elegiria_forager_en_demo_y_en_real(client, forager, red, docker):  # noqa: F811
+    _velas_de_fixture(red)
+    resp = client.get("/api/bot/estrategia/rotacion?pares=BNBUSDT,BTCUSDT,ETHUSDT,XRPUSDT,SOLUSDT&n=4")
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    demo, real = resp.get_json()["estimaciones"]
+    assert demo["endpoint"] == "Demo" and demo["afuera"] == ["SOLUSDT"]
+    assert demo["texto"] == "en Binance Demo elegiría XRP, ETH, BNB, BTC (SOL afuera)"
+    assert real["endpoint"] == "real" and "SOLUSDT" in real["ideales"] and "BNBUSDT" in real["afuera"]
+
+
+def test_rotacion_va_en_el_aviso_del_plan(client, forager, red, docker):  # noqa: F811
+    _velas_de_fixture(red)
+    plan = pedir(client, CUATRO + ["SOLUSDT"], 4).get_json()["plan"]
+    assert "en Binance Demo elegiría XRP, ETH, BNB, BTC (SOL afuera)" in aviso(plan, "rotacion")["texto"]
+
+
+@pytest.mark.parametrize("qs", ["pares=BTCUSDT&n=0", "pares=&n=4", "pares=BTCUSDT,BTCUSDT&n=2", "pares=btc&n=1",
+                                "pares=BTCUSDT&n=x"])
+def test_rotacion_parametros_invalidos(client, forager, red, docker, qs):  # noqa: F811
+    assert client.get(f"/api/bot/estrategia/rotacion?{qs}").status_code == 400

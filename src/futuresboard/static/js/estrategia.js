@@ -507,12 +507,35 @@
         const nodos = [opcionModo('todos', `${todos} a la vez`, `lw ${num(d.lw, 2)} por par (${num(borrador.twe)} ÷ ${todos}): cada par puede llegar a ${usdt(d.maxPar)}. ${elegido.symbol} ${libres ? 'entra apenas arranque forager: queda 1 lugar libre' : 'espera a que se libere un lugar'}.`, modo === 'todos')];
         if (borrador.n >= l.min && borrador.n < pares.length) {
             const dr = derivados(borrador.twe, borrador.n);
-            nodos.push(opcionModo('rotando', `${borrador.n} a la vez, rotando`, `lw ${num(dr.lw, 2)} (igual). Cada ${srv.ciclo_min} min forager elige ${borrador.n} de los ${pares.length} por volumen, unilateralidad y ruido; el que queda afuera sigue en parada gradual hasta cerrar y no abre nada nuevo.`, modo === 'rotando'));
+            const opcion = opcionModo('rotando', `${borrador.n} a la vez, rotando`, `lw ${num(dr.lw, 2)} (igual). Cada ${srv.ciclo_min} min forager elige ${borrador.n} de los ${pares.length} por volumen, unilateralidad y ruido; el que queda afuera sigue en parada gradual hasta cerrar y no abre nada nuevo.`, modo === 'rotando');
+            const estimado = el('p', 'bb-opcion__texto', 'Calculando qué elegiría forager con las velas de ahora…');
+            estimado.setAttribute('aria-live', 'polite');
+            opcion.appendChild(estimado);
+            nodos.push(opcion);
+            estimarRotacion(pares, borrador.n, estimado);
         } else if (modo === 'rotando') {
             modo = 'todos';
         }
         qa('modos').replaceChildren(...nodos);
         qa('modo').classList.remove('d-none');
+    }
+    const urlRotacion = raiz.getAttribute('data-url-rotacion');
+    let pedidoRotacion = 0;
+    // S1: réplica de forager.sort_symbols en el servidor (GET /api/bot/estrategia/rotacion), en Demo y en real.
+    function estimarRotacion(pares, n, destino) {
+        if (!urlRotacion) { destino.textContent = ''; return; }
+        const id = ++pedidoRotacion;
+        fetch(`${urlRotacion}?pares=${encodeURIComponent(pares.join(','))}&n=${n}`, { credentials: 'same-origin', cache: 'no-cache' })
+            .then((r) => r.json())
+            .then((d) => {
+                if (id !== pedidoRotacion) return;
+                if (!d.ok) { destino.textContent = d.error || 'No se pudo estimar.'; return; }
+                const textos = (d.estimaciones || []).map((e) => e.texto).filter(Boolean);
+                destino.textContent = textos.length
+                    ? `Con las velas de ahora (estimación): ${textos.join('; ')}.`
+                    : 'No se pudo estimar con las velas de ahora.';
+            })
+            .catch(() => { if (id === pedidoRotacion) destino.textContent = 'No se pudo estimar.'; });
     }
     function resultadoLi(r) {
         const enBorrador = borrador.pares.includes(r.symbol);

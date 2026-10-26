@@ -2055,6 +2055,30 @@ def bot_estrategia_aplicar():
     return _estrategia_plan_o_job(objetivo, params, _armador_estrategia(objetivo))
 
 
+@app.route("/api/bot/estrategia/rotacion", methods=["GET"])
+def bot_estrategia_rotacion():
+    """Qué elegiría forager hoy con ``pares`` (separados por coma) y ``n`` lugares (S1): réplica de sort_symbols con
+    las velas de ahora, en el endpoint que opera y, en Demo, también en Binance real. Estimación."""
+    pares = [p for p in (request.args.get("pares") or "").split(",") if p]
+    try:
+        n = int(request.args.get("n", ""))
+        if not 1 <= n <= estrategia.MAX_PARES or not 1 <= len(pares) <= estrategia.MAX_PARES:
+            raise ValueError
+        if len(set(pares)) != len(pares) or not all(estrategia.FORMATO.match(p) for p in pares):
+            raise ValueError
+    except ValueError:
+        return _json_response({"ok": False, "error": "pares o n inválidos."}, 400)
+    try:
+        _settings, path, cfg = _leer_forager()
+    except bot_control.BotControlError as exc:
+        return _json_response({"ok": False, "error": str(exc)}, exc.status_code)
+    ctx = _contexto_estrategia(cfg, path, None, {"usable": False})
+    expo = estrategia.leer_exposicion(current_app.config["DATABASE"])
+    if expo.get("error"):
+        return _json_response({"ok": False, "error": expo["error"]}, 503)
+    return _json_response({"ok": True, **estrategia.estimar_rotacion(ctx, pares, n, expo)})
+
+
 @app.route("/api/bot/estrategia/versiones", methods=["GET"])
 def bot_estrategia_versiones():
     """Versiones de la estrategia con cuándo, quién, qué cambió y la diferencia con la vigente (spec § 2.4 paso 6)."""
