@@ -674,6 +674,33 @@ def test_docker_4xx_restaura_copiando_dentro_de_secretos(client, cambio, docker,
     assert credenciales.de_app(cambio.app).estado()["key_id"] == credenciales.key_id(cambio.k0)
 
 
+def test_rechazo_de_docker_restaura_sin_dejar_a_passivbot_en_rojo(client, cambio, docker):  # noqa: F811
+    """La vuelta atrás reescribe el archivo (inodo y mtime nuevos) y passivbot, que no se reinició, sigue con esa
+    misma key. Bot lo marcaba "con la key anterior" en rojo por comparar StartedAt con el mtime, e invitaba a un
+    reinicio innecesario (revisión, hallazgo 8). La vuelta atrás conserva el mtime original."""
+    archivo = cambio.dir / credenciales.ARCHIVO
+    hace_2h = time.time() - 7200
+    os.utime(archivo, (hace_2h, hace_2h))
+    with sqlite3.connect(str(cambio.app.config["DATABASE"])) as conn:
+        conn.execute("INSERT INTO orders (origQty, price, side, positionSide, status, symbol, time, type) "
+                     "VALUES (1, 1, 'BUY', 'LONG', 'NEW', 'BTCUSDT', ?, 'LIMIT')", (int((time.time() - 60) * 1000),))
+
+    def passivbot():
+        return next(c for c in client.get("/api/bot/credenciales").get_json()["consumidores"]
+                    if c["clave"] == "passivbot")
+
+    assert passivbot()["estado"] == "ok"
+    configurada = client.get("/api/bot/credenciales").get_json()["configurada"]
+    k, s = nueva(cambio)
+    pid = validar(client, k, s).get_json()["pendiente_id"]
+    docker.fail_action = 403
+    res = confirmar(client, pid)
+    assert res.status_code == 502 and "Se restauró la key anterior" in res.get_json()["error"]
+    assert abs(archivo.stat().st_mtime - hace_2h) < 1
+    assert passivbot()["estado"] == "ok"
+    assert client.get("/api/bot/credenciales").get_json()["configurada"] == configurada
+
+
 def test_docker_sin_respuesta_no_revierte(client, cambio, docker):  # noqa: F811
     k, s = nueva(cambio)
     pid = validar(client, k, s).get_json()["pendiente_id"]

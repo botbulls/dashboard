@@ -945,6 +945,9 @@ def aplicar(env: Entorno, settings: bot_control.Settings, p: Pendiente, usuario_
     usuario = env.proveedor.estado().get("usuario") or credenciales.usuario_passivbot()
     rep.step("revalidar", bot_control.PASO_EN_CURSO, "misma cuenta, hedge mode y el archivo")
     try:
+        # El mtime de antes: si Docker rechaza el reinicio, la vuelta atrás lo repone (si no, Bot marcaría a
+        # passivbot "con la key anterior" aunque siga con esta misma).
+        st0 = os.stat(pathlib.Path(env.dir_secretos) / credenciales.ARCHIVO)
         original = leer_archivo(env.dir_secretos)
     except OSError as exc:
         raise CambioError(f"No se pudo leer el archivo de credenciales ({exc.__class__.__name__}): no se cambió nada.",
@@ -986,6 +989,12 @@ def aplicar(env: Entorno, settings: bot_control.Settings, p: Pendiente, usuario_
             except OSError as restore_exc:
                 raise bot_control.DockerError(f"{exc} ATENCIÓN: no se pudo restaurar la key anterior "
                                               f"({restore_exc.__class__.__name__}); respaldo {respaldo.name}.") from None
+            try:
+                # Mismo contenido que antes y passivbot no se reinició: el mtime vuelve al original. El inodo nuevo
+                # igual hace releer a los proveedores (comparan inodo, mtime y tamaño).
+                os.utime(pathlib.Path(env.dir_secretos) / credenciales.ARCHIVO, ns=(st0.st_atime_ns, st0.st_mtime_ns))
+            except OSError:
+                log.warning("No se pudo reponer el mtime de %s tras la vuelta atrás.", credenciales.ARCHIVO)
             raise bot_control.DockerError(f"{exc} Se restauró la key anterior desde el respaldo: no cambió nada.") \
                 from None
         accion = "restart"
