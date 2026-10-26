@@ -357,6 +357,81 @@ def test_el_balance_se_muestra_recien_con_la_misma_cuenta(client, cambio):  # no
     assert resp.status_code == 200 and "balance 5.417,55 USDT" in textos(resp.get_json()["chequeos"])
 
 
+# ---------------------------------------------------------------- clave de la huella (/secretos/huella.key)
+
+
+def test_perder_la_clave_de_la_huella_no_convierte_la_misma_cuenta_en_otra(client, cambio):  # noqa: F811
+    """Si ./secretos se rehace sin huella.key y la meta sobrevive, la clave nueva da otro HMAC: la misma cuenta salía
+    "Es otra cuenta" y quedaba trabada (revisión, hallazgo 3). Ahora la meta guarda el id de la clave y, si cambió, la
+    línea de base se recalcula con la key actual."""
+    client.get("/api/bot/credenciales")
+    meta = credenciales.leer_meta(cambio.data_dir)
+    assert meta["huella_clave_id"] and len(meta["huella_clave_id"]) == 12
+    (cambio.dir / cambio_key.HUELLA_ARCHIVO).unlink()
+    resp = validar(client, *nueva(cambio, uid=1001))
+    assert resp.status_code == 200, resp.get_json()
+    nuevo = credenciales.leer_meta(cambio.data_dir)
+    assert nuevo["huella_clave_id"] != meta["huella_clave_id"] and nuevo["huella_uid"] != meta["huella_uid"]
+    # Otra cuenta sigue bloqueando con la clave nueva.
+    resp = validar(client, *nueva(cambio, uid=2002))
+    assert resp.status_code == 422 and resp.get_json()["otra_cuenta"] is True
+
+
+def test_sin_la_clave_y_con_la_key_actual_revocada_cae_al_tranid(client, cambio):  # noqa: F811
+    client.get("/api/bot/credenciales")
+    (cambio.dir / cambio_key.HUELLA_ARCHIVO).unlink()
+    del cambio.fake.keys[cambio.k0]  # la actual revocada: la base no se puede recalcular
+    resp = validar(client, *nueva(cambio, uid=1001, income=("5", "9002")))
+    assert resp.status_code == 200, resp.get_json()
+    assert "1 movimientos de Binance coinciden" in textos(resp.get_json()["chequeos"])
+    resp = validar(client, *nueva(cambio, uid=1001, income=("5", "6")))
+    data = resp.get_json()
+    assert resp.status_code == 422 and data["otra_cuenta"] is False
+    assert "No se puede saber si es la misma cuenta" in data["error"] and "Es otra cuenta" not in data["error"]
+
+
+def test_volver_a_la_anterior_sin_la_clave_de_la_huella(client, cambio):  # noqa: F811
+    k, s = nueva(cambio, uid=1001)
+    assert confirmar(client, validar(client, k, s).get_json()["pendiente_id"]).status_code == 200
+    (cambio.dir / cambio_key.HUELLA_ARCHIVO).unlink()
+    resp = jpost(client, "/api/bot/credenciales/volver", {})
+    data = resp.get_json()
+    assert resp.status_code == 409 and data.get("requiere_confirmacion"), data
+
+
+def test_clave_de_la_huella_truncada_o_vacia_se_regenera(client, cambio, tmp_path):  # noqa: F811
+    client.get("/api/bot/credenciales")
+    p = cambio.dir / cambio_key.HUELLA_ARCHIVO
+    p.write_text(p.read_text()[:10])
+    resp = validar(client, *nueva(cambio, uid=1001))
+    assert resp.status_code == 200, resp.get_json()
+    assert len(p.read_text()) == 64 and oct(p.stat().st_mode & 0o777) == "0o600"
+    vacia = tmp_path / "vacia"
+    vacia.mkdir()
+    (vacia / cambio_key.HUELLA_ARCHIVO).write_text("")
+    clave = cambio_key.huella_clave(vacia)
+    assert len(clave) == 64 and cambio_key.huella_clave(vacia) == clave
+    assert not [x for x in vacia.iterdir() if x.name != cambio_key.HUELLA_ARCHIVO]  # sin temporales
+
+
+def test_clave_de_la_huella_creada_por_dos_hilos_es_una_sola(tmp_path):
+    barrera = threading.Barrier(8)
+    claves = []
+
+    def crear():
+        barrera.wait()
+        claves.append(cambio_key.huella_clave(tmp_path))
+
+    hilos = [threading.Thread(target=crear) for _ in range(8)]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join(10)
+    assert len(set(claves)) == 1 and len(claves[0]) == 64
+    assert (tmp_path / cambio_key.HUELLA_ARCHIVO).read_text().encode("ascii") == claves[0]
+    assert [x.name for x in tmp_path.iterdir()] == [cambio_key.HUELLA_ARCHIVO]
+
+
 def test_one_way_bloquea_y_la_sonda_no_corre(client, cambio):  # noqa: F811
     resp = validar(client, *nueva(cambio, dual=False))
     assert resp.status_code == 422 and "one-way" in resp.get_json()["error"]

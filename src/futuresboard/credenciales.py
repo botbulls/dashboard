@@ -366,9 +366,12 @@ def para_config(config: Any) -> Proveedor:
 
 META_FILE = "credenciales_meta.json"
 # Campos que puede tener (nunca key, secret ni uid): key enmascarada, key_id, huella del uid (HMAC con una clave que vive
-# en /secretos), cuándo y quién la configuró, última validación, hedge mode, permisos (solo en real) y entorno.
-META_CAMPOS = ("key", "key_id", "huella_uid", "linea_base_en", "configurada_en", "configurada_por", "validada_en",
-               "hedge", "permisos", "entorno", "anterior")
+# en /secretos) y el id de esa clave, cuándo y quién la configuró, última validación, hedge mode, permisos (solo en
+# real) y entorno.
+META_CAMPOS = ("key", "key_id", "huella_uid", "huella_clave_id", "linea_base_en", "configurada_en", "configurada_por",
+               "validada_en", "hedge", "permisos", "entorno", "anterior")
+# Leer-modificar-guardar de la meta (la línea de base desde un GET y el cierre del job corren en hilos distintos).
+META_LOCK = threading.RLock()
 
 
 def leer_meta(data_dir: pathlib.Path) -> Dict[str, Any]:

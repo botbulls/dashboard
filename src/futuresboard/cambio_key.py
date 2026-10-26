@@ -253,26 +253,64 @@ def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def huella_clave(dir_secretos: pathlib.Path) -> bytes:
-    """Clave del HMAC de la huella del uid, en ``/secretos`` (600). La crea el panel la primera vez."""
-    path = pathlib.Path(dir_secretos) / HUELLA_ARCHIVO
+HUELLA_CLAVE_LARGO = 64
+_HUELLA_LOCK = threading.Lock()  # los hilos del panel (gthread) la crean de a uno
+
+
+def _leer_clave(path: pathlib.Path) -> Optional[str]:
+    """El contenido, o None si el archivo no existe."""
     try:
-        valor = path.read_text(encoding="ascii").strip()
+        return path.read_text(encoding="ascii").strip()
     except FileNotFoundError:
-        valor = ""
-    if len(valor) >= 64:
+        return None
+    except UnicodeDecodeError:
+        return ""
+
+
+def huella_clave(dir_secretos: pathlib.Path) -> bytes:
+    """Clave del HMAC de la huella del uid, en ``/secretos`` (600). La crea el panel la primera vez.
+
+    Un archivo con menos de 64 caracteres (truncado o vacío) cuenta como ausente y se regenera. Se crea completo antes
+    de que otro hilo lo vea: temporal 600 en el mismo directorio, fsync y ``os.link`` (exclusivo como ``O_EXCL``: si
+    otro hilo ganó, se lee el suyo). Una clave nueva invalida la línea de base sola, porque la meta guarda el id de la
+    clave con la que se calculó (``huella_clave_id``; revisión, hallazgo 3)."""
+    dir_secretos = pathlib.Path(dir_secretos)
+    path = dir_secretos / HUELLA_ARCHIVO
+    valor = _leer_clave(path)
+    if valor is not None and len(valor) >= HUELLA_CLAVE_LARGO:
         return valor.encode("ascii")
-    nuevo = secrets.token_hex(32)
-    try:
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        return path.read_text(encoding="ascii").strip().encode("ascii")
-    with os.fdopen(fd, "w", encoding="ascii") as fh:
-        fh.write(nuevo)
-        fh.flush()
-        os.fsync(fh.fileno())
-    _fsync_dir(path.parent)
-    return nuevo.encode("ascii")
+    with _HUELLA_LOCK:
+        valor = _leer_clave(path)
+        if valor is not None and len(valor) >= HUELLA_CLAVE_LARGO:
+            return valor.encode("ascii")  # otro hilo la creó mientras esperaba
+        fd, tmp = tempfile.mkstemp(prefix=f".{HUELLA_ARCHIVO}.", suffix=".tmp", dir=str(dir_secretos))
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="ascii") as fh:
+                fh.write(secrets.token_hex(32))
+                fh.flush()
+                os.fsync(fh.fileno())
+            if valor is None:
+                try:
+                    os.link(tmp, path)  # exclusivo, como O_EXCL, pero ya completa
+                except FileExistsError:
+                    pass  # otro proceso la creó: vale la suya
+            else:
+                os.replace(tmp, path)  # estaba corta o vacía: se reemplaza entera
+                tmp = ""
+            _fsync_dir(dir_secretos)
+        finally:
+            if tmp and os.path.exists(tmp):
+                os.unlink(tmp)
+        valor = _leer_clave(path)
+    if valor is None or len(valor) < HUELLA_CLAVE_LARGO:
+        raise CambioError("No se pudo crear la clave de la huella en el directorio de credenciales.", 500)
+    return valor.encode("ascii")
+
+
+def huella_clave_id(clave: bytes) -> str:
+    """Id corto de la clave de la huella (12 hex de su sha256): dice con qué clave se calculó la línea de base."""
+    return hashlib.sha256(clave).hexdigest()[:12]
 
 
 def huella(uid: Any, clave: bytes) -> str:
@@ -448,6 +486,7 @@ class Resultado:
     hedge: Optional[bool] = None
     permisos: Optional[Dict[str, Any]] = None
     otra_cuenta: bool = False
+    huella_clave_id: Optional[str] = None
 
 
 def _chequeo(clave: str, estado: str, texto: str) -> Dict[str, str]:
@@ -507,15 +546,22 @@ def _balance(fut: Dict[str, Any]) -> str:
     return f" · balance {entero.replace(',', '.')},{dec} USDT"
 
 
+def _base_vigente(meta: Dict[str, Any], key_id: str, clave_id: str) -> bool:
+    return bool(meta.get("huella_uid")) and meta.get("key_id") == key_id and meta.get("huella_clave_id") == clave_id
+
+
 def asegurar_linea_base(env: Entorno) -> Tuple[Dict[str, Any], bool]:
-    """La primera vez (o si la key vigente cambió a mano) guarda la línea de base: huella del uid y ``key_id`` de la
-    key actual, validada en ese momento. Devuelve la meta y si la key actual respondió."""
+    """La primera vez (o si la key vigente cambió a mano, o si cambió la clave de la huella) guarda la línea de base:
+    huella del uid y ``key_id`` de la key actual, validada en ese momento. Devuelve la meta y si la key actual
+    respondió."""
     meta = credenciales.leer_meta(env.data_dir)
     try:
         actual = env.proveedor.actuales()
     except credenciales.SinCredenciales:
         return meta, False
-    if meta.get("huella_uid") and meta.get("key_id") == actual.key_id:
+    clave = huella_clave(env.dir_secretos)
+    clave_id = huella_clave_id(clave)
+    if _base_vigente(meta, actual.key_id, clave_id):
         return meta, True
     cli = env.nuevo_cliente(actual.api_key, actual.api_secret)
     try:
@@ -526,14 +572,19 @@ def asegurar_linea_base(env: Entorno) -> Tuple[Dict[str, Any], bool]:
         return meta, False
     if uid is None:
         return meta, True
-    ahora = ahora_iso()
-    meta = {**meta, "key": credenciales.enmascarar(actual.api_key), "key_id": actual.key_id,
-            "huella_uid": huella(uid, huella_clave(env.dir_secretos)), "linea_base_en": ahora, "validada_en": ahora,
-            "hedge": hedge, "entorno": "demo" if env.testnet else "real"}
-    try:
-        credenciales.guardar_meta(env.data_dir, meta)
-    except OSError:
-        log.exception("No se pudo guardar la línea de base de la API key")
+    with credenciales.META_LOCK:
+        # Releída bajo el lock: si otro hilo (el job del cambio) ya la dejó vigente, no se pisa.
+        meta = credenciales.leer_meta(env.data_dir)
+        if _base_vigente(meta, actual.key_id, clave_id):
+            return meta, True
+        ahora = ahora_iso()
+        meta = {**meta, "key": credenciales.enmascarar(actual.api_key), "key_id": actual.key_id,
+                "huella_uid": huella(uid, clave), "huella_clave_id": clave_id, "linea_base_en": ahora,
+                "validada_en": ahora, "hedge": hedge, "entorno": "demo" if env.testnet else "real"}
+        try:
+            credenciales.guardar_meta(env.data_dir, meta)
+        except OSError:
+            log.exception("No se pudo guardar la línea de base de la API key")
     return meta, True
 
 
@@ -595,8 +646,12 @@ def validar(env: Entorno, api_key: str, api_secret: str) -> Resultado:
 
     # Misma cuenta (decisión 3: otra cuenta bloquea).
     meta, actual_ok = asegurar_linea_base(env)
-    base = meta.get("huella_uid")
     clave = huella_clave(env.dir_secretos)
+    res.huella_clave_id = huella_clave_id(clave)
+    # Una base calculada con otra clave (se perdió o se truncó /secretos/huella.key y la key actual no respondió para
+    # recalcularla) no sirve para comparar: cuenta como ausente y se cae al cruce por tranId.
+    base = meta.get("huella_uid") if meta.get("huella_clave_id") == res.huella_clave_id else None
+    base_con_otra_clave = bool(meta.get("huella_uid")) and base is None
     if uid is not None:
         res.huella = huella(uid, clave)
     if base and res.huella:
@@ -625,8 +680,10 @@ def validar(env: Entorno, api_key: str, api_secret: str) -> Resultado:
                                                   "el historial del panel (no hay huella del UID para comparar)")
             ch["firma"] = _chequeo("firma", OK, firma_ok + _balance(fut))
         else:
-            ch["cuenta"] = _chequeo("cuenta", BLOQUEA, "No se puede saber si es la misma cuenta: no hay huella del UID "
-                                                       f"guardada{'' if actual_ok else ', la key actual no responde'} y "
+            sin_huella = ("la huella guardada del UID se hizo con otra clave (se perdió huella.key)"
+                          if base_con_otra_clave else "no hay huella del UID guardada")
+            ch["cuenta"] = _chequeo("cuenta", BLOQUEA, f"No se puede saber si es la misma cuenta: {sin_huella}"
+                                                       f"{'' if actual_ok else ', la key actual no responde'} y "
                                                        "no hay movimientos en común con el historial del panel")
             return fin()
 
@@ -729,6 +786,7 @@ class Pendiente:
     archivo_sha: str
     creado: float
     origen: str = "nueva"
+    huella_clave_id: Optional[str] = None
     hedge: Optional[bool] = None
     permisos: Optional[Dict[str, Any]] = None
     chequeos: List[Dict[str, str]] = dataclasses.field(default_factory=list)
@@ -947,18 +1005,22 @@ def aplicar(env: Entorno, settings: bot_control.Settings, p: Pendiente, usuario_
         rep.step("docker", bot_control.PASO_OMITIDO, "passivbot está detenido: usa la key nueva al iniciar")
         rep.step("verificar", bot_control.PASO_OMITIDO, "passivbot está detenido")
 
-    meta = credenciales.leer_meta(env.data_dir)
-    ahora = ahora_iso()
-    nueva_meta = {"key": p.enmascarada, "key_id": p.key_id, "huella_uid": p.huella or meta.get("huella_uid"),
-                  "linea_base_en": meta.get("linea_base_en"), "configurada_en": ahora,
-                  "configurada_por": usuario_panel, "validada_en": ahora, "hedge": p.hedge,
-                  "permisos": p.permisos, "entorno": "demo" if env.testnet else "real",
-                  "anterior": {"key": credenciales.enmascarar(anterior), "key_id": credenciales.key_id(anterior)}
-                  if anterior else None}
-    try:
-        credenciales.guardar_meta(env.data_dir, nueva_meta)
-    except OSError:
-        log.exception("No se pudo guardar credenciales_meta.json")
+    with credenciales.META_LOCK:
+        meta = credenciales.leer_meta(env.data_dir)
+        ahora = ahora_iso()
+        # La huella va con el id de la clave con que se calculó; si la key no dio uid, se conservan las dos de antes.
+        huella_uid, clave_id = ((p.huella, p.huella_clave_id) if p.huella
+                                else (meta.get("huella_uid"), meta.get("huella_clave_id")))
+        nueva_meta = {"key": p.enmascarada, "key_id": p.key_id, "huella_uid": huella_uid, "huella_clave_id": clave_id,
+                      "linea_base_en": meta.get("linea_base_en"), "configurada_en": ahora,
+                      "configurada_por": usuario_panel, "validada_en": ahora, "hedge": p.hedge,
+                      "permisos": p.permisos, "entorno": "demo" if env.testnet else "real",
+                      "anterior": {"key": credenciales.enmascarar(anterior), "key_id": credenciales.key_id(anterior)}
+                      if anterior else None}
+        try:
+            credenciales.guardar_meta(env.data_dir, nueva_meta)
+        except OSError:
+            log.exception("No se pudo guardar credenciales_meta.json")
     return {"ok": True, "key": p.enmascarada, "cuenta": "misma", "entorno": "demo" if env.testnet else "real",
             "docker_action": accion, "respaldo": respaldo.name,
             "cambios_texto": f"API key {credenciales.enmascarar(anterior) or '—'} → {p.enmascarada}",

@@ -2084,7 +2084,7 @@ def credenciales_validar():
     p = est["pendientes"].crear(usuario=usuario, api_key=api_key, api_secret=api_secret,
                                 key_id=credenciales.key_id(api_key), enmascarada=enmascarada, huella=res.huella,
                                 archivo_sha=cambio_key.sha(original), hedge=res.hedge, permisos=res.permisos,
-                                chequeos=res.chequeos)
+                                chequeos=res.chequeos, huella_clave_id=res.huella_clave_id)
     _audit_cambio("credenciales_validar", params, "ok", "validada: misma cuenta")
     telegram_notify.notify_bot_action("credenciales_validar", params, "ok", {}, usuario)
     return _json_response({"ok": True, "pendiente_id": p.id, "key": enmascarada, "chequeos": res.chequeos,
@@ -2203,7 +2203,7 @@ def credenciales_volver():
     p = est["pendientes"].crear(usuario=usuario, api_key=r["api_key"], api_secret=r["api_secret"],
                                 key_id=r["key_id"], enmascarada=r["key"], huella=res.huella,
                                 archivo_sha=cambio_key.sha(original), origen="volver", hedge=res.hedge,
-                                permisos=res.permisos, chequeos=res.chequeos)
+                                permisos=res.permisos, chequeos=res.chequeos, huella_clave_id=res.huella_clave_id)
     _audit_cambio("credenciales_validar", params, "ok", "respaldo validado: misma cuenta")
     out = _cambio_confirmar({"pendiente_id": p.id}, "volver")
     data = json.loads(out.get_data(as_text=True))
