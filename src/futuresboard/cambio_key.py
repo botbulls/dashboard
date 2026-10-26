@@ -957,7 +957,7 @@ def aplicar(env: Entorno, settings: bot_control.Settings, p: Pendiente, usuario_
     return {"ok": True, "key": p.enmascarada, "cuenta": "misma", "entorno": "demo" if env.testnet else "real",
             "docker_action": accion, "respaldo": respaldo.name,
             "cambios_texto": f"API key {credenciales.enmascarar(anterior) or '—'} → {p.enmascarada}",
-            "passivbot_desde": desde, "key_id": p.key_id}
+            "passivbot_desde": desde, "key_id": p.key_id, "escrito_en": escrito_en}
 
 
 def _ts_docker(valor: Any) -> Optional[float]:
@@ -971,19 +971,31 @@ def _ultima_orden_ms(db_path: str) -> Optional[int]:
     return int(filas[0][0]) if filas and filas[0][0] is not None else None
 
 
-def consumidores_con(env: Entorno, kid: str, passivbot_desde: Optional[float]) -> Dict[str, bool]:
-    """Quién ya usa la key ``kid``: panel (este proceso), scraper y rescate (``key_id`` del latido) y passivbot (una
-    orden creada después de su arranque)."""
+def consumidores_con(env: Entorno, kid: str, passivbot_desde: Optional[float],
+                     escrito_en: Optional[float] = None) -> Dict[str, Optional[bool]]:
+    """Quién ya usa la key ``kid``: panel (este proceso), scraper y rescate y passivbot (una orden creada después de su
+    arranque). ``None``: no firma con ninguna key (rescate y C3 en off), no hay nada que esperar.
+
+    Scraper y rescate cuentan solo con el ``key_id`` en su latido **y** una firma OK (``key_ok_at``) desde
+    ``escrito_en``: el ``key_id`` sale del proveedor, que relee el archivo, y el rescate lo escribe aunque todo su tick
+    haya fallado. Que ``key_ok_at`` no sea nulo no alcanza: está indexado por ``key_id`` en la memoria del proceso y, al
+    volver a una key ya usada, el de antes pasaría (revisión, hallazgo 1)."""
+    from futuresboard import conexion
     from futuresboard import rescate
     from futuresboard import scraper
 
-    out = {"panel": env.proveedor.estado().get("key_id") == kid}
-    out["scraper"] = scraper.read_latido(env.db_path).get("key_id") == kid
+    def firmo(latido: Any) -> bool:
+        return (isinstance(latido, dict) and latido.get("key_id") == kid
+                and conexion.firmo_despues(latido.get("key_ok_at"), escrito_en))
+
+    out: Dict[str, Optional[bool]] = {"panel": env.proveedor.estado().get("key_id") == kid}
+    out["scraper"] = firmo(scraper.read_latido(env.db_path))
     try:
-        servicio = (rescate.load_state(env.data_dir)[0] or {}).get("servicio") or {}
+        estado_r = rescate.load_state(env.data_dir)[0] or {}
     except Exception:  # noqa: BLE001
-        servicio = {}
-    out["rescate"] = isinstance(servicio, dict) and servicio.get("key_id") == kid
+        estado_r = {}
+    servicio = estado_r.get("servicio") if isinstance(estado_r.get("servicio"), dict) else {}
+    out["rescate"] = None if conexion.rescate_no_firma(estado_r) else firmo(servicio)
     if passivbot_desde is not None:
         orden = _ultima_orden_ms(env.db_path)
         out["passivbot"] = orden is not None and orden / 1000.0 > passivbot_desde
@@ -993,22 +1005,39 @@ def consumidores_con(env: Entorno, kid: str, passivbot_desde: Optional[float]) -
 def esperar_consumidores(env: Entorno, job: Any, payload: Dict[str, Any], segundos: Optional[int] = None,
                          tick: float = ESPERA_TICK_S) -> Dict[str, Any]:
     """Sin el lock y cancelable (``job.cancel``): espera a que los 4 tomen la key nueva. No revierte nada: si alguno no
-    llega a tiempo, termina con avisos (Marcos pudo haber borrado ya la vieja)."""
+    llega a tiempo, termina con avisos (Marcos pudo haber borrado ya la vieja).
+
+    "Ya podés borrar la vieja" sale solo con los 4 confirmados, como dice el plan. Con passivbot detenido (la toma al
+    iniciar) o con rescate y C3 en off (no firman), los demás se esperan igual y el job termina con avisos: Bot va a
+    mostrar menos de 4 (revisión, hallazgo 4)."""
     kid = payload.get("key_id")
     total = espera_segundos() if segundos is None else max(0, int(segundos))
     desde = payload.get("passivbot_desde")
+    escrito_en = payload.get("escrito_en")
     nombres = {"panel": "panel", "scraper": "scraper", "rescate": "rescate", "passivbot": "passivbot"}
     inicio = time.monotonic()
     job.step("consumidores", bot_control.PASO_EN_CURSO, "Esperando a que tomen la key nueva.", 0, max(total, 1))
     while True:
-        estado = consumidores_con(env, kid, desde)
-        faltan = [nombres[k] for k, v in estado.items() if not v]
-        n, t = len(estado) - len(faltan), len(estado)
+        estado = consumidores_con(env, kid, desde, escrito_en)
+        activos = {k: v for k, v in estado.items() if v is not None}
+        faltan = [nombres[k] for k, v in activos.items() if not v]
+        n, t = len(activos) - len(faltan), len(activos)
         if not faltan:
-            extra = "" if desde is not None else " (passivbot detenido: la usa al iniciar)"
-            job.step("consumidores", bot_control.PASO_OK, f"{n} de {t} con la key nueva{extra}: ya podés borrar la "
-                                                          "vieja en Binance.", max(total, 1), max(total, 1))
-            return payload
+            pendientes = []
+            if desde is None:
+                pendientes.append("passivbot está detenido: la toma al iniciar.")
+            if estado.get("rescate") is None:
+                pendientes.append("Rescate y C3 en off: no firman con ninguna key; el rescate toma la del archivo "
+                                  "cuando se prenda.")
+            if not pendientes:
+                job.step("consumidores", bot_control.PASO_OK, f"{n} de {t} con la key nueva: ya podés borrar la vieja "
+                                                              "en Binance.", max(total, 1), max(total, 1))
+                return payload
+            aviso = (" ".join(pendientes) + " No borres la vieja en Binance hasta ver \"4 de 4\" en Bot"
+                     + (" después de Iniciar." if desde is None else "."))
+            job.step("consumidores", bot_control.PASO_OK, f"{n} de {t} con la key nueva. {aviso}", max(total, 1),
+                     max(total, 1))
+            return {**payload, "warning": aviso}
         transcurrido = time.monotonic() - inicio
         if transcurrido >= total:
             aviso = (f"Sin confirmar a tiempo: {', '.join(faltan)}. No borres la key vieja en Binance hasta ver "

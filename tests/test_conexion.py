@@ -90,6 +90,31 @@ def test_scraper_y_rescate_con_otra_key_sin_key_id_o_sin_latido():
     assert v["con_esta_key"] == 2
 
 
+def test_sin_firma_ok_posterior_al_archivo_queda_sin_confirmar():
+    """El key_id del latido no prueba que haya firmado con esa key: hace falta una firma OK posterior al último cambio
+    del archivo. Sin ella, ámbar, y no suma al "N de 4" (revisión, hallazgo 1)."""
+    v = vista(rescate_servicio={"key_id": "aaaaaaaaaaaa", "key_ok_at": None,
+                                "key_error": "No se pudo leer la cuenta (-2015)"})
+    r = por_clave(v)["rescate"]
+    assert r["estado"] == "sin_confirmar" and "sin firma OK" in r["texto"] and v["con_esta_key"] == 3
+    v = vista(estado={"key_id": "aaaaaaaaaaaa", "archivo_mtime": AHORA - 600, "usuario": "binance_01",
+                      "testnet": True},
+              scraper_latido={"key_id": "aaaaaaaaaaaa", "key_ok_at": iso(AHORA - 900)})
+    assert por_clave(v)["scraper"]["estado"] == "sin_confirmar"
+    assert por_clave(v)["rescate"]["estado"] == "ok"  # firmó hace 12 s, después del cambio
+
+
+def test_rescate_y_c3_en_off_no_firman():
+    v = vista(rescate_servicio={"modo": "off", "key_id": "aaaaaaaaaaaa", "key_ok_at": None}, rescate_no_firma=True)
+    r = por_clave(v)["rescate"]
+    assert r["estado"] == "sin_confirmar" and "off" in r["detalle"] and v["con_esta_key"] == 3
+    assert conexion.rescate_no_firma({"servicio": {"modo": "off"}, "c3": {"latido": {"c3_mode": "off"}}})
+    assert conexion.rescate_no_firma({"servicio": {"modo": "off"}})
+    assert not conexion.rescate_no_firma({"servicio": {"modo": "off"}, "c3": {"latido": {"c3_mode": "dry_run"}}})
+    assert not conexion.rescate_no_firma({"servicio": {"modo": "dry_run"}})
+    assert not conexion.rescate_no_firma({})
+
+
 def test_permisos_en_demo_nunca_ok():
     v = vista(meta={"key_id": "aaaaaaaaaaaa", "permisos": {"problemas": []}})
     assert v["permisos"] == {"estado": "demo", "texto": "Demo no los informa"}
@@ -136,10 +161,11 @@ def test_bot_muestra_la_conexion_sin_la_key(client, app, env, docker, tmp_path):
     datos = pathlib.Path(app.config["DATABASE"]).parent
     (datos / scraper.LATIDO_FILE).write_text(json.dumps({"at": time.time(), "intervalo": 60,
                                                          "key_id": credenciales.key_id(k),
-                                                         "key_ok_at": iso(time.time() - 5)}))
+                                                         "key_ok_at": iso(time.time())}))
     estado = rescate.default_state()
+    # Los dos firmaron OK después de escribir el archivo (sin eso quedan "sin confirmar").
     estado["servicio"] = {"modo": "dry_run", "heartbeat": dt.datetime.now(dt.timezone.utc).isoformat(),
-                          "intervalo": 15, "key_id": credenciales.key_id(k), "key_ok_at": None}
+                          "intervalo": 15, "key_id": credenciales.key_id(k), "key_ok_at": iso(time.time())}
     rescate.save_state(datos, estado)
     html = client.get("/bot").get_data(as_text=True)
     assert "Conexión con Binance" in html and 'id="bbConexionBinance"' in html and "hidden aria-hidden" not in html

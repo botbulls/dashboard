@@ -610,33 +610,150 @@ def test_espera_sin_el_lock_y_un_apagar_la_corta(client, cambio, docker, binance
     assert final["estado"] == "ok" and cambio.archivo()["binance_01"]["key"] == k
 
 
+def _latidos(cambio, kid, ok_at, modo_rescate="dry_run", c3_mode=None):
+    """Lo que publican scraper y rescate: ``key_id`` y su última firma OK (``key_ok_at``, ISO truncado a segundos)."""
+    datos = cambio.data_dir
+    (pathlib.Path(cambio.app.config["DATABASE"]).parent / scraper.LATIDO_FILE).write_text(
+        json.dumps({"at": time.time(), "intervalo": 60, "key_id": kid, "key_ok_at": ok_at}))
+    estado = rescate.default_state()
+    estado["servicio"] = {"modo": modo_rescate, "heartbeat": dt.datetime.now(dt.timezone.utc).isoformat(),
+                          "key_id": kid, "key_ok_at": ok_at}
+    if c3_mode is not None:
+        estado["c3"] = {"latido": {"ts": None, "c3_mode": c3_mode, "error": None, "suspendido": None}}
+    rescate.save_state(datos, estado)
+
+
+def _cuando_se_escribe(cambio, k, accion):
+    """Corre ``accion`` apenas el job escribió la key nueva (los consumidores la toman después, como en la vida)."""
+    def correr():
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                if cambio.archivo()["binance_01"]["key"] == k:
+                    break
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.02)
+        time.sleep(0.05)
+        accion()
+
+    hilo = threading.Thread(target=correr)
+    hilo.start()
+    return hilo
+
+
+def _orden_nueva(cambio):
+    with sqlite3.connect(str(cambio.app.config["DATABASE"])) as conn:
+        conn.execute("INSERT INTO orders (origQty, price, side, positionSide, status, symbol, time, type) "
+                     "VALUES (1, 1, 'BUY', 'LONG', 'NEW', 'BTCUSDT', ?, 'LIMIT')", (int((time.time() + 5) * 1000),))
+
+
 def test_espera_termina_bien_con_los_cuatro(client, cambio, docker, monkeypatch):  # noqa: F811
     monkeypatch.setenv(cambio_key.ENV_ESPERA, "20")
     monkeypatch.setattr(cambio_key, "ESPERA_TICK_S", 0.05)
     k, s = nueva(cambio)
     kid = credenciales.key_id(k)
     pid = validar(client, k, s).get_json()["pendiente_id"]
-    datos = cambio.data_dir
 
-    def consumidores():  # scraper, rescate y passivbot toman la key nueva al rato
-        time.sleep(0.3)
-        (pathlib.Path(cambio.app.config["DATABASE"]).parent / scraper.LATIDO_FILE).write_text(
-            json.dumps({"at": time.time(), "intervalo": 60, "key_id": kid, "key_ok_at": None}))
-        estado = rescate.default_state()
-        estado["servicio"] = {"modo": "dry_run", "heartbeat": dt.datetime.now(dt.timezone.utc).isoformat(),
-                              "key_id": kid}
-        rescate.save_state(datos, estado)
-        with sqlite3.connect(str(cambio.app.config["DATABASE"])) as conn:
-            conn.execute("INSERT INTO orders (origQty, price, side, positionSide, status, symbol, time, type) "
-                         "VALUES (1, 1, 'BUY', 'LONG', 'NEW', 'BTCUSDT', ?, 'LIMIT')", (int((time.time() + 5) * 1000),))
+    def consumidores():  # scraper y rescate firman con la key nueva y passivbot crea una orden
+        _latidos(cambio, kid, iso(time.time()))
+        _orden_nueva(cambio)
 
-    hilo = threading.Thread(target=consumidores)
-    hilo.start()
+    hilo = _cuando_se_escribe(cambio, k, consumidores)
     res = confirmar(client, pid)
     hilo.join()
     paso = next(p for p in res.job["pasos"] if p["clave"] == "consumidores")
     assert paso["estado"] == "ok" and "4 de 4 con la key nueva" in paso["detalle"]
+    assert "ya podés borrar la vieja" in paso["detalle"]
     assert not res.job["resultado"].get("warning")
+
+
+def test_key_id_en_el_latido_sin_firma_ok_con_la_nueva_no_cuenta(client, cambio, docker, monkeypatch):  # noqa: F811
+    """El rescate escribe el key_id nuevo en el latido aunque todo su tick haya fallado (-2015), y el scraper publica
+    el key_id que relee al escribir el latido aunque la vuelta haya firmado con la vieja. Sin una firma OK posterior a
+    la escritura no cuentan (revisión, hallazgo 1)."""
+    monkeypatch.setenv(cambio_key.ENV_ESPERA, "1")
+    monkeypatch.setattr(cambio_key, "ESPERA_TICK_S", 0.05)
+    k, s = nueva(cambio)
+    kid = credenciales.key_id(k)
+    pid = validar(client, k, s).get_json()["pendiente_id"]
+
+    def consumidores():
+        _latidos(cambio, kid, None)
+        _orden_nueva(cambio)
+
+    hilo = _cuando_se_escribe(cambio, k, consumidores)
+    res = confirmar(client, pid)
+    hilo.join()
+    paso = next(p for p in res.job["pasos"] if p["clave"] == "consumidores")
+    assert paso["estado"] == "error" and "Sin confirmar a tiempo: scraper, rescate" in paso["detalle"]
+    assert "ya podés borrar" not in paso["detalle"]
+    assert "Sin confirmar a tiempo" in res.job["resultado"]["warning"]
+
+
+def test_firma_ok_vieja_de_la_misma_key_no_cuenta(cambio):
+    """Volver a una key ya usada: el key_ok_at de antes (en memoria del proceso, indexado por key_id) no prueba que
+    firme ahora."""
+    from types import SimpleNamespace
+
+    k, _s = par()
+    kid = credenciales.key_id(k)
+    escrito_en = time.time()
+    _latidos(cambio, kid, iso(escrito_en - 3600))
+    env_ = SimpleNamespace(proveedor=SimpleNamespace(estado=lambda: {"key_id": kid}), data_dir=cambio.data_dir,
+                           db_path=str(cambio.app.config["DATABASE"]))
+    out = cambio_key.consumidores_con(env_, kid, None, escrito_en)
+    assert out == {"panel": True, "scraper": False, "rescate": False}
+    _latidos(cambio, kid, iso(escrito_en))
+    assert cambio_key.consumidores_con(env_, kid, None, escrito_en) == {"panel": True, "scraper": True,
+                                                                         "rescate": True}
+
+
+def test_detenido_no_dice_que_ya_se_puede_borrar_la_vieja(client, cambio, docker, monkeypatch):  # noqa: F811
+    """Con passivbot detenido, el plan dice "borrala con 4 de 4" y Bot muestra 3 de 4: el job no puede cerrar con "ya
+    podés borrar la vieja" (revisión, hallazgo 4)."""
+    monkeypatch.setenv(cambio_key.ENV_ESPERA, "20")
+    monkeypatch.setattr(cambio_key, "ESPERA_TICK_S", 0.05)
+    docker.running = False
+    k, s = nueva(cambio)
+    kid = credenciales.key_id(k)
+    pid = validar(client, k, s).get_json()["pendiente_id"]
+    hilo = _cuando_se_escribe(cambio, k, lambda: _latidos(cambio, kid, iso(time.time())))
+    res = confirmar(client, pid)
+    hilo.join()
+    paso = next(p for p in res.job["pasos"] if p["clave"] == "consumidores")
+    assert paso["estado"] == "ok" and paso["detalle"].startswith("3 de 3 con la key nueva")
+    assert "ya podés borrar" not in paso["detalle"] and "passivbot está detenido" in paso["detalle"]
+    aviso = res.job["resultado"]["warning"]
+    assert "4 de 4" in aviso and "Iniciar" in aviso and "No borres la vieja" in aviso
+
+
+def test_rescate_y_c3_en_off_no_firman_y_no_se_esperan(client, cambio, docker, monkeypatch):  # noqa: F811
+    """Con rescate y C3 en off el servicio no llama a Binance: no se espera su firma hasta el timeout, queda
+    "omitido" y el job no dice "ya podés borrar"."""
+    monkeypatch.setenv(cambio_key.ENV_ESPERA, "20")
+    monkeypatch.setattr(cambio_key, "ESPERA_TICK_S", 0.05)
+    k, s = nueva(cambio)
+    kid = credenciales.key_id(k)
+    pid = validar(client, k, s).get_json()["pendiente_id"]
+
+    def consumidores():
+        _latidos(cambio, kid, None, modo_rescate="off", c3_mode="off")
+        (pathlib.Path(cambio.app.config["DATABASE"]).parent / scraper.LATIDO_FILE).write_text(
+            json.dumps({"at": time.time(), "intervalo": 60, "key_id": kid, "key_ok_at": iso(time.time())}))
+        _orden_nueva(cambio)
+
+    hilo = _cuando_se_escribe(cambio, k, consumidores)
+    inicio = time.monotonic()
+    res = confirmar(client, pid)
+    hilo.join()
+    assert time.monotonic() - inicio < 15  # no esperó el timeout por el rescate
+    paso = next(p for p in res.job["pasos"] if p["clave"] == "consumidores")
+    assert paso["estado"] == "ok" and paso["detalle"].startswith("3 de 3 con la key nueva")
+    assert "ya podés borrar" not in paso["detalle"] and "off" in paso["detalle"]
+    assert "4 de 4" in res.job["resultado"]["warning"]
+    html = client.get("/bot").get_data(as_text=True)
+    assert 'data-consumidor="rescate" data-estado="sin_confirmar"' in html
 
 
 def test_volver_a_la_key_anterior(client, cambio):  # noqa: F811

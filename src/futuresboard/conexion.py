@@ -6,7 +6,11 @@ Binance** (Bot no consulta Binance al armarse) y nunca devuelve key, secret ni u
 
 "Quién la usa":
 
-* **Panel, scraper y rescate**: el ``key_id`` de su latido contra el de la key vigente (la del archivo).
+* **Panel, scraper y rescate**: el ``key_id`` de su latido contra el de la key vigente (la del archivo). Scraper y
+  rescate cuentan como "con esta key" solo con una firma OK (``key_ok_at``) posterior al último cambio del archivo: el
+  ``key_id`` del latido sale del proveedor, que relee el archivo, y no prueba que hayan firmado con esa key (el rescate
+  lo escribe aunque todo su tick haya fallado). Sin esa firma, "sin confirmar" (ámbar). Con rescate y C3 en off el
+  servicio no firma nada: "sin confirmar", con el motivo.
 * **passivbot**: lee la key al arrancar. Cuenta como "con esta key" solo si arrancó **después** del último cambio del
   archivo y ya creó una orden **después** de arrancar (sin permiso de operar el contenedor sigue ``running`` y no
   opera: revisión A5). Sin orden nueva queda "sin confirmar" (ámbar), nunca en rojo.
@@ -24,6 +28,10 @@ ESTADO_ATRAS = "atras"
 ESTADO_SIN_CONFIRMAR = "sin_confirmar"
 ESTADO_DETENIDO = "detenido"
 ESTADO_SIN_DATOS = "sin_datos"
+# key_ok_at viaja como ISO truncado a segundos y el mtime del archivo es un float: margen para no dar "sin confirmar"
+# a una firma del mismo segundo.
+SKEW_S = 2.0
+MODO_OFF = "off"
 
 
 def _hace(segundos: float) -> str:
@@ -81,8 +89,30 @@ def _firma(ok_at: Any, ahora: float) -> str:
     return f"firma OK hace {_hace(ahora - t)}" if t is not None else "con esta key, sin firma OK todavía"
 
 
+def rescate_no_firma(estado_rescate: Any) -> bool:
+    """Rescate y C3 en off: el servicio no llama a Binance (en off no evalúa el tope y C3 no lee futuros), así que no
+    hay firma que esperar. Sin latido de C3 cuenta como off (C3 no configurado)."""
+    if not isinstance(estado_rescate, dict):
+        return False
+    servicio = estado_rescate.get("servicio") if isinstance(estado_rescate.get("servicio"), dict) else {}
+    if servicio.get("modo") != MODO_OFF:
+        return False
+    c3 = estado_rescate.get("c3") if isinstance(estado_rescate.get("c3"), dict) else {}
+    latido = c3.get("latido") if isinstance(c3.get("latido"), dict) else {}
+    return latido.get("c3_mode") in (None, MODO_OFF)
+
+
+def firmo_despues(ok_at: Any, desde: Optional[float]) -> bool:
+    """Hubo una firma OK (``key_ok_at``) en ``desde`` o después (con el margen del ISO truncado)."""
+    t = _ts(ok_at)
+    if t is None:
+        return False
+    return desde is None or t + SKEW_S >= desde
+
+
 def _proceso(clave: str, nombre: str, detalle: str, kid: Optional[str], ref: Optional[str], ok_at: Any,
-             error: Optional[str], vivo: bool, ahora: float) -> Dict[str, Any]:
+             error: Optional[str], vivo: bool, ahora: float, archivo_mtime: Optional[float] = None,
+             no_firma: bool = False) -> Dict[str, Any]:
     if not vivo:
         return _consumidor(clave, nombre, f"{detalle} · sin latido reciente", ESTADO_SIN_DATOS, "sin latido")
     if not kid:
@@ -91,8 +121,14 @@ def _proceso(clave: str, nombre: str, detalle: str, kid: Optional[str], ref: Opt
     if ref and kid != ref:
         return _consumidor(clave, nombre, f"{detalle} · firma con otra key; la toma en su próxima vuelta",
                            ESTADO_ATRAS, "con otra key")
+    if no_firma:
+        return _consumidor(clave, nombre, f"{detalle} · en off: no firma con ninguna key; toma la del archivo cuando "
+                           "se prenda", ESTADO_SIN_CONFIRMAR, "en off, sin firmar")
     if error:
         detalle = f"{detalle} · {error}"
+    if archivo_mtime is not None and not firmo_despues(ok_at, archivo_mtime):
+        # El key_id sale del proveedor (relee el archivo): sin una firma OK después del cambio no prueba nada.
+        return _consumidor(clave, nombre, detalle, ESTADO_SIN_CONFIRMAR, "con esta key, sin firma OK todavía")
     return _consumidor(clave, nombre, detalle, ESTADO_OK, _firma(ok_at, ahora))
 
 
@@ -125,7 +161,8 @@ def vista(estado: Dict[str, Any], *, modo_secretos: bool, testnet: bool, meta: D
           scraper_latido: Dict[str, Any], scraper_vivo: bool, scraper_intervalo: Optional[int],
           rescate_servicio: Dict[str, Any], rescate_vivo: bool,
           container: Optional[Dict[str, Any]], ultima_orden_ms: Optional[int], ahora: float,
-          key_enmascarada: Optional[str], web: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+          key_enmascarada: Optional[str], web: Optional[Dict[str, Any]] = None,
+          rescate_no_firma: bool = False) -> Dict[str, Any]:
     """Lo que pinta Bot y devuelve ``GET /api/bot/credenciales``. Sin key, secret ni uid."""
     ref = estado.get("key_id")
     meta_vigente = bool(meta) and bool(ref) and meta.get("key_id") == ref
@@ -166,10 +203,11 @@ def vista(estado: Dict[str, Any], *, modo_secretos: bool, testnet: bool, meta: D
         _proceso("scraper", "Scraper",
                  f"posiciones, órdenes e ingresos cada {scraper_intervalo or 60} s",
                  scraper_latido.get("key_id"), ref, scraper_latido.get("key_ok_at"), scraper_latido.get("key_error"),
-                 scraper_vivo, ahora),
+                 scraper_vivo, ahora, archivo_mtime if modo_secretos else None),
         _proceso("rescate", "Rescate", "lectura de la cuenta, tope de pérdida y C3",
                  rescate_servicio.get("key_id"), ref, rescate_servicio.get("key_ok_at"),
-                 rescate_servicio.get("key_error"), rescate_vivo, ahora),
+                 rescate_servicio.get("key_error"), rescate_vivo, ahora, archivo_mtime if modo_secretos else None,
+                 no_firma=rescate_no_firma),
     ]
     con_esta = sum(1 for c in consumidores if c["estado"] == ESTADO_OK)
     avisos = []

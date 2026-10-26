@@ -1842,7 +1842,7 @@ def conexion_binance(st: dict) -> dict:
         estado_r, _err = rescate.load_state(data_dir)
         servicio = estado_r.get("servicio") if isinstance(estado_r.get("servicio"), dict) else {}
     except Exception:  # noqa: BLE001
-        servicio = {}
+        estado_r, servicio = {}, {}
     hb = servicio.get("heartbeat")
     try:
         edad_r = ahora - datetime.fromisoformat(hb).timestamp() if hb else None
@@ -1854,7 +1854,8 @@ def conexion_binance(st: dict) -> dict:
         meta=credenciales.leer_meta(data_dir), scraper_latido=latido_scr, scraper_vivo=scr_vivo,
         scraper_intervalo=intervalo, rescate_servicio=servicio, rescate_vivo=res_vivo,
         container=st.get("container"), ultima_orden_ms=_ultima_orden_ms(), ahora=ahora,
-        key_enmascarada=prov.enmascarada(), web=_cambio_web(prov))
+        key_enmascarada=prov.enmascarada(), web=_cambio_web(prov),
+        rescate_no_firma=conexion.rescate_no_firma(estado_r))
 
 
 # --------------------------------------------------------------------------------------
