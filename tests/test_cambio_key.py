@@ -686,6 +686,17 @@ def test_solo_cambian_key_y_secret():
 # ---------------------------------------------------------------- títulos e interrupción
 
 
+def test_historial_dice_validada_y_telegram_avisa_cada_intento(client, cambio, monkeypatch):  # noqa: F811
+    avisos = []
+    monkeypatch.setattr(telegram_notify, "notify_bot_action", lambda *a, **kw: avisos.append((a[0], a[2])))
+    validar(client, "corta", "x")  # no llega a Binance, pero avisa
+    validar(client, *nueva(cambio))
+    assert avisos == [("credenciales_validar", "error"), ("credenciales_validar", "ok")]
+    ultima = acciones.historial(bot_control.Store(cambio.data_dir).audit_path)["acciones"][0]
+    assert ultima["estado"] == "validada" and ultima["estado_texto"] == "Validada"
+    assert ultima["titulo"].startswith("API key nueva: validación (")
+
+
 def test_titulos_y_telegram_con_la_key_enmascarada():
     p = {"key": "Lm3p…9zQe", "cuenta": "misma", "entorno": "demo"}
     assert acciones.titulo("credenciales", p) == "Cambiar la API key (Lm3p…9zQe)"

@@ -2049,6 +2049,8 @@ def credenciales_validar():
         cambio_key.validar_formato(api_key, api_secret)
     except ValueError as exc:
         _audit_cambio("credenciales_validar", {"key": None}, "rechazado", str(exc))
+        # Telegram en cada intento (§ 10.6), también los que no llegan a Binance. Sin lo que se pegó.
+        telegram_notify.notify_bot_action("credenciales_validar", {}, "error", {"error": str(exc)}, usuario)
         return _json_response({"ok": False, "error": str(exc),
                                "chequeos": [{"clave": "formato", "estado": cambio_key.BLOQUEA, "texto": str(exc)}]}, 400)
     # Apenas llegan y con formato válido: desde acá cualquier log que los nombre sale tapado.
@@ -2061,6 +2063,8 @@ def credenciales_validar():
         texto = (f"Hasta {cambio_key.VALIDACIONES_MAX} validaciones cada 15 minutos: probá de nuevo en "
                  f"{max(1, espera // 60)} min.")
         _audit_cambio("credenciales_validar", {"key": enmascarada}, "rechazado", texto)
+        telegram_notify.notify_bot_action("credenciales_validar", {"key": enmascarada}, "error", {"error": texto},
+                                          usuario)
         return _json_response({"ok": False, "error": texto}, 429)
     env = _cambio_entorno()
     try:

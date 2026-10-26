@@ -38,7 +38,7 @@
         }
         tr.appendChild(que);
         const res = celda('bb-col-resultado');
-        const tipo = a.estado === 'aplicado' ? 'ok' : (a.estado === 'plan_mostrado' || a.estado === 'sin_confirmar' ? 'pregunta' : 'rechazado');
+        const tipo = (a.estado === 'aplicado' || a.estado === 'validada') ? 'ok' : (a.estado === 'plan_mostrado' || a.estado === 'sin_confirmar' ? 'pregunta' : 'rechazado');
         const span = document.createElement('span');
         span.className = `bb-resultado bb-resultado--${tipo}`;
         const i = document.createElement('i');

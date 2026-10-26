@@ -27,6 +27,7 @@ _CLAVES_CONFIRMACION = ("confirmar", "plan_hash", "confirmar_twe_alta", "confirm
 
 ESTADOS = {
     "aplicado": "Aplicado",
+    "validada": "Validada",
     "rechazado": "Rechazado",
     "error": "Falló",
     "plan_mostrado": "Plan mostrado",
@@ -157,6 +158,8 @@ def _vistas(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for i, e in enumerate(entries):
         resultado = str(e.get("result") or "")
         estado = _POR_RESULTADO.get(resultado, "rechazado")
+        if e.get("action") == "credenciales_validar" and estado == "aplicado":
+            estado = "validada"  # la key nueva pasó los chequeos; el cambio es otra línea (credenciales)
         detalle = _detalle(e)
         if resultado == "requiere_confirmacion":
             estado, detalle = "sin_confirmar", "Pidió confirmación; no se confirmó."
