@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import pathlib
+import re
 import secrets
 from datetime import date
 from datetime import datetime
@@ -25,9 +26,13 @@ from flask import current_app
 from typing_extensions import TypedDict
 
 from futuresboard import acciones
+from futuresboard import binance_publico
 from futuresboard import bot_control
 from futuresboard import c3
+from futuresboard import chequeos_forager
+from futuresboard import estrategia
 from futuresboard import jobs
+from futuresboard import manifiesto
 from futuresboard import perfiles
 from futuresboard import rescate
 from futuresboard import resumen_rescate
@@ -1767,6 +1772,24 @@ def _duracion(inicio, fin) -> str:
     return f"{s // 60} min {s % 60} s" if s >= 60 else f"{s} s"
 
 
+def _chequeos_ciclo(aprobados) -> dict | None:
+    """Último estado de los chequeos de forager por ciclo (``chequeos_forager``), solo de los aprobados de ahora. Lee
+    el archivo: Bot nunca llama a Binance al armarse."""
+    estado = chequeos_forager.leer_estado(_bot_store().data_dir)
+    if not estado:
+        return None
+    pares = estado.get("pares") or {}
+    aprobados = list(aprobados or [])
+    filas = [{"symbol": s, **pares[s]} for s in aprobados if isinstance(pares.get(s), dict)]
+    try:
+        edad = (datetime.now(timezone.utc) - datetime.fromisoformat(str(estado.get("ts")))).total_seconds()
+    except ValueError:
+        edad = None
+    return {"filas": filas, "hace": _hace(edad) if edad is not None else "", "error": estado.get("error"),
+            "intervalo_min": int((estado.get("intervalo_s") or 900) // 60), "endpoint": estado.get("endpoint"),
+            "sin_chequear": [s for s in aprobados if s not in pares]}
+
+
 @app.route("/bot", methods=["GET"])
 def bot_page():
     st, _http = bot_status_payload(docker_timeout=BOT_STATUS_RAPIDO_S)
@@ -1781,7 +1804,8 @@ def bot_page():
     return render_template("bot.html", coin_list=get_coins(), custom=current_app.config["CUSTOM"], bot_status=st,
                            desde=_fecha_utc(desde),
                            hace=_hace((datetime.now().astimezone() - desde).total_seconds()) if desde else "",
-                           latidos=latidos(), ultima=ultima, historial=historial)
+                           latidos=latidos(), ultima=ultima, historial=historial,
+                           chequeos_ciclo=_chequeos_ciclo((st.get("estrategia") or {}).get("pares_long")))
 
 
 @app.route("/api/bot/acciones", methods=["GET"])
@@ -1796,6 +1820,140 @@ def bot_acciones():
     except ValueError as exc:
         return _json_response({"ok": False, "error": str(exc)}, 400)
     return _json_response(data)
+
+
+# --------------------------------------------------------------------------------------
+# Estrategia: vista con chequeos por par (spec bot-estrategia § 3.2 y § 4)
+# --------------------------------------------------------------------------------------
+
+_Q_CANDIDATOS = re.compile(r"^[A-Z0-9]{1,20}$")
+MAX_CANDIDATOS = 10
+
+
+def _balance_estrategia() -> dict:
+    """Balance para dimensionar = max(0, billetera − préstamo del rescate) (``passivbot.py:404-410``). La billetera
+    sale de la base del scraper; el préstamo, del estado del rescate. Nunca lanza."""
+    try:
+        fila = db.query("SELECT totalWalletBalance FROM account WHERE AID = 1", one=True)
+        billetera = float(fila[0]) if fila is not None and fila[0] is not None else None
+    except Exception:  # noqa: BLE001
+        billetera = None
+    try:
+        prestamo = float(rescate.dec(rescate.panel_status(_bot_store().data_dir).get("prestamo") or "0"))
+    except Exception:  # noqa: BLE001
+        prestamo = 0.0
+    dim = max(0.0, billetera - prestamo) if billetera is not None else None
+    return {"billetera": billetera, "prestamo": prestamo, "para_dimensionar": dim}
+
+
+def _contexto_estrategia(cfg: dict, path, balance: float | None, manif: dict | None = None) -> estrategia.Contexto:
+    return estrategia.Contexto.armar(cfg, path, testnet=bool(current_app.config.get("BINANCE_TESTNET")),
+                                     base_operativa=current_app.config.get("API_BASE_URL"), balance=balance,
+                                     manif=manif)
+
+
+def _leer_forager() -> tuple:
+    settings = bot_control.Settings()
+    path = settings.require_config()
+    return settings, path, bot_control.read_forager_config(path)
+
+
+def _ahora_por_par(vigente: dict) -> dict:
+    """Posición (unidades y % del balance) y órdenes abiertas por par, de la base del scraper (``pares_ahora``)."""
+    pa = pares_ahora(vigente, exposicion_scraper())
+    return {p["symbol"]: {k: p[k] for k in ("posicion", "nocional", "pct_balance", "compras", "ventas", "estado")}
+            for p in pa["pares"]}
+
+
+@app.route("/api/bot/estrategia", methods=["GET"])
+def bot_estrategia():
+    """Estrategia vigente con derivados, pares con sus chequeos, lugares, avanzado y ``base_hash`` (spec § 4).
+
+    Consulta la API pública de Binance (caché de ``binance_publico``, con tope de tiempo): por eso no la llama la página
+    al armarse, sino el JS de Estrategia."""
+    try:
+        _settings, path, cfg = _leer_forager()
+    except bot_control.BotControlError as exc:
+        return _json_response({"ok": False, "error": str(exc)}, exc.status_code)
+    balance = _balance_estrategia()
+    manif = manifiesto.leer(path)
+    ctx = _contexto_estrategia(cfg, path, balance["para_dimensionar"], manif)
+    vigente = bot_control.resumen_estrategia(cfg)
+    rescate_cfg, _err = rescate.load_config(_bot_store().data_dir)
+    vigente["perfil"] = perfiles.detectar(cfg, rescate_cfg)
+    vigente["long_mode"], vigente["short_mode"] = cfg.get("long_mode"), cfg.get("short_mode")
+    expo = estrategia.leer_exposicion(current_app.config["DATABASE"])
+    ahora = _ahora_por_par(vigente)
+    pares = estrategia.chequear_varios(vigente["pares_long"], ctx, lw=vigente["lw"])
+    for p in pares:
+        p["ahora"] = ahora.get(p["symbol"]) or {"posicion": 0.0, "nocional": 0.0, "pct_balance": None, "compras": 0,
+                                                "ventas": 0, "estado": "libre"}
+    fuera = [{"symbol": s, **a} for s, a in ahora.items() if s not in vigente["pares_long"] and a["estado"] != "libre"]
+    nocional = sum(a["nocional"] for a in ahora.values())
+    lug = estrategia.lugares(vigente["pares_long"], expo, cfg.get("symbols_to_ignore"))
+    return _json_response({
+        "ok": True,
+        "vigente": vigente,
+        "base_hash": bot_control.estrategia_hash(cfg),
+        "endpoint": ctx.operativo.nombre,
+        "manifiesto": {k: manif.get(k) for k in ("estado", "usable", "motivo", "generado", "revision")},
+        "balance": balance,
+        "leverage": cfg.get("leverage"),
+        "max_min_cost": cfg.get("max_min_cost"),
+        "derivados": estrategia.derivados(cfg.get("twe_long"), vigente["n_longs"], balance["para_dimensionar"],
+                                          cfg.get("leverage"), nocional),
+        "lugares": {**lug, "error": expo.get("error")},
+        "pares": pares,
+        "fuera_de_lista": fuera,
+        "avanzado": estrategia.avanzado(cfg, manif),
+        "max_pares": estrategia.MAX_PARES,
+        "pares_medidos": list(estrategia.PARES_MEDIDOS),
+        "twe": {"min": str(bot_control.TWE_MANUAL_MIN), "max": str(bot_control.TWE_MANUAL_MAX),
+                "paso": str(bot_control.TWE_MANUAL_PASO), "advertencia": str(bot_control.TWE_ADVERTENCIA)},
+    })
+
+
+@app.route("/api/bot/estrategia/candidatos", methods=["GET"])
+def bot_estrategia_candidatos():
+    """Hasta 10 pares del endpoint que opera (y del manifiesto) que contienen ``q``, con sus chequeos (spec § 4).
+
+    ``lw`` (opcional): la del borrador, para la 1.ª compra. Si Binance no responde: 200 con ``error`` y sin resultados."""
+    q = (request.args.get("q") or "").strip().upper()
+    if not _Q_CANDIDATOS.match(q):
+        return _json_response({"ok": False, "error": "Buscá con letras y números (ej.: SOL)."}, 400)
+    lw = None
+    if request.args.get("lw"):
+        try:
+            lw = float(request.args["lw"])
+            if not 0 < lw <= 16:
+                raise ValueError
+        except ValueError:
+            return _json_response({"ok": False, "error": "lw inválido."}, 400)
+    try:
+        _settings, path, cfg = _leer_forager()
+    except bot_control.BotControlError as exc:
+        return _json_response({"ok": False, "error": str(exc)}, exc.status_code)
+    manif = manifiesto.leer(path)
+    ctx = _contexto_estrategia(cfg, path, _balance_estrategia()["para_dimensionar"], manif)
+    try:
+        universo = {s for s in ctx.operativo.simbolos() if s.endswith("USDT")}
+    except binance_publico.SinRespuesta as exc:
+        return _json_response({"ok": True, "q": q, "resultados": [],
+                               "error": f"No se pudo consultar Binance: {exc}. Reintentá en un rato."})
+    universo |= set(((manif.get("datos") or {}).get("symbols") or {}) if manif.get("usable") else ())
+
+    def orden(s):
+        return (0 if s in (q, f"{q}USDT") else (1 if s.startswith(q) else 2), s)
+
+    candidatos = sorted((s for s in universo if q in s), key=orden)[:MAX_CANDIDATOS]
+    if lw is None:
+        lw = bot_control.resumen_estrategia(cfg)["lw"]
+    aprobados = bot_control.resumen_estrategia(cfg)["pares_long"]
+    resultados = estrategia.chequear_varios(candidatos, ctx, lw=lw)
+    for r in resultados:
+        r["ya_esta"] = r["symbol"] in aprobados
+    return _json_response({"ok": True, "q": q, "lw": lw, "endpoint": ctx.operativo.nombre, "resultados": resultados,
+                           "manifiesto": {k: manif.get(k) for k in ("estado", "usable", "motivo")}, "error": None})
 
 
 @app.route("/estrategia", methods=["GET"])

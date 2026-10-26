@@ -1,0 +1,77 @@
+[
+ {
+  "price": "101.1800",
+  "symbol": "SOLUSDT",
+  "time": 1792977718863
+ },
+ {
+  "price": "7.8030000",
+  "symbol": "INJUSDT",
+  "time": 1792977719605
+ },
+ {
+  "price": "0.0049000",
+  "symbol": "TUSDT",
+  "time": 1792977720041
+ },
+ {
+  "price": "0.0669400",
+  "symbol": "OMUSDT",
+  "time": 1792977719260
+ },
+ {
+  "price": "0.916300",
+  "symbol": "SUIUSDT",
+  "time": 1792977719329
+ },
+ {
+  "price": "1.2927",
+  "symbol": "XRPUSDT",
+  "time": 1792977720019
+ },
+ {
+  "price": "741.060",
+  "symbol": "BNBUSDT",
+  "time": 1792977719549
+ },
+ {
+  "price": "0.9350",
+  "symbol": "AXSUSDT",
+  "time": 1792977719433
+ },
+ {
+  "price": "1.634",
+  "symbol": "ATOMUSDT",
+  "time": 1792977719681
+ },
+ {
+  "price": "4003.55",
+  "symbol": "XAUUSDT",
+  "time": 1792977717994
+ },
+ {
+  "price": "79892.3",
+  "symbol": "BTCUSDC",
+  "time": 1792977718432
+ },
+ {
+  "price": "0.0471000",
+  "symbol": "SUSDT",
+  "time": 1792977717630
+ },
+ {
+  "price": "0.0044100",
+  "symbol": "SOLVUSDT",
+  "time": 1792977718523
+ },
+ {
+  "price": "2322.22",
+  "symbol": "ETHUSDT",
+  "time": 1792977713119
+ },
+ {
+  "price": "79978.70",
+  "symbol": "BTCUSDT",
+  "time": 1792977720181
+ }
+]

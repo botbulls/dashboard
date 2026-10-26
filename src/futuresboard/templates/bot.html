@@ -51,9 +51,32 @@
                     <li><span>Sin pares aprobados ni posiciones.</span><span></span></li>
                 {%- endfor %}
                 </ul>
-                {#- Chequeos de forager por ciclo sobre los aprobados (mínimo contra max_min_cost, edad, velas, TRADING):
-                    necesitan exchangeInfo y velas cacheados (spec § 2.3 y § 5.2). Van acá, con aviso por Telegram. -#}
-                <ul class="bb-chequeos bb-chequeos--lista" data-bot-chequeos-forager hidden aria-hidden="true"></ul>
+                {#- Chequeos de forager por ciclo sobre los aprobados (mínimo contra max_min_cost, edad, velas, TRADING,
+                    lista negra): los corre un hilo del panel cada ciclo de forager (chequeos_forager.py) y avisa por
+                    Telegram cuando un par cambia de estado. Acá solo se lee su último resultado. -#}
+                {%- set cq = chequeos_ciclo %}
+                <h4 class="bb-tarjeta__etiqueta mb-0" id="bbTituloChequeosForager">Chequeos de forager{% if cq and cq.hace %} <small class="text-muted">· hace {{ cq.hace }}, cada {{ cq.intervalo_min }} min{% if cq.endpoint %} en Binance {{ cq.endpoint }}{% endif %}</small>{% endif %}</h4>
+                <ul class="bb-chequeos bb-chequeos--lista" data-bot-chequeos-forager aria-labelledby="bbTituloChequeosForager">
+                {%- if not cq %}
+                    <li class="bb-chequeo bb-chequeo--info"><i class="fas fa-info-circle" aria-hidden="true"></i><span>Todavía no hay chequeos de forager: el panel los corre en cada ciclo (15 min) desde que arranca.</span></li>
+                {%- elif cq.error %}
+                    <li class="bb-chequeo bb-chequeo--aviso"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i><span><span class="bb-sr">Aviso: </span>No se pudieron correr: {{ cq.error }}</span></li>
+                {%- else %}
+                {%- for f in cq.filas %}
+                    {%- set minimo = (f.chequeos or [])|selectattr('clave', 'equalto', 'minimo')|first %}
+                    {%- if f.estado == 'descarta' %}
+                    <li class="bb-chequeo bb-chequeo--bloquea"><i class="fas fa-times-circle" aria-hidden="true"></i><span><span class="bb-sr">Problema: </span><strong>{{ f.symbol }}</strong>: forager lo descartaría · {{ (f.motivos or [])|join(' · ') }}</span></li>
+                    {%- elif f.estado == 'sin_datos' %}
+                    <li class="bb-chequeo"><i class="fas fa-question-circle" aria-hidden="true"></i><span><strong>{{ f.symbol }}</strong>: sin verificar en este ciclo (Binance no respondió){% if f.conocido == 'descarta' %}; en el anterior forager lo descartaba{% endif %}</span></li>
+                    {%- else %}
+                    <li class="bb-chequeo bb-chequeo--ok"><i class="fas fa-check-circle" aria-hidden="true"></i><span><span class="bb-sr">Bien: </span><strong>{{ f.symbol }}</strong>: pasa los filtros de forager{% if minimo %} · {{ minimo.texto }}{% endif %}</span></li>
+                    {%- endif %}
+                {%- endfor %}
+                {%- for s in cq.sin_chequear %}
+                    <li class="bb-chequeo"><i class="fas fa-clock" aria-hidden="true"></i><span><strong>{{ s }}</strong>: se chequea en el próximo ciclo</span></li>
+                {%- endfor %}
+                {%- endif %}
+                </ul>
             </div>
             <div class="card-footer">Posiciones y órdenes abiertas según el scraper. Para forager, una orden abierta ocupa un lugar igual que una posición.</div>
         </div>
