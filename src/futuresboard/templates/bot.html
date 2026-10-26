@@ -176,7 +176,7 @@
             <h3>Reiniciar con la estrategia guardada</h3>
             <p>Reinicia passivbot sin cambiar nada (TWE, pares, rescate). Sirve si quedó trabado. Con el bot detenido este botón dice <strong>Iniciar…</strong>; en parada gradual, <strong>Reanudar</strong>.</p>
             <button type="button" class="btn btn-outline-secondary" data-bot-accion="reiniciar"{{ bloqueado|safe }}><i class="fas fa-redo" aria-hidden="true"></i> Reiniciar…</button>
-        {%- elif e in ('detenido', 'expuesto') %}
+        {%- elif e in ('detenido', 'expuesto', 'sin_verificar') %}
             <h3>Iniciar</h3>
             <p>Abre un resumen de lo que va a operar (TWE, pares y qué cambió desde el último arranque) y recién ahí arranca passivbot en modo normal. No cambia la estrategia ni el rescate.</p>
             <button type="button" class="btn btn-primary" data-bot-accion="iniciar"{{ bloqueado|safe }}><i class="fas fa-play" aria-hidden="true"></i> Iniciar…</button>

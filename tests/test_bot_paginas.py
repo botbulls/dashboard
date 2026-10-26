@@ -190,6 +190,12 @@ SIN = {"posiciones": 0, "ordenes": 0}
     (_st(running=False, long_mode="graceful_stop"), SIN, "detenido"),
     (_st(running=False), {"posiciones": 3, "ordenes": 3}, "expuesto"),
     (_st(running=False), {"posiciones": 0, "ordenes": 1}, "expuesto"),
+    # Sin evidencia de que no haya nada: base ilegible o vieja (revisión, hallazgo 18). Con algo, expuesto igual.
+    (_st(running=False), {**SIN, "error": "No se pudo leer la base del scraper."}, "sin_verificar"),
+    (_st(running=False), {**SIN, "fresco": False}, "sin_verificar"),
+    (_st(running=False), {**SIN, "fresco": True}, "detenido"),
+    (_st(running=False), {"posiciones": 1, "ordenes": 0, "fresco": False}, "expuesto"),
+    (_st(), {**SIN, "fresco": False}, "operando"),
     (_st(enabled=False), SIN, "sin_datos"),
     (_st(error="Docker respondio 500"), SIN, "sin_datos"),
     ({"enabled": True, "error": "proxy caído"}, SIN, "sin_datos"),

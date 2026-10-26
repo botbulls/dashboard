@@ -359,12 +359,63 @@ def test_control_parada_gradual(client, app, env, docker):  # noqa: F811
     assert "bb-control__botones--separados" in control
 
 
+def _latido_scraper(app, edad_s=0.0):  # noqa: F811
+    import time
+
+    from futuresboard import scraper
+
+    scraper.latido_path(app.config["DATABASE"]).write_text(json.dumps({"at": time.time() - edad_s, "intervalo": 60}))
+
+
 def test_control_detenido_limpio(client, app, env, docker):  # noqa: F811
     escribir(env)
     docker.running = False
+    _latido_scraper(app)  # "sin posiciones ni órdenes" exige una base del scraper al día
     control, _ = _inicio(client)
     assert _acciones(control) == ["iniciar"]
     assert "Sin posiciones ni órdenes abiertas" in control
+
+
+@pytest.mark.parametrize("como", ["base_vieja", "sin_registro", "base_ilegible"])
+def test_control_detenido_sin_poder_verificar_la_exposicion(client, app, env, docker, monkeypatch, como):  # noqa: F811
+    """Con la base del scraper vieja, sin registro de una vuelta OK o ilegible, "Sin posiciones ni órdenes abiertas"
+    no tiene evidencia y solo ofrecía Iniciar…: puede haber posiciones sin bot. Ahora es "exposición sin verificar"
+    (ámbar) con Iniciar… y Cerrar todo… (revisión, hallazgo 18)."""
+    from futuresboard import blueprint
+
+    escribir(env)
+    docker.running = False
+    if como == "base_vieja":
+        _latido_scraper(app, edad_s=2 * 3600)
+    elif como == "base_ilegible":
+        _latido_scraper(app)
+        original = blueprint.db.query
+
+        def query(sql, *a, **kw):
+            if "FROM positions" in sql or "FROM orders" in sql:
+                raise RuntimeError("database is locked")
+            return original(sql, *a, **kw)
+
+        monkeypatch.setattr(blueprint.db, "query", query)
+    st = client.get("/api/bot/status").get_json()
+    assert st["estado_bot"] == "sin_verificar"
+    if como == "base_ilegible":
+        return  # Inicio entero lee la base: la página es de los otros dos casos
+    control, html = _inicio(client)
+    assert "Sin posiciones ni órdenes abiertas" not in control
+    assert "No se pudo verificar si hay posiciones u órdenes" in control
+    assert _acciones(control) == ["iniciar", "cerrar_todo"]
+    if como == "base_vieja":
+        assert "datos del scraper de hace 2 h" in control
+    franja = html.split('id="botStatus"', 1)[1].split("</a>", 1)[0]
+    assert "Detenido · exposición sin verificar" in franja and "bg-warning" in franja
+    pildora = client.get("/bot").get_data(as_text=True).split("data-bot-pildora", 1)[1].split("</a>", 1)[0]
+    assert 'data-bot-estado="sin_verificar"' in pildora and "sin verificar" in pildora
+    # /api/vivo/inicio rearma el mismo bloque.
+    assert "No se pudo verificar si hay posiciones u órdenes" in json.dumps(client.get("/api/vivo/inicio").get_json(),
+                                                                          ensure_ascii=False)
+    # Bot ofrece Cerrar todo con passivbot detenido.
+    assert 'data-bot-accion="cerrar_todo"' in client.get("/bot").get_data(as_text=True)
 
 
 def test_control_detenido_con_exposicion(client, app, env, docker):  # noqa: F811

@@ -76,12 +76,13 @@
     }
     if (respuesta) respuesta.addEventListener('click', limpiarAviso);
 
-    // ---- Píldora y punto del menú (cuatro estados: el server ya los calculó en estado_bot) ----
+    // ---- Píldora y punto del menú (cuatro estados y "sin verificar": el server ya los calculó en estado_bot) ----
     const ESTADOS = {
         operando: { texto: 'Operando', cls: 'is-operando', icono: 'fas fa-check-circle', punto: 'ok', sr: 'operando' },
         gradual: { texto: 'Parada gradual', cls: 'is-gradual', icono: 'fas fa-exclamation-triangle', punto: 'aviso', sr: 'en parada gradual' },
         detenido: { texto: 'Detenido', cls: 'is-parado', icono: 'fas fa-stop-circle', punto: 'gris', sr: 'detenido, sin posiciones ni órdenes' },
         expuesto: { texto: '', cls: 'is-detenido', icono: 'fas fa-times-circle', punto: 'peligro', sr: 'detenido con posiciones u órdenes sin bot' },
+        sin_verificar: { texto: 'Detenido · sin verificar', cls: 'is-gradual', icono: 'fas fa-question-circle', punto: 'aviso', sr: 'detenido, sin verificar si hay posiciones u órdenes' },
         sin_datos: { texto: 'Bot sin datos', cls: 'is-parado', icono: 'fas fa-question-circle', punto: 'gris', sr: 'sin datos del estado' },
     };
     function textoExpuesto(expo) {

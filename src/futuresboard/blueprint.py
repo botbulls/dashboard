@@ -1546,7 +1546,13 @@ BOT_STATUS_RAPIDO_S = 3
 
 def exposicion_scraper() -> dict:
     """Posiciones y órdenes abiertas según la base del scraper (no Binance): el cuarto estado del bot (detenido con
-    exposición) y el control rápido de Inicio. Nunca lanza: sin base, ``error`` y ceros."""
+    exposición) y el control rápido de Inicio. Nunca lanza: sin base, ``error`` y ceros.
+
+    ``fresco``: la última vuelta OK del scraper tiene ≤ 3 intervalos (la vara de Bot → Latidos). Una base vieja no
+    prueba que no haya nada abierto; ``edad`` es su antigüedad para el texto."""
+    f = scraper.frescura_web(current_app.config)
+    frescura = {"fresco": scraper.datos_frescos(f),
+                "edad": _hace(f["edad_segundos"]) if f.get("edad_segundos") is not None else None}
     try:
         posiciones = db.query("SELECT symbol, positionSide, positionAmt, entryPrice, unrealizedProfit FROM positions "
                               "WHERE ABS(positionAmt) > 0 ORDER BY symbol ASC")
@@ -1554,7 +1560,7 @@ def exposicion_scraper() -> dict:
     except Exception:  # noqa: BLE001 - defensivo: el estado del bot no se cae por la base
         current_app.logger.exception("No se pudo leer posiciones y órdenes para el estado del bot")
         return {"posiciones": 0, "ordenes": 0, "pares": [], "upnl": 0.0, "nocional": 0.0, "detalle": [],
-                "error": "No se pudo leer la base del scraper."}
+                "error": "No se pudo leer la base del scraper.", **frescura}
     detalle = [{"symbol": r[0], "lado": r[1], "cantidad": float(r[2]), "precio_entrada": float(r[3] or 0),
                 "upnl": float(r[4] or 0)} for r in posiciones]
     pares = sorted({r[0] for r in posiciones} | {r[0] for r in ordenes})
@@ -1565,6 +1571,7 @@ def exposicion_scraper() -> dict:
         "upnl": round(sum(p["upnl"] for p in detalle), 2),
         "nocional": round(sum(abs(p["cantidad"] * p["precio_entrada"]) for p in detalle), 2),
         "detalle": detalle,
+        **frescura,
     }
 
 
@@ -1618,7 +1625,8 @@ def bot_status_payload(docker_timeout: float | None = None) -> tuple[dict, int]:
     """Estado del bot y HTTP status: lo devuelven /api/bot/status y, dentro de su JSON, /api/vivo/inicio.
 
     ``docker_timeout``: tope del inspect al docker-proxy (default ``bot_control.HTTP_TIMEOUT_SECONDS``, 10 s).
-    ``estado_bot`` (operando / gradual / detenido / expuesto / sin_datos) y ``exposicion`` (base del scraper) van
+    ``estado_bot`` (operando / gradual / detenido / expuesto / sin_verificar / sin_datos) y ``exposicion`` (base del
+    scraper) van
     también en el error: la píldora y el punto del menú los pintan igual.
     """
     settings = bot_control.Settings()

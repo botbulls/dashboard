@@ -961,6 +961,8 @@ a.bb-moneda { transition: background-color var(--bb-dur) var(--bb-ease); }
 .bb .bb-pildora-bot.is-parado { background: var(--bb-neutral-bg); color: var(--bb-neutral); }
 .bb-control--expuesto { border-color: color-mix(in srgb, var(--bb-loss) 55%, var(--bb-border)); box-shadow: inset 4px 0 0 var(--bb-loss-mark); }
 .bb-control__alerta { color: var(--bb-loss); }
+.bb-control--sin-verificar { border-color: color-mix(in srgb, var(--bb-warn) 55%, var(--bb-border)); box-shadow: inset 4px 0 0 var(--bb-warn-mark); }
+.bb-control--sin-verificar .bb-control__alerta { color: var(--bb-warn); }
 
 /* A2: la key se cambia en una página propia (/bot/credenciales), sin sidebar ni scripts de terceros. */
 .bb-logo-tinta { fill: var(--bb-logo-ink); }

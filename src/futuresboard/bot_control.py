@@ -1118,6 +1118,9 @@ ESTADO_GRADUAL = "gradual"
 ESTADO_DETENIDO = "detenido"
 # Detenido con posiciones u órdenes abiertas: nadie las gestiona (Apagar que cerró a medias, docker stop a mano).
 ESTADO_EXPUESTO = "expuesto"
+# Detenido y sin poder verificar la exposición: la base del scraper es ilegible o vieja. No se afirma "sin posiciones
+# ni órdenes" sin evidencia; se ofrecen Iniciar… y Cerrar todo… (revisión, hallazgo 18).
+ESTADO_SIN_VERIFICAR = "sin_verificar"
 ESTADO_SIN_DATOS = "sin_datos"
 
 
@@ -1138,7 +1141,9 @@ def estado_del_bot(status: Dict[str, Any], exposicion: Optional[Dict[str, Any]])
         return ESTADO_OPERANDO
     expo = exposicion or {}
     if (expo.get("posiciones") or 0) > 0 or (expo.get("ordenes") or 0) > 0:
-        return ESTADO_EXPUESTO
+        return ESTADO_EXPUESTO  # aunque la base esté vieja: es la dirección segura
+    if expo.get("error") or expo.get("fresco") is False:
+        return ESTADO_SIN_VERIFICAR
     return ESTADO_DETENIDO
 
 
