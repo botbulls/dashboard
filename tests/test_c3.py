@@ -429,7 +429,9 @@ def test_rebote_reinicia_con_el_ultimo_preset_y_reancla(h):
     for _ in range(3):
         h.avanzar(3600)
         svc.tick()
-    assert h.starts == [{"riesgo": "medio", "mantener_twe": False, "descripcion": "el preset medio"}]
+    assert [{k: v for k, v in s.items() if k != "estrategia_hash"} for s in h.starts] == [
+        {"riesgo": "medio", "mantener_twe": False, "descripcion": "el preset medio"}]
+    assert h.starts[0]["estrategia_hash"] == bot_control.estrategia_hash(h.forager_cfg)
     st = h.c3()
     assert st["c3_parado"] is False and st["corte"] is None
     assert st["base"]["capital"] == "6800.00" and st["base"]["motivo"] == "reinicio"
@@ -581,8 +583,8 @@ def test_reinicio_con_config_personalizada_mantiene_twe(h):
     assert corte["config_al_corte"]["preset"] == "personalizado"
     h.avanzar(86400 + 60)
     svc.tick()
-    assert h.starts == [{"riesgo": None, "mantener_twe": True,
-                         "descripcion": "la config personalizada (twe 12/3)"}]
+    assert h.starts == [{"riesgo": None, "mantener_twe": True, "descripcion": "la config personalizada (twe 12/3)",
+                         "estrategia_hash": bot_control.estrategia_hash(h.forager_cfg)}]
 
 
 def test_config_cambiada_desde_el_corte_no_reinicia_sola(h):

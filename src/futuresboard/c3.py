@@ -1113,11 +1113,15 @@ class C3Watcher:
             return {"error": (f"la config de forager cambió desde el corte (twe {al_corte.get('twe_long')}/"
                               f"{al_corte.get('twe_short')} -> {actual.get('twe_long')}/{actual.get('twe_short')}).")}
         preset = actual.get("preset")
+        # El hash leído acá (sin el lock de acciones) viaja en el plan: make_start lo vuelve a comparar con el lock
+        # tomado, por si un job de Estrategia o Volver escribió otra estrategia mientras C3 esperaba el lock.
         if preset in bot_control.RISK_PRESETS:
-            return {"riesgo": preset, "mantener_twe": False, "descripcion": f"el preset {preset}"}
+            return {"riesgo": preset, "mantener_twe": False, "descripcion": f"el preset {preset}",
+                    "estrategia_hash": actual.get("estrategia_hash")}
         if preset == "personalizado":
             return {"riesgo": None, "mantener_twe": True,
-                    "descripcion": f"la config personalizada (twe {actual.get('twe_long')}/{actual.get('twe_short')})"}
+                    "descripcion": f"la config personalizada (twe {actual.get('twe_long')}/{actual.get('twe_short')})",
+                    "estrategia_hash": actual.get("estrategia_hash")}
         return {"error": f"preset de forager {preset!r}: no se puede reiniciar solo."}
 
     def _reiniciar(self, state: Dict[str, Any], c3: Dict[str, Any], cfg: Dict[str, Any], corte: Dict[str, Any],
@@ -1340,6 +1344,18 @@ def make_start(data_dir: pathlib.Path, bot_settings: bot_control.Settings,
             bloqueo = rescate.start_bloqueado(pathlib.Path(data_dir))
             if bloqueo:
                 return "bloqueado", {"ok": False, "error": bloqueo}
+            esperado = plan.get("estrategia_hash")
+            if esperado:
+                # Con el lock tomado: si la estrategia cambió desde que C3 armó el plan, no arranca. "bloqueado" no
+                # gasta un intento; en el tick siguiente _plan_start ve el cambio y deja el reinicio en manual, con el
+                # aviso (revisión, hallazgos 13 y 16).
+                try:
+                    actual = bot_control.estrategia_hash(bot_control.read_forager_config(bot_settings.require_config()))
+                except (bot_control.BotControlError, OSError) as exc:
+                    return "error", {"ok": False, "error": f"no se pudo releer la config de forager ({exc})."}
+                if actual != esperado:
+                    return "bloqueado", {"ok": False, "error": "la estrategia de forager cambió mientras C3 esperaba "
+                                                               "el lock: no se reinicia solo."}
             client = docker or bot_control.DockerClient(bot_settings.docker_url)
             try:
                 if client.inspect(bot_settings.container).get("running"):

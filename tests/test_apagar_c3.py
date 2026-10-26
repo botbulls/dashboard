@@ -244,7 +244,8 @@ def test_a_c3_reinicia_despues_de_su_propio_apagar(h):
     assert h.forager_cfg["long_mode"] == "graceful_stop"
     h.avanzar(86400 + 60)
     svc.tick()
-    assert h.starts == [{"riesgo": "bajo", "mantener_twe": False, "descripcion": "el preset bajo"}]
+    assert h.starts == [{"riesgo": "bajo", "mantener_twe": False, "descripcion": "el preset bajo",
+                         "estrategia_hash": bot_control.estrategia_hash(ESTRATEGIA)}]
     assert h.c3()["c3_parado"] is False
 
 
@@ -283,3 +284,80 @@ def test_c3_corte_viejo_sin_hash_usa_la_comparacion_de_twe(h):
     h.avanzar(86400 + 60)
     svc.tick()
     assert len(h.starts) == 1
+
+
+# ---------------------------------------------------------------- el hash se vuelve a mirar con el lock tomado
+
+_CON_SOL = {"n_longs": 5,
+            "approved_symbols_long": ["BNBUSDT", "BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT"],
+            "approved_symbols_short": ["BNBUSDT", "BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT"]}
+
+
+class _HarnessConCarrera(C3Harness):
+    """forager lee el new.json real y el START es el make_start real. Entre el plan de C3 (hash leído sin el lock) y
+    el lock, un job de Estrategia con el bot detenido toma el lock, escribe otra estrategia y lo suelta."""
+
+    def __init__(self, data_dir, tmp_path, cfg_path, docker_fake, nueva):
+        super().__init__(data_dir, tmp_path)
+        self.cfg_path, self.docker_fake, self.nueva = cfg_path, docker_fake, nueva
+        self.planes = []
+
+    def forager(self):
+        return bot_control.read_forager_config(self.cfg_path)
+
+    def contenedor(self):
+        return bool(self.docker_fake.running)
+
+    def apagar(self):
+        bot_control.write_forager_config(self.cfg_path, {"long_mode": "graceful_stop", "short_mode": "graceful_stop"})
+        self.docker_fake.running = False
+        self.apagados.append(self.clock.t)
+        return self.apagar_result
+
+    def start(self, plan):
+        import threading
+        import time
+
+        self.planes.append(dict(plan))
+        real = c3.make_start(self.data_dir, bot_control.Settings(), docker=bot_control.DockerClient(DOCKER),
+                             lock_timeout=10)
+        job = bot_control.Store(self.data_dir).try_lock()  # el job de Estrategia ganó el lock
+        assert job is not None
+        out = {}
+        t = threading.Thread(target=lambda: out.update(r=real(plan)))
+        t.start()
+        time.sleep(1.2)  # make_start sondea el lock cada 0,5 s
+        assert "r" not in out
+        bot_control.write_forager_config(self.cfg_path, self.nueva)  # detenido: escribe y no arranca
+        job.release()
+        t.join(15)
+        return out["r"]
+
+
+@pytest.mark.parametrize("nueva", [_CON_SOL, {"twe_long": 3}], ids=["pares_nuevos", "twe_guardada"])
+def test_c3_no_arranca_una_estrategia_guardada_mientras_esperaba_el_lock(tmp_path, env, docker, nueva):  # noqa: F811
+    """C3 comparaba el hash fuera del lock y make_start arrancaba con lo que hubiera al tomarlo: pares nuevos sin que
+    nadie los viera, o el preset pisando la TWE guardada (revisión, hallazgos 13 y 16)."""
+    env.write_text(hjson.dumps({**ESTRATEGIA, "n_shorts": 0}))
+    d = tmp_path / "data"
+    d.mkdir()
+    h = _HarnessConCarrera(d, tmp_path, env, docker, nueva)
+    docker.running = True
+    svc = operando(h, politica="cooldown", cooldown=1)
+    corte = cortar(h, svc)
+    assert docker.running is False
+    h.avanzar(86400 + 60)
+    svc.tick()
+    assert len(h.planes) == 1 and h.planes[0]["estrategia_hash"] == corte["config_al_corte"]["estrategia_hash"]
+    assert "start" not in docker.actions() and docker.running is False
+    cfg = leer(env)
+    assert cfg["long_mode"] == "graceful_stop"  # nadie lo arrancó
+    st = h.c3()
+    assert st["c3_parado"] is True and st["corte"]["reinicio"]["intentos"] == 0  # bloqueado: no gasta intento
+    # En el tick siguiente ve el cambio y pasa al camino manual, con el aviso.
+    h.avanzar(60)
+    svc.tick()
+    assert len(h.planes) == 1 and "start" not in docker.actions()
+    st = h.c3()
+    assert st["corte"]["auto"] is False and "estrategia" in st["corte"]["motivo_manual"]
+    assert any("Sin reinicio automático" in t for t in h.sent)
