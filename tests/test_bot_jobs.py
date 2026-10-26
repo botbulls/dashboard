@@ -282,7 +282,8 @@ def test_apagar_falla_al_detener(client, env, docker, binance):  # noqa: F811
     docker.fail_action = 500
     resp = post(client, "/api/bot/stop", {"modo": "apagar"})
     assert resp.status_code == 502
-    assert estados(resp.job) == {"parada_gradual": "ok", "detener": "error", "verificar_detenido": "omitido",
+    # passivbot sigue corriendo con la config de antes: la parada gradual se deshizo (revisión, hallazgo 17).
+    assert estados(resp.job) == {"parada_gradual": "omitido", "detener": "error", "verificar_detenido": "omitido",
                                  "cancelar_ordenes": "omitido",
                                  "cancelar_condicionales": "omitido", "cerrar_posiciones": "omitido",
                                  "verificacion": "omitido"}

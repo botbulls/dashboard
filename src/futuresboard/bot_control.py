@@ -27,10 +27,12 @@ import shutil
 import tempfile
 import time
 from typing import Any
+from typing import Callable
 from typing import Dict
 from typing import Iterator
 from typing import List
 from typing import Optional
+from typing import Tuple
 from urllib.parse import quote
 from urllib.parse import urlencode
 
@@ -1599,13 +1601,17 @@ def stop_bot(settings: Settings, store: Store, modo: Any,
             "backup": backup.name}
 
 
-def _dejar_en_parada_gradual(settings: Settings, store: Optional[Store], rep: Reporter) -> Optional[str]:
+def _dejar_en_parada_gradual(settings: Settings, store: Optional[Store],
+                             rep: Reporter) -> Tuple[Optional[str], Optional[Callable[[], None]]]:
     """Paso 1 de Apagar: ``long_mode`` y ``short_mode`` en ``graceful_stop`` (backup y escritura atómica, como Parada
     gradual), para que un arranque externo (``docker compose up -d``) no vuelva a operar.
 
     **Nunca lanza ni frena el Apagar**, que es una acción de emergencia: si no puede escribir, marca el paso (error u
     omitido) y devuelve el aviso, que va al resultado y a Telegram. Guarda ``short_mode_before_stop`` igual que
-    Parada gradual, así Iniciar vuelve al short_mode de antes. Si ya estaba en parada gradual no escribe."""
+    Parada gradual, así Iniciar vuelve al short_mode de antes. Si ya estaba en parada gradual no escribe.
+
+    Devuelve ``(aviso, deshacer)``: ``deshacer`` (o None si no escribió) vuelve la config y el estado a lo de antes,
+    para cuando el stop falla y passivbot sigue corriendo con la config anterior."""
     clave = "parada_gradual"
     rep.step(clave, PASO_EN_CURSO)
     path = settings.forager_config
@@ -1613,7 +1619,7 @@ def _dejar_en_parada_gradual(settings: Settings, store: Optional[Store], rep: Re
         aviso = (f"No se dejó forager en parada gradual: falta {ENV_FORAGER_CONFIG}. Se sigue con el Apagar; si algo "
                  "vuelve a arrancar passivbot, opera normal.")
         rep.step(clave, PASO_OMITIDO, aviso)
-        return aviso
+        return aviso, None
     try:
         cfg = read_forager_config(path)
         modos = []
@@ -1624,22 +1630,63 @@ def _dejar_en_parada_gradual(settings: Settings, store: Optional[Store], rep: Re
                 modos.append(None)
         if modos == [MODE_GRACEFUL_STOP, MODE_GRACEFUL_STOP]:
             rep.step(clave, PASO_OK, "Ya estaba en parada gradual: no se escribió nada.")
-            return None
+            return None, None
         state = store.load_state() if store is not None else None
+        tenia = state is not None and "short_mode_before_stop" in state
+        short_antes = state.get("short_mode_before_stop") if state is not None else None
         backup = write_forager_config(path, {"long_mode": MODE_GRACEFUL_STOP, "short_mode": MODE_GRACEFUL_STOP})
+        guardo = False
         if state is not None and modos[1] is not None and modos[1] not in STOP_MODE_VALUES:
             state["short_mode_before_stop"] = modos[1]
             with contextlib.suppress(OSError):
                 store.save_state(state)
+                guardo = True
         rep.step(clave, PASO_OK, f"long_mode y short_mode en graceful_stop (backup {backup.name}). Si algo vuelve a "
                                  "arrancar passivbot, no abre pares nuevos; Iniciar los vuelve a normal.")
-        return None
+
+        def deshacer() -> None:
+            restore_forager_config(path, backup)
+            if guardo and store is not None:
+                st = store.load_state()
+                if tenia:
+                    st["short_mode_before_stop"] = short_antes
+                else:
+                    st.pop("short_mode_before_stop", None)
+                store.save_state(st)
+
+        return None, deshacer
     except Exception as exc:  # noqa: BLE001 - la escritura nunca frena el Apagar
         motivo = str(exc)[:200] if isinstance(exc, BotControlError) else exc.__class__.__name__
         aviso = (f"No se pudo dejar forager en parada gradual ({motivo}). Se siguió con el Apagar; si algo vuelve a "
                  "arrancar passivbot, opera normal.")
         rep.step(clave, PASO_ERROR, aviso)
-        return aviso
+        return aviso, None
+
+
+def _deshacer_parada_gradual(docker: DockerClient, container: str, deshacer: Optional[Callable[[], None]],
+                             exc: "DockerError", rep: Reporter) -> Optional[str]:
+    """El stop de Apagar falló: si passivbot sigue corriendo, opera con la config de antes, así que el archivo vuelve a
+    esa (si no, la píldora e Inicio dirían "Parada gradual" con forager operando normal). Con un resultado incierto
+    (timeout) no se adivina: queda escrito y se dice. Devuelve la frase para el error, o None (revisión, hallazgo 17)."""
+    if deshacer is None:
+        return None
+    if exc.uncertain:
+        return ("La config de forager quedó en graceful_stop; forager sigue con la de antes hasta que se reinicie.")
+    try:
+        corre = bool(docker.inspect(container).get("running"))
+    except BotControlError:
+        corre = False
+    if not corre:
+        return None
+    try:
+        deshacer()
+    except Exception as restore_exc:  # noqa: BLE001
+        motivo = str(restore_exc)[:200] if isinstance(restore_exc, BotControlError) else restore_exc.__class__.__name__
+        return (f"No se pudo volver a la config de forager de antes ({motivo}): quedó en graceful_stop y forager sigue "
+                "con la de antes hasta que se reinicie.")
+    rep.step("parada_gradual", PASO_OMITIDO, "El stop falló y passivbot sigue corriendo: se volvió a la config de "
+                                             "antes, la que usa forager.")
+    return "Se volvió a la config de forager de antes: passivbot sigue corriendo con ella."
 
 
 def _sumar_aviso(payload: Dict[str, Any], aviso: Optional[str]) -> Dict[str, Any]:
@@ -1661,7 +1708,7 @@ def _apagar(settings: Settings, docker: DockerClient,
     if binance is None:
         raise DisabledError("Apagar requiere el cliente de Binance Futures configurado.")
     rep = reporter or NULL_REPORTER
-    aviso = _dejar_en_parada_gradual(settings, store, rep)
+    aviso, deshacer = _dejar_en_parada_gradual(settings, store, rep)
     try:
         rep.step("detener", PASO_EN_CURSO, f"docker stop {settings.container} (hasta {STOP_TIMEOUT_SECONDS} s)")
         result = docker.stop(settings.container)
@@ -1673,6 +1720,12 @@ def _apagar(settings: Settings, docker: DockerClient,
         if info["running"]:
             raise DockerError("passivbot sigue corriendo después del stop. No se cerró nada en Binance.")
     except DockerError as exc:
+        nota = _deshacer_parada_gradual(docker, settings.container, deshacer, exc, rep)
+        if nota:
+            err = DockerError(f"{exc} {nota}", exc.payload)
+            err.uncertain = exc.uncertain
+            _sumar_aviso(err.payload, aviso)
+            raise err from exc
         _sumar_aviso(exc.payload, aviso)
         raise
     rep.step("verificar_detenido", PASO_OK, f"Estado: {info.get('status')}")

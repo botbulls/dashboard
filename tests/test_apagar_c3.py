@@ -147,6 +147,57 @@ def test_apagar_guarda_el_short_mode_para_iniciar(client, app, env, docker, bina
     assert (leer(env)["long_mode"], leer(env)["short_mode"]) == ("normal", "tp_only")
 
 
+def _stop_que_no_detiene(docker, monkeypatch):  # noqa: F811
+    original = docker.request
+
+    def request(method, url, **kw):
+        r = original(method, url, **kw)
+        if method == "POST" and url.endswith("/stop"):
+            docker.running = True  # respondió 204, pero el contenedor sigue corriendo
+        return r
+
+    monkeypatch.setattr(docker, "request", request)
+
+
+@pytest.mark.parametrize("falla", ["http500", "sigue_corriendo"])
+def test_apagar_con_stop_fallido_vuelve_la_config_a_lo_que_corre(client, app, env, docker, binance, falla,  # noqa: F811
+                                                                  monkeypatch):
+    """Si el docker stop falla de forma definida, passivbot sigue corriendo con la config de antes (normal): la
+    escritura de graceful_stop se deshace, si no la píldora e Inicio mostraban "Parada gradual" con forager operando
+    normal (revisión, hallazgo 17)."""
+    env.write_text(env.read_text().replace("n_shorts: 2", "n_shorts: 2\n  short_mode: normal"))
+    os.utime(env, (1, 1))  # config en efecto: más vieja que el arranque de passivbot
+    antes = env.read_bytes()
+    docker.running = True
+    docker.started_at = "2026-10-01T12:00:00.000000000Z"
+    estado_antes = bot_control.Store(pathlib.Path(app.config["DATABASE"]).parent).load_state()
+    if falla == "http500":
+        docker.fail_action = 500
+    else:
+        _stop_que_no_detiene(docker, monkeypatch)
+    resp = post(client, "/api/bot/stop", {"modo": "apagar"})
+    docker.fail_action = None
+    assert resp.job["estado"] == "error" and docker.running is True
+    assert env.read_bytes() == antes  # la config vuelve a la que corre forager
+    despues = bot_control.Store(pathlib.Path(app.config["DATABASE"]).parent).load_state()
+    assert despues.get("short_mode_before_stop") == estado_antes.get("short_mode_before_stop")
+    assert "Se volvió a la config de forager de antes" in resp.get_json()["error"]
+    assert "volvió a la config" in paso(resp.job, "parada_gradual")["detalle"]
+    assert not [c for c in binance.calls if c[0] in ("POST", "DELETE")]  # sin tocar Binance
+    st = client.get("/api/bot/status").get_json()
+    assert st["estado_bot"] == "operando" and st["config_pending"] is False
+
+
+def test_apagar_con_stop_incierto_deja_graceful_y_lo_dice(client, app, env, docker, binance):  # noqa: F811
+    docker.running = True
+    docker.timeout_action = True
+    resp = post(client, "/api/bot/stop", {"modo": "apagar"})
+    docker.timeout_action = False
+    assert resp.job["estado"] == "error"
+    assert leer(env)["long_mode"] == "graceful_stop"  # resultado incierto: no se adivina
+    assert "quedó en graceful_stop" in resp.get_json()["error"]
+
+
 def test_apagar_sin_config_de_forager_sigue_y_avisa(tmp_path, env, docker, binance, monkeypatch):  # noqa: F811
     monkeypatch.delenv(bot_control.ENV_FORAGER_CONFIG)
     binance.add_position("BTCUSDT", "0.5")
