@@ -152,12 +152,26 @@ def frescura(database, now: float | None = None, intervalo_defecto: int | None =
     }
 
 
+# Datos "al día": la última vuelta OK tiene a lo sumo 3 intervalos (Bot → Latidos usa la misma vara).
+FRESCO_INTERVALOS = 3
+
+
+def intervalo_web(config) -> int | None:
+    """Intervalo del hilo de scrape del web (None si el web no scrapea: compose con servicio scraper)."""
+    return None if config.get("DISABLE_AUTO_SCRAPE") else config.get("AUTO_SCRAPE_INTERVAL")
+
+
+def datos_frescos(f: dict) -> bool:
+    """``frescura`` dentro del umbral. Sin latido ni ``scrape_state.json`` no hay evidencia: no está fresca."""
+    edad = f.get("edad_segundos")
+    return edad is not None and edad <= FRESCO_INTERVALOS * (f.get("intervalo_segundos") or 60)
+
+
 def frescura_web(config, now: float | None = None) -> dict:
     """``frescura`` para el web (``app.config``): sin un latido más nuevo y con el hilo del web prendido
     (compose sin servicio scraper), el intervalo es el ``AUTO_SCRAPE_INTERVAL`` del web. Sin eso el indicador
     "en vivo" usaría el umbral de 180 s y se pondría amarillo entre dos vueltas de 300 s del hilo."""
-    defecto = None if config.get("DISABLE_AUTO_SCRAPE") else config.get("AUTO_SCRAPE_INTERVAL")
-    return frescura(config["DATABASE"], now=now, intervalo_defecto=defecto)
+    return frescura(config["DATABASE"], now=now, intervalo_defecto=intervalo_web(config))
 
 
 def auto_scrape(app):

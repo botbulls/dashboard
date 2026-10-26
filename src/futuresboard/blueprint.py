@@ -2396,6 +2396,7 @@ def _armador_estrategia(objetivo: dict, origen: str = "estrategia", titulo: str 
     app (rutas, Demo o real) porque el job la vuelve a llamar desde su hilo, con el lock y sin contexto de Flask."""
     data_dir = _bot_store().data_dir
     db_path = current_app.config["DATABASE"]
+    intervalo = scraper.intervalo_web(current_app.config)
     testnet = bool(current_app.config.get("BINANCE_TESTNET"))
     base = current_app.config.get("API_BASE_URL")
     nombres = {k: v["nombre"] for k, v in perfiles.PERFILES.items()}
@@ -2415,9 +2416,11 @@ def _armador_estrategia(objetivo: dict, origen: str = "estrategia", titulo: str 
         balance = estrategia.balance_dimensionar(db_path, data_dir)
         ctx = estrategia.Contexto.armar(cfg, path, testnet, base, balance["para_dimensionar"], manif=manif)
         rescate_cfg, _err = rescate.load_config(data_dir)
+        expo = estrategia.leer_exposicion(db_path)
+        expo["viejo"] = estrategia.base_vieja(db_path, intervalo)  # en el plan y otra vez en el job, con el lock
         entrada = estrategia.Entrada(
             cfg=cfg, archivo_sha=hashlib.sha256(crudo).hexdigest(), objetivo=objetivo, ctx=ctx,
-            expo=estrategia.leer_exposicion(db_path), rescate_cfg=rescate_cfg, running=bool(info.get("running")),
+            expo=expo, rescate_cfg=rescate_cfg, running=bool(info.get("running")),
             container=settings.container, detectar=lambda c: perfiles.detectar(c, rescate_cfg, manif),
             nombres_perfil=nombres,
             warmup_s=bot_control.forager_warmup_seconds(), bloqueo_rescate=rescate.start_bloqueado(data_dir),
@@ -2716,9 +2719,10 @@ def bot_perfil():
     nombre = parsed["perfil"]
     data_dir = _bot_store().data_dir
     db_path = current_app.config["DATABASE"]
+    intervalo = scraper.intervalo_web(current_app.config)
     if not parsed["confirmar"]:
         try:
-            plan = perfiles.plan(bot_control.Settings(), data_dir, nombre, db_path=db_path)
+            plan = perfiles.plan(bot_control.Settings(), data_dir, nombre, db_path=db_path, intervalo_scraper=intervalo)
         except ValueError as exc:
             _rescate_audit("perfil", params, "rechazado", str(exc))
             return _json_response({"ok": False, "error": str(exc)}, 400)
@@ -2736,7 +2740,8 @@ def bot_perfil():
         return settings, usuario
 
     def work(store, settings, user, rep):
-        return perfiles.aplicar(settings, store, nombre, user, reporter=rep, db_path=db_path)
+        return perfiles.aplicar(settings, store, nombre, user, reporter=rep, db_path=db_path,
+                                intervalo_scraper=intervalo)
 
     return _run_bot_action("perfil", params, validate, work)
 

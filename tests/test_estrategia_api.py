@@ -78,7 +78,18 @@ def app(tmp_path):
         con.executemany("INSERT INTO orders (origQty, price, side, positionSide, status, symbol, time, type) "
                         "VALUES (?,?,?,?,?,?,?,?)", ORDENES)
         con.execute("INSERT OR REPLACE INTO account (AID, totalWalletBalance) VALUES (1, 5417.55)")
+    latido_fresco(application)
     yield application
+
+
+def latido_fresco(application, edad_s=0.0, intervalo=60):
+    """Latido del scraper: la regla de exposición solo confía en una base que el scraper actualizó hace ≤ 3 vueltas."""
+    import time
+
+    from futuresboard import scraper
+
+    scraper.latido_path(application.config["DATABASE"]).write_text(
+        json.dumps({"at": time.time() - edad_s, "intervalo": intervalo}))
 
 
 @pytest.fixture

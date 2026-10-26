@@ -214,10 +214,11 @@ def _modos_servicio(data_dir: pathlib.Path) -> Dict[str, Any]:
             "prestamo": status.get("prestamo"), "prestamo_modo": status.get("prestamo_modo")}
 
 
-def cartera(forager: Dict[str, Any], db_path: Any) -> Dict[str, Any]:
+def cartera(forager: Dict[str, Any], db_path: Any, intervalo_scraper: Optional[int] = None) -> Dict[str, Any]:
     """Pares y pares a la vez que escribe un perfil (S2): los 4 medidos y ``n_longs`` = max(4, |P ∪ O|), la regla de
     exposición de Estrategia (``estrategia.lugares``): si hay un quinto par con posición, el perfil queda en 5 lugares
-    hasta que cierre, así la lw no sube para nadie. Sin posiciones legibles no se aplica (PerfilError)."""
+    hasta que cierre, así la lw no sube para nadie. Sin posiciones legibles, o con la base del scraper vieja
+    (``estrategia.base_vieja``), no se aplica (PerfilError)."""
     if db_path is None:
         expo: Dict[str, Any] = {"posiciones": {}, "ordenes": {}, "nocional": {},
                                 "error": "No se indicó la base del scraper."}
@@ -226,6 +227,9 @@ def cartera(forager: Dict[str, Any], db_path: Any) -> Dict[str, Any]:
     if expo.get("error"):
         raise PerfilError(f"{expo['error']} Sin posiciones no se puede saber cuántos lugares están ocupados: el perfil "
                           "no se aplica.")
+    viejo = estrategia.base_vieja(db_path, intervalo_scraper)
+    if viejo:
+        raise PerfilError(f"{viejo} El perfil no se aplica.")
     lug = estrategia.lugares(PARES, expo, forager.get("symbols_to_ignore"))
     n = max(PARES_MEDIDOS, len(lug["ocupados"]))
     return {"pares": list(PARES), "n_longs": n, "lugares": lug,
@@ -233,7 +237,8 @@ def cartera(forager: Dict[str, Any], db_path: Any) -> Dict[str, Any]:
 
 
 def plan(settings: bot_control.Settings, data_dir: pathlib.Path, nombre: str,
-         docker: Optional[bot_control.DockerClient] = None, db_path: Any = None) -> Dict[str, Any]:
+         docker: Optional[bot_control.DockerClient] = None, db_path: Any = None,
+         intervalo_scraper: Optional[int] = None) -> Dict[str, Any]:
     """Qué va a pasar si se aplica el perfil (para pedir la confirmación). Lee forager, Docker, las posiciones (base
     del scraper, ``db_path``) y los archivos del rescate y de C3; no escribe nada. Errores que impiden aplicarlo:
     ``BotControlError`` (409/502/503) o ValueError."""
@@ -249,7 +254,7 @@ def plan(settings: bot_control.Settings, data_dir: pathlib.Path, nombre: str,
         raise PerfilError(bloqueo)
     actual, cfg_err = rescate.load_config(data_dir)
     parsed = rescate.validate_config_body(cuerpo_rescate(nombre, actual))
-    cart = cartera(forager, db_path)
+    cart = cartera(forager, db_path, intervalo_scraper)
     lineas = _lineas_plan(nombre, perfil, forager, info, data_dir, parsed, cfg_err, cart)
     return {"perfil": nombre, "nombre": perfil["nombre"], "texto": "\n".join(lineas), "lineas": lineas,
             "corriendo": bool(info.get("running")), "n_longs": cart["n_longs"], "pares": cart["pares"]}
@@ -386,7 +391,8 @@ class _SinValidar(bot_control.Reporter):
 
 def aplicar(settings: bot_control.Settings, store: bot_control.Store, nombre: str, usuario: str,
             docker: Optional[bot_control.DockerClient] = None,
-            reporter: Optional[bot_control.Reporter] = None, db_path: Any = None) -> Dict[str, Any]:
+            reporter: Optional[bot_control.Reporter] = None, db_path: Any = None,
+            intervalo_scraper: Optional[int] = None) -> Dict[str, Any]:
     """Aplica el perfil (ver docstring del módulo). Devuelve el resultado del START más ``perfil`` y ``rescate``."""
     if nombre not in PERFILES:
         raise ValueError(f"perfil inválido: usar {' o '.join(PERFILES)}.")
@@ -405,7 +411,7 @@ def aplicar(settings: bot_control.Settings, store: bot_control.Store, nombre: st
         raise PerfilError(bloqueo)
     actual, _cfg_err = rescate.load_config(data_dir)
     parsed = rescate.validate_config_body(cuerpo_rescate(nombre, actual))
-    cart = cartera(forager, db_path)
+    cart = cartera(forager, db_path, intervalo_scraper)
     rep.step("validar", bot_control.PASO_OK, f"{perfil['nombre']}: TWE {bot_control.twe_valor(perfil['twe_long'])}, "
                                             f"{', '.join(PARES)}, {cart['n_longs']} a la vez; "
                                             f"contenedor {settings.container}: {info.get('status')}")

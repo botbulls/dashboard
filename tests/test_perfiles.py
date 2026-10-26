@@ -42,6 +42,21 @@ def _data_dir(app):  # noqa: F811
     return pathlib.Path(app.config["DATABASE"]).parent
 
 
+def _latido_scraper(app, edad_s=0.0):  # noqa: F811
+    import time
+
+    from futuresboard import scraper
+
+    scraper.latido_path(app.config["DATABASE"]).write_text(json.dumps({"at": time.time() - edad_s, "intervalo": 60}))
+
+
+@pytest.fixture(autouse=True)
+def _scraper_al_dia(request):
+    """Aplicar un perfil corre la regla de exposición, que solo confía en una base del scraper fresca."""
+    if "app" in request.fixturenames:
+        _latido_scraper(request.getfixturevalue("app"))
+
+
 @pytest.fixture
 def solo_long(env):  # noqa: F811
     env.write_text(SOLO_LONG)
@@ -234,6 +249,14 @@ def test_perfil_con_un_quinto_par_con_posicion_queda_en_5_lugares(client, app, s
     assert resp.status_code == 200, resp.get_json()
     cfg = hjson.loads(solo_long.read_text())
     assert cfg["n_longs"] == 5 and cfg["approved_symbols_long"] == perfiles.PARES == cfg["approved_symbols_short"]
+
+
+def test_perfil_con_la_base_del_scraper_vieja_no_se_aplica(client, app, solo_long, docker):  # noqa: F811
+    _latido_scraper(app, edad_s=7200)
+    d = _plan(client, "con_rescate").get_json()
+    assert "Los datos del scraper tienen 2 h" in d["error"] and "El perfil no se aplica" in d["error"]
+    resp = _aplicar(client, "con_rescate")
+    assert resp.status_code != 200 and "Los datos del scraper tienen" in json.dumps(resp.get_json())
 
 
 def test_plan_avisa_prestamo_pendiente_al_pasar_a_conservador(client, app, solo_long, docker):  # noqa: F811

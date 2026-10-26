@@ -79,6 +79,51 @@ def test_quitar_xrp_con_posicion_deja_4_lugares_y_lw_1(client, forager, red, doc
     assert any("Mínimo: 4" in b and "1,33" in b for b in resp.get_json()["bloqueos"])
 
 
+def test_base_del_scraper_vieja_bloquea_la_regla(client, app, forager, red, docker):  # noqa: F811
+    """Con el scraper caído, la base muestra los pares ocupados de hace 2 h: forager pudo haber llenado otros lugares
+    desde entonces. La regla no puede confiar en esa foto (revisión, hallazgo 11)."""
+    from test_estrategia_api import latido_fresco
+
+    docker.running = True
+    latido_fresco(app, edad_s=7200)
+    resp = pedir(client, ["BNBUSDT", "BTCUSDT", "ETHUSDT"], 4)
+    assert resp.status_code == 409 and not resp.get_json().get("requiere_confirmacion")
+    assert any("Los datos del scraper tienen 2 h" in b and "lugares están ocupados" in b
+               for b in resp.get_json()["bloqueos"])
+    latido_fresco(app)
+    assert pedir(client, ["BNBUSDT", "BTCUSDT", "ETHUSDT"], 4).get_json()["requiere_confirmacion"]
+
+
+def test_sin_registro_del_scraper_bloquea_y_scrape_state_del_web_alcanza(client, app, forager, red, docker):  # noqa: F811
+    import time
+
+    from futuresboard import scraper
+
+    docker.running = True
+    db = app.config["DATABASE"]
+    scraper.latido_path(db).unlink()
+    resp = pedir(client, ["BNBUSDT", "BTCUSDT", "ETHUSDT"], 4)
+    assert resp.status_code == 409 and any("No hay registro de una vuelta OK del scraper" in b
+                                           for b in resp.get_json()["bloqueos"])
+    # Scraper como hilo del web: no hay latido, solo scrape_state.json.
+    scraper.scrape_state_path(db).write_text(json.dumps({"last_success_at": time.time() - 30}))
+    assert pedir(client, ["BNBUSDT", "BTCUSDT", "ETHUSDT"], 4).get_json()["requiere_confirmacion"]
+
+
+def test_la_base_vieja_al_correr_el_job_no_escribe(client, app, forager, red, docker, monkeypatch):  # noqa: F811
+    from test_estrategia_api import latido_fresco
+
+    docker.running = True
+    plan = pedir(client, ["BNBUSDT", "BTCUSDT", "ETHUSDT"], 4)
+    assert plan.get_json()["requiere_confirmacion"]
+    latido_fresco(app, edad_s=900)  # el scraper se cayó mientras el modal estaba abierto
+    resp = post(client, "/api/bot/estrategia", {"twe_long": 4, "n_longs": 4, "pares": ["BNBUSDT", "BTCUSDT", "ETHUSDT"],
+                                                "base_hash": base_hash(), "confirmar": True,
+                                                "plan_hash": plan.get_json()["plan_hash"]})
+    assert resp.status_code in (409, 502) and "scraper" in json.dumps(resp.get_json())
+    assert leer(forager)["approved_symbols_long"] == CUATRO
+
+
 def test_n_longs_3_con_4_ocupados_es_409(client, forager, red, docker):  # noqa: F811
     resp = pedir(client, CUATRO, 3)
     assert resp.status_code == 409

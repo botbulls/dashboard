@@ -423,6 +423,26 @@ def leer_exposicion(db_path: Any) -> Dict[str, Any]:
     return out
 
 
+def base_vieja(db_path: Any, intervalo_defecto: Optional[int] = None, ahora: Optional[float] = None) -> Optional[str]:
+    """Por qué la base del scraper no sirve para la regla de exposición, o None si está al día.
+
+    Una base vieja no da error al leerla: muestra los pares ocupados de la última vuelta OK, y forager pudo haber
+    llenado lugares desde entonces (scraper caído, o una vuelta pasada de peso que refresca órdenes y no posiciones y
+    no deja latido). Se toma lo más nuevo entre el latido del loop dedicado y ``scrape_state.json`` (scraper como hilo
+    del web), igual que Bot → Latidos (revisión, hallazgo 11). No cierra la carrera de una vuelta (≤ 1 intervalo)."""
+    from futuresboard import conexion
+    from futuresboard import scraper
+
+    f = scraper.frescura(db_path, now=ahora, intervalo_defecto=intervalo_defecto)
+    if f.get("edad_segundos") is None:
+        return ("No hay registro de una vuelta OK del scraper (ni latido ni scrape_state.json): no se puede saber "
+                "cuántos lugares están ocupados.")
+    if not scraper.datos_frescos(f):
+        return (f"Los datos del scraper tienen {conexion._hace(f['edad_segundos'])}: no se puede saber cuántos lugares "
+                "están ocupados (una posición u orden nueva no se vería). Revisá el scraper en Bot → Latidos.")
+    return None
+
+
 def lugares(pares_nuevos: List[str], expo: Dict[str, Any], ignorar: Optional[List[str]] = None) -> Dict[str, Any]:
     """La regla de exposición (spec § 3.2): ``n_longs`` entre ``|P ∪ O|`` y ``pares + salen con posición``.
 
@@ -725,9 +745,11 @@ def armar_plan(e: Entrada) -> Dict[str, Any]:
                                  casilla=True, frase=f"forager descartaría {p}"))
     if e.expo.get("error"):
         bloqueos.append(f"{e.expo['error']} Sin posiciones no se puede saber cuántos lugares están ocupados.")
+    elif e.expo.get("viejo"):
+        bloqueos.append(e.expo["viejo"])
     lug = lugares(validos, e.expo, cfg.get("symbols_to_ignore"))
     ocupados = lug["ocupados"]
-    if not e.expo.get("error"):
+    if not e.expo.get("error") and not e.expo.get("viejo"):
         if n < lug["minimo"]:
             lw_n = float(twe) / n
             bloqueos.append(
