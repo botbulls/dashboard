@@ -22,7 +22,8 @@ FILTROS = ("todas", "aplicadas", "rechazadas")
 VENTANA_CONFIRMACION_S = 15 * 60
 _MAX_DETALLE = 200
 # Claves que agrega la confirmación: no cambian qué acción es.
-_CLAVES_CONFIRMACION = ("confirmar", "plan_hash", "confirmar_twe_alta", "confirmar_inyeccion", "confirmar_corte")
+_CLAVES_CONFIRMACION = ("confirmar", "plan_hash", "confirmar_twe_alta", "confirmar_inyeccion", "confirmar_corte",
+                        "base_hash")
 
 ESTADOS = {
     "aplicado": "Aplicado",
@@ -76,6 +77,13 @@ def titulo(action: Any, params: Any) -> str:
     if action == "perfil":
         nombre = _NOMBRES_PERFIL.get(p.get("perfil"))
         return f"Perfil {nombre}" if nombre else "Perfil"
+    if action == "estrategia":
+        pares = p.get("pares") if isinstance(p.get("pares"), list) else []
+        cortos = ", ".join(str(s)[:-4] if str(s).endswith("USDT") else str(s) for s in pares)
+        cabeza = "Volver a una versión" if p.get("volver") else "Estrategia"
+        if "twe_long" in p and "n_longs" in p:
+            return f"{cabeza}: TWE {_num(p.get('twe_long'))}, {_num(p.get('n_longs'))} a la vez, {cortos or 'sin pares'}"
+        return cabeza
     return _TITULOS_FIJOS.get(action, str(action))
 
 

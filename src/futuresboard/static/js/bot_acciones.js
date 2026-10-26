@@ -329,6 +329,9 @@
     function pedirConfirmacion(accion) {
         pending = typeof accion === 'string' ? ACCIONES[accion]() : accion;
         confirmEl.querySelector('[data-bot-confirm="titulo"]').textContent = pending.titulo;
+        // Un plan con diff (Estrategia, Versiones) pide el modal ancho: ancho 'lg'.
+        const dialogo = confirmEl.querySelector('.modal-dialog');
+        if (dialogo) dialogo.classList.toggle('modal-lg', pending.ancho === 'lg');
         const textoEl = confirmEl.querySelector('[data-bot-confirm="texto"]');
         textoEl.textContent = pending.texto || '';
         textoEl.classList.toggle('d-none', !pending.texto);
@@ -373,6 +376,10 @@
     function tituloJob(job) {
         const pr = job.params || {};
         if (pr.reanudar) return pr.como === 'reanudar' ? 'Reanudar' : (pr.como === 'reiniciar' ? 'Reiniciar' : 'Iniciar');
+        if (job.accion === 'estrategia') {
+            const cab = pr.volver ? 'Volver a una versión' : (pr.perfil ? `Perfil ${pr.perfil}` : 'Estrategia');
+            return pr.twe_long !== undefined ? `${cab}: TWE ${n(pr.twe_long)}, ${pr.n_longs} a la vez` : cab;
+        }
         const detalle = pr.riesgo ? ` (riesgo ${pr.riesgo})` : (pr.twe_long !== undefined && pr.twe_long !== null ? ` (TWE ${n(pr.twe_long)})` : (pr.perfil ? ` ${(lastStatus && lastStatus.perfiles && lastStatus.perfiles[pr.perfil] && lastStatus.perfiles[pr.perfil].nombre) || pr.perfil}` : ''));
         return `${TITULOS[job.accion] || job.accion}${detalle}`;
     }

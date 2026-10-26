@@ -31,6 +31,9 @@ from __future__ import annotations
 import calendar
 import concurrent.futures
 import datetime as dt
+import hashlib
+import json
+import os
 import pathlib
 import re
 from dataclasses import dataclass
@@ -41,6 +44,7 @@ from typing import List
 from typing import Optional
 
 from futuresboard import binance_publico
+from futuresboard import bot_control
 from futuresboard import formato
 from futuresboard import manifiesto
 
@@ -148,7 +152,9 @@ class Contexto:
     @property
     def max_min_cost(self) -> Optional[float]:
         v = self.cfg.get("max_min_cost")
-        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            return None
+        return int(v) if float(v).is_integer() else float(v)  # 150, no "150,0"
 
 
 def _item(clave: str, estado: str, texto: str, **datos: Any) -> Dict[str, Any]:
@@ -251,7 +257,8 @@ def _chequeo_minimo(symbol: str, ctx: Contexto) -> tuple:
         extra = f"forager lo saca si {corto(symbol)} pasa de {_n(round(precio_tope))}"
     if ctx.en_demo and real is not None and real["minimo"] > tope:
         return _item("minimo", AVISO, f"{texto} (real {_n(real['minimo'], 2)}: en Binance real forager lo descartaría)"), vals
-    if ctx.en_demo and real is not None and abs(real["minimo"] - op["minimo"]) >= 0.005:
+    # Demo y real con mínimos distintos de verdad (BTC: minQty 0,0001 contra 0,001), no por la diferencia de precio.
+    if ctx.en_demo and real is not None and abs(real["minimo"] - op["minimo"]) > 0.1 * max(op["minimo"], 1e-9):
         return _item("minimo", INFO, f"{texto} (real {_n(real['minimo'], 2)}: {extra})"), vals
     if max(op["minimo"], (real or op)["minimo"]) > tope / 2:
         return _item("minimo", INFO, f"{texto} ({extra})"), vals
@@ -392,19 +399,20 @@ def leer_exposicion(db_path: Any) -> Dict[str, Any]:
     ``error``: no se pudo leer (sin posiciones no se puede correr la regla de exposición: el plan bloquea)."""
     from futuresboard import db
 
-    out: Dict[str, Any] = {"posiciones": {}, "ordenes": {}, "error": None}
+    out: Dict[str, Any] = {"posiciones": {}, "nocional": {}, "ordenes": {}, "error": None}
     try:
         conn = db.connect(db_path, readonly=True)
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"No se pudo abrir la base del scraper ({exc.__class__.__name__})."
         return out
     try:
-        for symbol, lado, cantidad in conn.execute(
-                "SELECT symbol, positionSide, positionAmt FROM positions WHERE ABS(positionAmt) > 0"):
+        for symbol, lado, cantidad, entrada in conn.execute(
+                "SELECT symbol, positionSide, positionAmt, entryPrice FROM positions WHERE ABS(positionAmt) > 0"):
             lado = str(lado or "BOTH").upper()
             qty = float(cantidad or 0)
             if lado == "LONG" or (lado == "BOTH" and qty > 0):
                 out["posiciones"][symbol] = out["posiciones"].get(symbol, 0.0) + abs(qty)
+                out["nocional"][symbol] = out["nocional"].get(symbol, 0.0) + abs(qty * float(entrada or 0))
         for symbol, lado in conn.execute("SELECT symbol, positionSide FROM orders"):
             if str(lado or "BOTH").upper() != "SHORT":
                 out["ordenes"][symbol] = out["ordenes"].get(symbol, 0) + 1
@@ -523,3 +531,431 @@ def avanzado(cfg: Dict[str, Any], manif: Dict[str, Any]) -> List[Dict[str, Any]]
          "forager no las lee: no tienen efecto. Se muestran para que no confundan."),
     ]
     return [{"clave": c, "titulo": t, "valor": _valor(v), "efecto": e} for c, t, v, e in filas]
+
+
+def balance_dimensionar(db_path: Any, data_dir: pathlib.Path) -> Dict[str, Any]:
+    """Balance para dimensionar = max(0, billetera − préstamo del rescate) (``passivbot.py:404-410``). La billetera
+    sale de la base del scraper (solo lectura) y el préstamo del estado del rescate. Nunca lanza."""
+    from futuresboard import db
+    from futuresboard import rescate
+
+    billetera = None
+    try:
+        conn = db.connect(db_path, readonly=True)
+        try:
+            fila = conn.execute("SELECT totalWalletBalance FROM account WHERE AID = 1").fetchone()
+        finally:
+            conn.close()
+        billetera = float(fila[0]) if fila is not None and fila[0] is not None else None
+    except Exception:  # noqa: BLE001
+        billetera = None
+    try:
+        prestamo = float(rescate.dec(rescate.panel_status(data_dir).get("prestamo") or "0"))
+    except Exception:  # noqa: BLE001
+        prestamo = 0.0
+    dim = max(0.0, billetera - prestamo) if billetera is not None else None
+    return {"billetera": billetera, "prestamo": prestamo, "para_dimensionar": dim}
+
+
+# --------------------------------------------------------------------------------------
+# Plan y aplicación (spec § 3.3): el mismo camino para Estrategia, un perfil y Volver a una versión
+# --------------------------------------------------------------------------------------
+
+VERSIONES_FILE = "estrategia_versiones.jsonl"
+MAX_VERSIONES = 200
+ESTRATEGIA_STEPS: List[tuple] = [
+    ("validar", "Validar estrategia, pares y lugares"),
+    ("backup", "Backup de la config"),
+    ("escribir", "Escribir config"),
+    ("docker", "Reiniciar passivbot"),
+    ("verificar", "Verificar contenedor en ejecución"),
+    ("forager", "Esperando a forager"),
+]
+_CAMPOS = ("twe_long", "n_longs", "pares", "base_hash", "confirmar", "plan_hash")
+_HASH = re.compile(r"^[0-9a-f]{64}$")
+BASE_VIEJA = ("La estrategia cambió desde que se armó el borrador (otra pestaña, un perfil, una versión o un cambio a "
+              "mano): recargá Estrategia y revisá de nuevo.")
+
+
+class EstrategiaError(bot_control.BotControlError):
+    """No se puede aplicar (409): ``bloqueos`` dice por qué, uno por renglón. Es un ``BotControlError``: en el job
+    termina como error 409 con su texto."""
+
+    status_code = 409
+
+    def __init__(self, bloqueos: List[str], plan: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(" ".join(bloqueos), payload={"bloqueos": list(bloqueos)})
+        self.bloqueos = list(bloqueos)
+        self.plan = plan
+
+
+def validar_objetivo(body: Any, extra: tuple = ()) -> Dict[str, Any]:
+    """``{twe_long, n_longs, pares, base_hash, confirmar?, plan_hash?}`` con sus tipos (400 si no). Lo que depende de
+    la cuenta (formato de cada par, duplicados, cuántos, lugares) lo decide el plan (409 con motivo)."""
+    if not isinstance(body, dict):
+        raise ValueError("Body inválido: se esperaba un objeto JSON.")
+    desconocidos = sorted(set(body) - set(_CAMPOS) - set(extra))
+    if desconocidos:
+        raise ValueError(f"Campos desconocidos: {', '.join(desconocidos)}.")
+    twe = bot_control.validate_twe_manual(body.get("twe_long"))
+    n = body.get("n_longs")
+    if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= 2 * MAX_PARES:
+        raise ValueError(f"n_longs tiene que ser un entero entre 1 y {2 * MAX_PARES}.")
+    pares = body.get("pares")
+    if not isinstance(pares, list) or not all(isinstance(p, str) and len(p) <= 32 for p in pares) or len(pares) > 32:
+        raise ValueError("pares tiene que ser una lista de símbolos (texto).")
+    base = body.get("base_hash")
+    if not isinstance(base, str) or not _HASH.match(base):
+        raise ValueError("base_hash inválido: recargá Estrategia.")
+    confirmar = body.get("confirmar", False)
+    if not isinstance(confirmar, bool):
+        raise ValueError("confirmar tiene que ser true o false.")
+    plan_hash = body.get("plan_hash")
+    if plan_hash is not None and (not isinstance(plan_hash, str) or not _HASH.match(plan_hash)):
+        raise ValueError("plan_hash inválido.")
+    return {"twe_long": twe, "n_longs": n, "pares": list(pares), "base_hash": base, "confirmar": confirmar,
+            "plan_hash": plan_hash}
+
+
+def params_audit(obj: Dict[str, Any]) -> Dict[str, Any]:
+    """Lo que va a ``bot_actions.log`` (el plan y el job con los mismos: el historial los empareja)."""
+    return {"twe_long": bot_control.twe_valor(obj["twe_long"]), "n_longs": obj["n_longs"], "pares": list(obj["pares"])}
+
+
+@dataclass
+class Entrada:
+    """Lo que necesita el plan, leído en el momento (en el pedido web o, con el lock, en el job)."""
+
+    cfg: Dict[str, Any]
+    archivo_sha: str
+    objetivo: Dict[str, Any]
+    ctx: Contexto
+    expo: Dict[str, Any]
+    rescate_cfg: Dict[str, Any]
+    running: bool
+    container: str
+    detectar: Any  # cfg -> nombre de perfil o None (perfiles.detectar con el rescate y el manifiesto)
+    nombres_perfil: Dict[str, str]
+    warmup_s: int = 90
+    bloqueo_rescate: Optional[str] = None
+    origen: str = "estrategia"
+    titulo: str = "Revisar y aplicar la estrategia"
+    todos_entran: bool = False  # Volver: cada par de la versión se chequea como si entrara
+
+
+def _pares_texto(pares: List[str]) -> str:
+    cortos = [corto(p) for p in pares]
+    return ", ".join(cortos) if cortos else "ninguno"
+
+
+def _num_txt(v: Optional[float], dec: int = 2) -> str:
+    return _n(v, dec) if v is not None else "—"
+
+
+def _usdt(v: Optional[float]) -> str:
+    return f"{_n(v, 2)} USDT" if v is not None else "—"
+
+
+def _fila(clave: str, titulo: str, sub: str, antes: Any, despues: Any, texto_antes: str, texto_despues: str,
+          nota: str = "", cambia: Optional[bool] = None) -> Dict[str, Any]:
+    return {"clave": clave, "titulo": titulo, "sub": sub, "antes": antes, "despues": despues, "texto_antes": texto_antes,
+            "texto_despues": texto_despues, "nota": nota,
+            "cambia": (texto_antes != texto_despues) if cambia is None else cambia}
+
+
+def _aviso(clave: str, titulo: str, texto: str, casilla: bool = False, tipo: Optional[str] = None,
+           frase: str = "") -> Dict[str, Any]:
+    return {"clave": clave, "tipo": tipo or ("aviso" if casilla else "info"), "titulo": titulo, "texto": texto,
+            "casilla": casilla, "frase": frase}
+
+
+def armar_plan(e: Entrada) -> Dict[str, Any]:
+    """Plan de un cambio de estrategia (spec § 3.2-3.3): valida todo, arma el diff, los avisos y ``plan_hash``. No
+    escribe nada. ``EstrategiaError`` (409) con los motivos si algo bloquea."""
+    cfg, obj, ctx = e.cfg, e.objetivo, e.ctx
+    bloqueos: List[str] = []
+    if e.bloqueo_rescate:
+        bloqueos.append(e.bloqueo_rescate)
+    _n_longs_cfg, n_shorts = bot_control.n_pares(cfg)
+    if n_shorts != 0:
+        bloqueos.append(f"La config de forager tiene n_shorts={cfg.get('n_shorts')!r}: Estrategia escribe solo con los "
+                        "shorts apagados (n_shorts 0), como los perfiles.")
+    for side in ("long", "short"):
+        try:
+            bot_control._mode(cfg, side)
+        except bot_control.InvalidModeError as exc:
+            bloqueos.append(str(exc).replace(" No se modifico la config.", ""))
+    if obj["base_hash"] != bot_control.estrategia_hash(cfg):
+        bloqueos.append(BASE_VIEJA)
+    vigente = bot_control.resumen_estrategia(cfg)
+    pares: List[str] = list(obj["pares"])
+    twe = obj["twe_long"]
+    n = obj["n_longs"]
+    if not 1 <= len(pares) <= MAX_PARES:
+        bloqueos.append(f"Tiene que haber entre 1 y {MAX_PARES} pares (hay {len(pares)}).")
+    duplicados = sorted({p for p in pares if pares.count(p) > 1})
+    if duplicados:
+        bloqueos.append(f"Pares repetidos: {', '.join(duplicados)}.")
+    malos = [p for p in pares if not FORMATO.match(p)]
+    if malos:
+        bloqueos.append(f"Formato inválido ({', '.join(malos)}): tiene que ser como BTCUSDT.")
+    validos = [p for p in dict.fromkeys(pares) if FORMATO.match(p)]
+    entran = [p for p in validos if e.todos_entran or p not in vigente["pares_long"]]
+    salen = [p for p in vigente["pares_long"] if p not in pares]
+    lw = float(twe) / n
+    resultados = {r["symbol"]: r for r in chequear_varios(validos, ctx, lw=lw)}
+    avisos: List[Dict[str, Any]] = []
+    for p in validos:
+        r = resultados[p]
+        if p in entran:
+            if r["bloquea"]:
+                bloqueos.append(f"{p}: {'; '.join(r['motivos'])}.")
+            continue
+        malos_forager = [c["texto"] for c in r["chequeos"] if c["estado"] == BLOQUEA and c["clave"] in BLOQUEANTES
+                         and not (c["clave"] == "config" and not ctx.manifiesto.get("usable"))]
+        if malos_forager:
+            avisos.append(_aviso(f"descarta:{p}", f"forager descartaría {p}, que ya está en la lista.",
+                                 "; ".join(malos_forager) + ". Si tiene posición, queda en parada gradual y no reabre.",
+                                 casilla=True, frase=f"forager descartaría {p}"))
+    if e.expo.get("error"):
+        bloqueos.append(f"{e.expo['error']} Sin posiciones no se puede saber cuántos lugares están ocupados.")
+    lug = lugares(validos, e.expo, cfg.get("symbols_to_ignore"))
+    ocupados = lug["ocupados"]
+    if not e.expo.get("error"):
+        if n < lug["minimo"]:
+            lw_n = float(twe) / n
+            bloqueos.append(
+                f"Pares a la vez {n} con {len(ocupados)} lugares ocupados ({_pares_texto(ocupados)}): forager le daría lw "
+                f"{_n(lw_n, 2)} a todos, también a los que salen con posición: hasta {_n(lw_n * len(ocupados), 2)} veces el "
+                f"balance. Mínimo: {lug['minimo']}.")
+        if n > lug["maximo"]:
+            extra = f" + {len(lug['salen_con_posicion'])} que salen con posición" if lug["salen_con_posicion"] else ""
+            bloqueos.append(f"Pares a la vez {n} es más que los pares ({len(validos)}{extra}): la TWE no se alcanzaría. "
+                            f"Máximo: {lug['maximo']}.")
+    updates = {"twe_long": bot_control.twe_valor(twe), "twe_short": bot_control.TWE_SHORT_SOLO_LONG, "n_longs": n,
+               "approved_symbols_long": list(pares), "approved_symbols_short": list(pares)}
+    nuevo = {**cfg, **updates}
+    if not bloqueos and all(cfg.get(k) == v for k, v in updates.items()):
+        bloqueos.append("No hay cambios: la estrategia ya es esa.")
+
+    balance = ctx.balance
+    antes_d = derivados(cfg.get("twe_long"), vigente["n_longs"], balance, cfg.get("leverage"))
+    despues_d = derivados(updates["twe_long"], n, balance, cfg.get("leverage"))
+    perfil_antes = e.detectar(cfg)
+    perfil_despues = e.detectar(nuevo)
+    nombre = lambda p: e.nombres_perfil.get(p, "Personalizado") if p else "Personalizado"  # noqa: E731
+    filas = [
+        _fila("pares_long", "Pares", "approved_symbols_long", vigente["pares_long"], pares,
+              _pares_texto(vigente["pares_long"]), _pares_texto(pares)),
+        _fila("pares_short", "Pares short", "approved_symbols_short: copia de la long (sin efecto con n_shorts 0; así "
+              "forager no mezcla listas)", vigente["pares_short"], pares, _pares_texto(vigente["pares_short"]),
+              _pares_texto(pares)),
+        _fila("n_longs", "Pares a la vez", "n_longs", vigente["n_longs"], n, str(vigente["n_longs"]), str(n),
+              nota=(f"{len(validos)} pares + {_pares_texto(lug['salen_con_posicion'])} mientras tenga posición"
+                    if lug["salen_con_posicion"] and n > len(validos) else "")),
+        _fila("lw", "Límite por par", "lw = TWE ÷ pares a la vez", antes_d["lw"], despues_d["lw"],
+              _num_txt(antes_d["lw"]), _num_txt(despues_d["lw"]),
+              nota="también para los que salen con posición" if lug["salen_con_posicion"] else ""),
+        _fila("max_por_par", "Máximo por par", "balance para dimensionar × lw", antes_d["max_por_par"],
+              despues_d["max_por_par"], _usdt(antes_d["max_por_par"]), _usdt(despues_d["max_por_par"])),
+        _fila("twe_long", "TWE long", "twe_long", cfg.get("twe_long"), updates["twe_long"],
+              bot_control._fmt_num(cfg.get("twe_long")), bot_control._fmt_num(twe),
+              nota=f"máximo total {_usdt(despues_d['max_total'])}"),
+    ]
+    if numero(cfg.get("twe_short")) != float(bot_control.TWE_SHORT_SOLO_LONG):
+        filas.append(_fila("twe_short", "TWE short", "sin efecto con n_shorts 0", cfg.get("twe_short"),
+                           updates["twe_short"], _num_txt(numero(cfg.get("twe_short"))),
+                           _num_txt(float(bot_control.TWE_SHORT_SOLO_LONG))))
+    if lug["salen_con_posicion"] and n > len(validos):
+        efectiva = float(twe) / n * len(validos)
+        filas.append(_fila("twe_efectiva", "TWE efectiva", "lw × bots con lugar", None, None, _num_txt(float(twe)),
+                           f"{_num_txt(float(twe))} mientras {_pares_texto(lug['salen_con_posicion'])} siga abierta · "
+                           f"{_num_txt(efectiva)} cuando cierre", cambia=True))
+    filas.append(_fila("perfil", "Perfil", "", perfil_antes, perfil_despues, nombre(perfil_antes), nombre(perfil_despues),
+                       nota=("rescate, disparo por uPnL y retiro sin cambios" if not perfil_despues else "")))
+
+    # Avisos con casilla (spec § 3.2, columna del medio) e información.
+    sin_backtest = [p for p in validos if resultados[p].get("sin_backtest")]
+    if sin_backtest:
+        base_txt = nombre(perfil_antes) if perfil_antes else "los perfiles"
+        avisos.insert(0, _aviso("sin_backtest", f"{', '.join(sin_backtest)} {'no tiene' if len(sin_backtest) == 1 else 'no tienen'} "
+                                "backtest de BotBulls.",
+                                f"Los números de {base_txt} se midieron con BNB, BTC, ETH y XRP y sus configs clock, 4 a "
+                                "la vez (lw 1,00). Con este cambio no aplican.", casilla=True,
+                                frase=f"{', '.join(sin_backtest)} no {'tiene' if len(sin_backtest) == 1 else 'tienen'} backtest"))
+    if twe > bot_control.TWE_ADVERTENCIA:
+        avisos.append(_aviso("twe_alta", f"TWE {bot_control._fmt_num(twe)} por encima de {bot_control._fmt_num(bot_control.TWE_ADVERTENCIA)}.",
+                             "En el backtest 2021-2026 aparecen liquidaciones desde TWE 6, y los perfiles medidos son TWE 3 "
+                             "y TWE 4.", casilla=True, frase=f"TWE {bot_control._fmt_num(twe)} está por encima de lo medido"))
+    for p in lug["salen_con_posicion"]:
+        qty = e.expo.get("posiciones", {}).get(p, 0.0)
+        noc = e.expo.get("nocional", {}).get(p)
+        pct = f" ({_n(noc / balance * 100, 0)} % del balance)" if noc and balance else ""
+        avisos.append(_aviso(f"sale:{p}", f"{p} tiene una posición abierta: {_n(qty)} {corto(p)}, ≈ {_n(noc or 0, 0)} USDT"
+                             f"{pct}.",
+                             f"Sigue en parada gradual hasta cerrarse: puede promediar hasta {_usdt(despues_d['max_por_par'])} "
+                             f"(lw {_num_txt(despues_d['lw'])}) y ocupa 1 de los {n} lugares mientras tanto. Su venta abierta "
+                             "sigue.", casilla=True, frase=f"{p} sigue operando en parada gradual hasta cerrar"))
+    if lug["salen_con_posicion"] and n > len(validos):
+        lw_bajo = float(twe) / len(validos) if validos else None
+        if lw_bajo:
+            avisos.append(_aviso("por_que_no_baja", f"Por qué no baja a {len(validos)} a la vez ahora.",
+                                 f"forager le da la misma lw a todos, también al que sale. Con {len(validos)} a la vez sería "
+                                 f"lw {_n(lw_bajo, 2)} para los {len(ocupados)} bots: hasta {_n(lw_bajo * len(ocupados), 2)} "
+                                 f"veces el balance mientras {_pares_texto(lug['salen_con_posicion'])} siga abierta. El panel "
+                                 "no lo permite. Cuando cierre, Bot ofrece bajar los lugares."))
+    solo_ordenes = [p for p in salen if p not in lug["salen_con_posicion"] and e.expo.get("ordenes", {}).get(p)]
+    for p in solo_ordenes:
+        avisos.append(_aviso(f"sale_orden:{p}", f"{p} solo tiene órdenes abiertas.",
+                             "Pasa a parada gradual sin posición: no compra, la orden se cancela al reiniciar y el lugar se "
+                             "libera en el ciclo siguiente."))
+    if perfil_antes != perfil_despues and not perfil_despues:
+        avisos.append(_aviso("personalizado", "El perfil pasa a Personalizado.",
+                             f"TWE, pares o pares a la vez distintos de los medidos: los números de {nombre(perfil_antes)} "
+                             "no aplican.", casilla=True, frase="los números del perfil dejan de aplicar"))
+    if not perfil_despues and e.rescate_cfg.get("habilitado"):
+        upnl = e.rescate_cfg.get("upnl_x_pct")
+        tope = e.rescate_cfg.get("tope_perdida_pct")
+        avisos.append(_aviso("rescate_personalizado", "Personalizado con rescate: umbrales medidos para otra cartera.",
+                             f"El rescate sigue armado y sus umbrales se midieron con Con rescate (TWE 4 y los 4 pares): "
+                             f"disparo por uPnL al {upnl} % del balance{f' y tope de pérdida {tope} %' if tope else ''}. Con "
+                             "esta cartera no están medidos: revisalos en Rescate.", casilla=True,
+                             frase="los umbrales del rescate dejan de estar medidos"))
+    if len(validos) > n:
+        avisos.append(_aviso("rotacion", f"Rotando: {n} de {len(validos)} a la vez.",
+                             f"Cada {cfg.get('update_interval_minutes') or 15} min forager elige {n} pares por volumen, "
+                             "unilateralidad y ruido; el que queda afuera pasa a parada gradual y no abre nada nuevo."))
+    libres = max(0, n - len(ocupados))
+    for p in [x for x in validos if x not in vigente["pares_long"]]:
+        avisos.append(_aviso(f"entra:{p}", f"{p} entra {'apenas arranque forager' if libres else 'cuando se libere un lugar'}.",
+                             f"{len(ocupados)} de {n} lugares ocupados ahora (posiciones y órdenes abiertas)."))
+        libres = max(0, libres - 1)
+    if not ctx.manifiesto.get("usable"):
+        avisos.append(_aviso("manifiesto", "Configs sin verificar.",
+                             f"{ctx.manifiesto.get('motivo')} No se pueden agregar pares; sí cambiar TWE, pares a la vez y "
+                             "quitar."))
+    if e.running:
+        como = (f"passivbot se reinicia (docker restart) y forager tarda ~{e.warmup_s} s en volver a operar los pares. Las "
+                "posiciones y órdenes abiertas siguen en Binance. No cambia los modos (long_mode "
+                f"{cfg.get('long_mode') or 'normal'}).")
+    else:
+        como = ("passivbot está detenido: se escribe la config y no se arranca nada. Se aplica al iniciar (Iniciar… muestra "
+                "este cambio).")
+    avisos.append(_aviso("como", "Cómo se aplica.", como))
+
+    con_casilla = [a for a in avisos if a["casilla"]]
+    frases = [a["frase"] for a in con_casilla if a["frase"]]
+    casilla_texto = ("Entiendo que " + (", ".join(frases[:-1]) + " y " + frases[-1] if len(frases) > 1 else frases[0])
+                     + (" y que passivbot se reinicia." if e.running else ".")) if frases else ""
+    cambios: List[str] = [f"+{p}" for p in validos if p not in vigente["pares_long"]]
+    cambios += [f"−{p}" for p in salen]
+    if vigente["n_longs"] != n:
+        cambios.append(f"pares a la vez {vigente['n_longs']} → {n}")
+    if numero(cfg.get("twe_long")) != float(twe):
+        cambios.append(f"TWE {bot_control._fmt_num(cfg.get('twe_long'))} → {bot_control._fmt_num(twe)}")
+    if perfil_antes != perfil_despues:
+        cambios.append(f"perfil {nombre(perfil_antes)} → {nombre(perfil_despues)}")
+    resumen = " · ".join(cambios) or "sin cambios de pares, lugares ni TWE"
+    plan = {
+        "titulo": e.titulo,
+        "origen": e.origen,
+        "running": e.running,
+        "como": "reinicia" if e.running else "escribe",
+        "vigente": vigente,
+        "objetivo": {"twe_long": updates["twe_long"], "n_longs": n, "pares": list(pares)},
+        "updates": updates,
+        "diff": filas,
+        "avisos": avisos,
+        "lugares": lug,
+        "pares": [resultados[p] for p in validos],
+        "perfil": {"antes": perfil_antes, "despues": perfil_despues},
+        "requiere_casilla": bool(con_casilla),
+        "casilla_texto": casilla_texto,
+        "resumen": resumen,
+    }
+    plan["texto"] = "\n".join([f"{e.titulo}: {resumen}."] + [f"{f['titulo']}: {f['texto_antes']} -> {f['texto_despues']}"
+                                                            for f in filas if f["cambia"]]
+                              + [f"{a['titulo']} {a['texto']}" for a in avisos])
+    if bloqueos:
+        raise EstrategiaError(bloqueos, plan)
+    plan["plan_hash"] = hashlib.sha256(json.dumps(
+        {"archivo": e.archivo_sha, "updates": updates, "casilla": sorted(a["clave"] for a in con_casilla),
+         "como": plan["como"], "origen": e.origen}, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    return plan
+
+
+def registrar_version(data_dir: pathlib.Path, entry: Dict[str, Any]) -> None:
+    """Un renglón en ``estrategia_versiones.jsonl``: quién, qué y con qué backup (los backups solos no lo dicen).
+    Nunca lanza: el cambio ya quedó escrito."""
+    path = pathlib.Path(data_dir) / VERSIONES_FILE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        lineas = path.read_text(encoding="utf-8").splitlines()
+        if len(lineas) > 2 * MAX_VERSIONES:
+            tmp = path.with_name(f".{path.name}.tmp")
+            tmp.write_text("\n".join(lineas[-MAX_VERSIONES:]) + "\n", encoding="utf-8")
+            os.replace(tmp, path)
+    except (OSError, ValueError):
+        pass
+
+
+def aplicar(settings: Any, store: Any, armar: Any, plan_hash: str, usuario: str, origen: str = "estrategia",
+            accion: str = "estrategia", docker: Any = None, reporter: Any = None,
+            extra_version: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Aplica un plan (corre en el job, con el lock de acciones). Vuelve a armar el plan con lo de ahora: si cambió
+    (``plan_hash``), 409 y nada escrito. Backup y escritura atómica; si passivbot corre (operando o en parada gradual)
+    lo reinicia (los modos no se tocan), y si Docker rechaza el reinicio restaura el backup. Detenido: escribe y no
+    arranca (los pasos de Docker quedan "omitido: se aplica al iniciar")."""
+    rep = reporter or bot_control.NULL_REPORTER
+    rep.step("validar", bot_control.PASO_EN_CURSO)
+    plan = armar()
+    if plan["plan_hash"] != plan_hash:
+        raise EstrategiaError(["El plan cambió desde que lo revisaste (estrategia, posiciones o estado del bot): no se "
+                               "escribió nada. Revisalo de nuevo."])
+    path = settings.require_config()
+    docker = docker or bot_control.DockerClient(settings.docker_url)
+    rep.step("validar", bot_control.PASO_OK, f"{plan['resumen']}; passivbot {'corriendo' if plan['running'] else 'detenido'}")
+    cfg_antes = bot_control.read_forager_config(path)
+    updates = plan["updates"]
+    backup = bot_control.write_forager_config(path, updates, rep)
+    cfg_despues = {**cfg_antes, **updates}
+    version = {"ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "usuario": usuario,
+               "accion": accion, "backup": backup.name, "hash_antes": bot_control.estrategia_hash(cfg_antes),
+               "hash_despues": bot_control.estrategia_hash(cfg_despues), "resumen": plan["resumen"],
+               "cambios": bot_control.cambios_estrategia(bot_control.resumen_estrategia(cfg_antes),
+                                                         bot_control.resumen_estrategia(cfg_despues)),
+               **(extra_version or {})}
+    out: Dict[str, Any] = {"ok": True, "docker_action": None, "config": updates, "backup": backup.name,
+                           "cambios_texto": plan["resumen"]}
+    if plan["running"]:
+        rep.step("docker", bot_control.PASO_EN_CURSO, f"Reiniciando {settings.container}")
+        try:
+            docker.restart(settings.container)
+        except bot_control.DockerError as exc:
+            if exc.uncertain:
+                registrar_version(store.data_dir, {**version, "resultado": "incierto"})
+                err = bot_control.DockerError(f"{exc} Resultado incierto: la estrategia quedó escrita (backup "
+                                              f"{backup.name}); revisar el estado del bot antes de reintentar.")
+                err.uncertain = True
+                raise err from exc
+            try:
+                bot_control.restore_forager_config(path, backup)
+            except (bot_control.BotControlError, OSError) as restore_exc:
+                registrar_version(store.data_dir, {**version, "resultado": "sin_restaurar"})
+                raise bot_control.DockerError(f"{exc} ATENCION: la config de forager quedó con la estrategia nueva y no "
+                                              f"se pudo restaurar ({restore_exc}); backup: {backup.name}.") from exc
+            raise bot_control.DockerError(f"{exc} Se restauró la config de forager; no se aplicó ningún cambio.") from exc
+        rep.step("docker", bot_control.PASO_OK, "docker restart")
+        out["docker_action"] = "restart"
+        arranque = bot_control.registrar_arranque(store, cfg_despues, usuario, origen, "restart")
+        if arranque:
+            out["arranque"] = arranque["id"]
+    else:
+        rep.step("docker", bot_control.PASO_OMITIDO, "passivbot está detenido: no se arranca. Se aplica al iniciar.")
+        rep.step("verificar", bot_control.PASO_OMITIDO, "omitido: passivbot detenido.")
+        rep.step("forager", bot_control.PASO_OMITIDO, "omitido: se aplica al iniciar.")
+        out["warning"] = "passivbot está detenido: la estrategia queda guardada y se aplica al iniciar."
+    registrar_version(store.data_dir, {**version, "resultado": "ok"})
+    return out

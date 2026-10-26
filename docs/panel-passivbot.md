@@ -66,6 +66,10 @@ Browser ──(sesión + CSRF)──> dashboard (Flask)
 | POST | `/api/bot/perfil` | `{"perfil": "conservador"\|"con_rescate"}` (+ `"confirmar": true`) | Perfil de riesgo: TWE de forager + rescate, disparo por uPnL y retiro en una sola acción (ver [perfiles.md](perfiles.md)). |
 | POST | `/api/bot/stop` | `{"modo": "graceful"\|"apagar"}` | `graceful`: `long_mode=short_mode=graceful_stop` + start o restart (requiere `FUTURESBOARD_FORAGER_SUPPORTS_MODES=1`, si no 409). `apagar`: `stop` del contenedor y después cancela **todas** las órdenes y cierra **todas** las posiciones de USDⓈ-M Futures a mercado (ver "Apagar" abajo). Antes del stop deja `long_mode`/`short_mode` en `graceful_stop` en la config; si no puede escribirla, sigue igual. |
 
+| GET | `/api/bot/estrategia` | – | Estrategia vigente, derivados (lw, máximos, caída que liquida), lugares ocupados, pares con sus chequeos, avanzado y `base_hash`. Consulta la API pública de Binance (con caché). |
+| GET | `/api/bot/estrategia/candidatos?q=SOL` | – | Hasta 10 pares del endpoint que opera (y del manifiesto de configs) con sus chequeos. |
+| POST | `/api/bot/estrategia` | `{"twe_long", "n_longs", "pares", "base_hash"}` (+ `"confirmar": true, "plan_hash"`) | Cambio de estrategia: sin `confirmar`, 409 con el plan (diff, avisos, `plan_hash`) o con los `bloqueos`; con `confirmar`, el job. Escribe también `approved_symbols_short` (= long) y `twe_short` 1; no toca los modos. Reinicia passivbot si corre; detenido, escribe y no arranca. Ver [Estrategia](#estrategia-pares-y-pares-a-la-vez). |
+
 Presets (históricos del guardian): bajo 4/1, medio 6/2, alto 8/3 (`twe_long`/`twe_short`).
 
 Códigos: 400 parámetro inválido · 403 CSRF · 409 graceful no soportado, `short_mode` inválido o
@@ -229,6 +233,28 @@ falla (`EBUSY`) o passivbot sigue viendo el inode viejo.
 `ts`, `user`, `action`, `params`, `result` (`ok`/`rechazado`/`error`/`interrumpido`), `detail`, `remote_addr`.
 En Apagar, `detail` incluye `resumen: {...}` con el JSON del cierre.
 
+## Estrategia: pares y pares a la vez
+
+Diseño completo en `diseno/bot-estrategia/spec.md` (§ 2.4 y § 3). En corto:
+
+- **Chequeos por par** (`futuresboard/estrategia.py`), contra la API pública del endpoint que opera (Demo con
+  `BINANCE_TESTNET`), sin credenciales, con el timeout del scraper y caché (`exchangeInfo` 10 min):
+  formato, perpetuo USDT en TRADING, config que elegiría forager (manifiesto de passivbot), edad con la primera vela
+  1M contra `market_age_threshold`, mínimo de Binance contra `max_min_cost` (en Demo informa también el de real),
+  500 velas de 15 m, lista negra, backtest (los 4 pares y el md5 de su config) y 1.ª compra contra el mínimo.
+- **Manifiesto de configs** (`live_configs_manifest.json`, junto a `new.json`): lo escribe forager (botbulls/passivbot#6).
+  Sin un manifiesto usable no se pueden **agregar** pares (el motivo lo dice); sí cambiar TWE, pares a la vez y quitar.
+- **Regla de exposición**: `n_longs ≥ |P ∪ O|`, con P = pares con posición (estén o no en la lista nueva) y O = pares de
+  la lista nueva con órdenes abiertas (base del scraper). Quitar un par con posición no baja los lugares: forager le da
+  la misma lw a todos, también al que sale en parada gradual. Techo: pares + los que salen con posición.
+- **Escritura**: plan 409 → confirmación (con casilla si hay avisos: sin backtest, TWE > 4, quitar con posición,
+  Personalizado con rescate, un par que forager descartaría) → job con el mismo lock, backup y escritura atómica.
+  Si Docker rechaza el reinicio se restaura el backup. Cada cambio queda en `bot_actions.log` (acción `estrategia`,
+  con el diff resumido) y en `estrategia_versiones.jsonl` (quién, qué, backup y hash antes y después).
+- **Chequeos por ciclo** (`futuresboard/chequeos_forager.py`): un hilo del worker de gunicorn repite los filtros de
+  forager sobre los aprobados cada `update_interval_minutes`, deja el resultado en `chequeos_forager.json` (Bot → Pares
+  ahora) y avisa por Telegram solo cuando un par cambia de estado. Binance caído es "sin datos": no avisa.
+
 ## Variables de entorno
 
 | Variable | Default | Descripción |
@@ -237,6 +263,7 @@ En Apagar, `detail` incluye `resumen: {...}` con el JSON del cierre.
 | `FUTURESBOARD_PASSIVBOT_CONTAINER` | `client17-passivbot` | Nombre del contenedor de passivbot. |
 | `FUTURESBOARD_FORAGER_CONFIG` | (vacía) | Ruta del HJSON de forager dentro del contenedor del dashboard. Sin ella START y graceful quedan deshabilitados; Apagar funciona. |
 | `FUTURESBOARD_FORAGER_SUPPORTS_MODES` | `0` | Habilita Graceful stop. Activar solo con forager parcheado (ver arriba). |
+| `FUTURESBOARD_CHEQUEOS_FORAGER` | `1` | `0` apaga el hilo de los chequeos de forager por ciclo (Bot → Pares ahora y avisos por Telegram). |
 | `FUTURESBOARD_SECRET_KEY` | efímera + warning | Fijarla para que las sesiones (y el token CSRF) sobrevivan reinicios. Ver [login.md](login.md) para cookies, usuarios y rate limit. |
 
 Apagar no agrega variables: usa `API_KEY` / `API_SECRET` / `API_BASE_URL` / `EXCHANGE` de

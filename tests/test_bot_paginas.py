@@ -138,15 +138,17 @@ def test_estrategia_muestra_lo_vigente_en_solo_lectura(client, env, docker):  # 
     assert re.search(r'data-value="4"[^>]*>4<', vigente)  # TWE long
     assert "4 a la vez" in vigente
     assert "lw 1,00" in vigente
-    # Solo lectura: nada que escriba la estrategia todavía (lo hace el flujo de Estrategia, otro commit).
-    assert "/api/bot/estrategia" not in html and "<form" not in vigente
+    # Vigente es solo lectura: lo que escribe la estrategia es el editor de abajo (POST /api/bot/estrategia).
+    assert "/api/bot/estrategia" not in vigente and "<form" not in vigente
     # Perfil y TWE manual siguen disponibles (mismos endpoints, mismos IDs que tenía la rueda).
     assert 'id="botPerfilSelect"' in html and 'data-bot-accion="perfil"' in html
     assert 'id="botTweInput" name="twe_long" type="number" min="0.5" max="8" step="0.25"' in html
     assert 'data-bot-accion="twe"' in html
     assert '<span class="d-none" id="botTweAdvertencia" data-bot-panel="twe-advertencia" role="alert"></span>' in html
-    # Lugar marcado para el editor de la estrategia (borrador, pares, avanzado, versiones).
-    assert 'data-estrategia-editor' in html
+    # Editor de la estrategia (borrador, exposición, pares, avanzado): lo arma static/js/estrategia.js con la API.
+    assert 'data-estrategia-editor' in html and 'data-url="/api/bot/estrategia"' in html
+    assert 'id="bbAgregarParModal"' in html and "js/estrategia.js" in html
+    assert 'id="bbTwe"' in html and 'id="bbNLongs"' in html
 
 
 def test_estrategia_sin_config_de_forager_no_rompe(client, monkeypatch):  # noqa: F811

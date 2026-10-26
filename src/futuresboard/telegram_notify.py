@@ -213,6 +213,8 @@ def format_bot_action(action: str, params: Dict[str, Any], outcome: str, payload
         titulo = f"START riesgo {esc(params.get('riesgo'))}"
     elif action == "perfil":
         titulo = f"PERFIL {esc(params.get('perfil'))}"
+    elif action == "estrategia":
+        titulo = "VOLVER a una versión de la estrategia" if params.get("volver") else "ESTRATEGIA"
     elif action == "stop" and params.get("modo") == "apagar":
         titulo = "APAGAR (stop + cierre de posiciones)"
     elif action == "stop":
@@ -226,6 +228,8 @@ def format_bot_action(action: str, params: Dict[str, Any], outcome: str, payload
         lines.append(f"Docker: {esc(payload.get('docker_action'))}")
     if not ok and payload.get("error"):
         lines.append(f"Error: {esc(payload.get('error'))}")
+    if payload.get("cambios_texto"):
+        lines.append(f"Cambios: {esc(payload.get('cambios_texto'))}")
     if payload.get("warning"):
         lines.append(f"⚠️ {esc(payload.get('warning'))}")
     if isinstance(payload.get("resumen"), dict):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import functools
+import hashlib
 import hmac
 import json
 import os
@@ -1670,7 +1671,8 @@ def _fecha_utc(momento: datetime | None) -> str:
     return f"{momento:%d/%m %H:%M} UTC" if momento else ""
 
 
-_TITULOS_ACCION = {"start": "inicio", "graceful": "parada gradual", "apagar": "apagar", "perfil": "perfil"}
+_TITULOS_ACCION = {"start": "inicio", "graceful": "parada gradual", "apagar": "apagar", "perfil": "perfil",
+                   "estrategia": "estrategia"}
 _ESTADOS_JOB = {"ok": "ok", "error": "con error", "interrumpido": "interrumpida", "en_curso": "en curso"}
 
 
@@ -1691,6 +1693,8 @@ def ultima_accion() -> dict | None:
     elif accion == "perfil":
         nombre = (perfiles.PERFILES.get(params.get("perfil")) or {}).get("nombre") or params.get("perfil")
         titulo = f"perfil {nombre}"
+    elif accion == "estrategia":
+        titulo = "volver a una versión" if params.get("volver") else "estrategia"
     return {**{k: v for k, v in data.items() if k != "pid"}, "titulo": titulo,
             "estado_texto": _ESTADOS_JOB.get(data.get("estado"), str(data.get("estado")))}
 
@@ -1831,19 +1835,8 @@ MAX_CANDIDATOS = 10
 
 
 def _balance_estrategia() -> dict:
-    """Balance para dimensionar = max(0, billetera − préstamo del rescate) (``passivbot.py:404-410``). La billetera
-    sale de la base del scraper; el préstamo, del estado del rescate. Nunca lanza."""
-    try:
-        fila = db.query("SELECT totalWalletBalance FROM account WHERE AID = 1", one=True)
-        billetera = float(fila[0]) if fila is not None and fila[0] is not None else None
-    except Exception:  # noqa: BLE001
-        billetera = None
-    try:
-        prestamo = float(rescate.dec(rescate.panel_status(_bot_store().data_dir).get("prestamo") or "0"))
-    except Exception:  # noqa: BLE001
-        prestamo = 0.0
-    dim = max(0.0, billetera - prestamo) if billetera is not None else None
-    return {"billetera": billetera, "prestamo": prestamo, "para_dimensionar": dim}
+    """Balance para dimensionar (``estrategia.balance_dimensionar``, que también usa el job sin contexto de Flask)."""
+    return estrategia.balance_dimensionar(current_app.config["DATABASE"], _bot_store().data_dir)
 
 
 def _contexto_estrategia(cfg: dict, path, balance: float | None, manif: dict | None = None) -> estrategia.Contexto:
@@ -1903,6 +1896,11 @@ def bot_estrategia():
         "derivados": estrategia.derivados(cfg.get("twe_long"), vigente["n_longs"], balance["para_dimensionar"],
                                           cfg.get("leverage"), nocional),
         "lugares": {**lug, "error": expo.get("error")},
+        # Para recalcular los lugares del borrador en el navegador (el servidor los vuelve a validar al aplicar).
+        "exposicion": {"con_posicion": sorted(expo.get("posiciones") or {}),
+                       "con_ordenes": sorted(expo.get("ordenes") or {}),
+                       "ignorar": [s for s in cfg.get("symbols_to_ignore") or [] if isinstance(s, str)]},
+        "ciclo_min": cfg.get("update_interval_minutes") or 15,
         "pares": pares,
         "fuera_de_lista": fuera,
         "avanzado": estrategia.avanzado(cfg, manif),
@@ -1954,6 +1952,97 @@ def bot_estrategia_candidatos():
         r["ya_esta"] = r["symbol"] in aprobados
     return _json_response({"ok": True, "q": q, "lw": lw, "endpoint": ctx.operativo.nombre, "resultados": resultados,
                            "manifiesto": {k: manif.get(k) for k in ("estado", "usable", "motivo")}, "error": None})
+
+
+def _armador_estrategia(objetivo: dict, origen: str = "estrategia", titulo: str = "Revisar y aplicar la estrategia",
+                        todos_entran: bool = False):
+    """Función que arma el plan (``estrategia.armar_plan``) con lo que hay en ese momento. Captura acá lo que sale de la
+    app (rutas, Demo o real) porque el job la vuelve a llamar desde su hilo, con el lock y sin contexto de Flask."""
+    data_dir = _bot_store().data_dir
+    db_path = current_app.config["DATABASE"]
+    testnet = bool(current_app.config.get("BINANCE_TESTNET"))
+    base = current_app.config.get("API_BASE_URL")
+    nombres = {k: v["nombre"] for k, v in perfiles.PERFILES.items()}
+
+    def armar() -> dict:
+        settings = bot_control.Settings()
+        settings.require_enabled()
+        path = settings.require_config()
+        docker = bot_control.DockerClient(settings.docker_url)
+        info = bot_control._inspect_existing(docker, settings.container)
+        try:
+            crudo = path.read_bytes()
+        except OSError as exc:
+            raise bot_control.ConfigError(f"No se pudo leer la config de forager: {exc}") from exc
+        cfg = bot_control.read_forager_config(path)
+        manif = manifiesto.leer(path)
+        balance = estrategia.balance_dimensionar(db_path, data_dir)
+        ctx = estrategia.Contexto.armar(cfg, path, testnet, base, balance["para_dimensionar"], manif=manif)
+        rescate_cfg, _err = rescate.load_config(data_dir)
+        entrada = estrategia.Entrada(
+            cfg=cfg, archivo_sha=hashlib.sha256(crudo).hexdigest(), objetivo=objetivo, ctx=ctx,
+            expo=estrategia.leer_exposicion(db_path), rescate_cfg=rescate_cfg, running=bool(info.get("running")),
+            container=settings.container, detectar=lambda c: perfiles.detectar(c, rescate_cfg), nombres_perfil=nombres,
+            warmup_s=bot_control.forager_warmup_seconds(), bloqueo_rescate=rescate.start_bloqueado(data_dir),
+            origen=origen, titulo=titulo, todos_entran=todos_entran)
+        return estrategia.armar_plan(entrada)
+
+    return armar
+
+
+def _estrategia_plan_o_job(objetivo: dict, params: dict, armar, origen: str = "estrategia",
+                           extra_version: dict | None = None):
+    """Plan (409 con ``requiere_confirmacion``, el diff, los avisos y ``plan_hash``) o, con ``confirmar`` y el mismo
+    ``plan_hash``, el job (202) con el mismo lock que START, perfil y stop (spec § 3.3)."""
+    try:
+        plan = armar()
+    except estrategia.EstrategiaError as exc:
+        _rescate_audit("estrategia", params, "rechazado", str(exc))
+        return _json_response({"ok": False, "error": "No se puede aplicar: " + " ".join(exc.bloqueos),
+                               "bloqueos": exc.bloqueos, "plan": exc.plan}, exc.status_code)
+    except bot_control.BotControlError as exc:
+        _rescate_audit("estrategia", params, "rechazado", str(exc))
+        return _json_response({**exc.payload, "ok": False, "error": str(exc)}, exc.status_code)
+    if not objetivo.get("confirmar") or objetivo.get("plan_hash") != plan["plan_hash"]:
+        if objetivo.get("confirmar"):
+            texto = ("El plan ya no corresponde: cambió la estrategia, las posiciones o el estado del bot desde que se "
+                     "armó. Revisalo de nuevo.\n\n" + plan["texto"])
+            _rescate_audit("estrategia", params, "rechazado", "plan_hash viejo o ausente")
+        else:
+            texto = plan["texto"]
+            _rescate_audit("estrategia", params, "requiere_confirmacion", plan["resumen"])
+        return _json_response({"ok": False, "requiere_confirmacion": True, "error": texto, "plan": plan,
+                               "plan_hash": plan["plan_hash"]}, 409)
+    esperado = plan["plan_hash"]
+    usuario = session.get("username") or "?"
+
+    def validate():
+        settings = bot_control.Settings()
+        settings.require_enabled()
+        return settings, None
+
+    def work(store, settings, _extra, rep):
+        return estrategia.aplicar(settings, store, armar, esperado, usuario, origen=origen, reporter=rep,
+                                  extra_version=extra_version)
+
+    return _run_bot_action("estrategia", params, validate, work)
+
+
+@app.route("/api/bot/estrategia", methods=["POST"])
+@csrf_protect
+def bot_estrategia_aplicar():
+    """Cambiar TWE, pares a la vez y pares (spec § 3.3): ``{twe_long, n_longs, pares, base_hash}`` responde el plan
+    (409); ``{..., confirmar: true, plan_hash}`` lanza el job. Escribe también ``approved_symbols_short`` (= long) y
+    ``twe_short`` 1; no toca los modos."""
+    body = request.get_json(silent=True)
+    params = {k: body.get(k) for k in ("twe_long", "n_longs", "pares")} if isinstance(body, dict) else {}
+    try:
+        objetivo = estrategia.validar_objetivo(body)
+    except ValueError as exc:
+        _rescate_audit("estrategia", params, "rechazado", str(exc))
+        return _json_response({"ok": False, "error": str(exc)}, 400)
+    params = estrategia.params_audit(objetivo)
+    return _estrategia_plan_o_job(objetivo, params, _armador_estrategia(objetivo))
 
 
 @app.route("/estrategia", methods=["GET"])

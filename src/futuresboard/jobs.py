@@ -235,8 +235,13 @@ def accion_de(action: str, params: Dict[str, Any]) -> str:
     return action
 
 
-# Acciones que dejan passivbot corriendo: después se verifica el contenedor y se espera a forager.
-ACCIONES_CON_ARRANQUE = ("start", "graceful", "perfil")
+# Acciones que dejan passivbot corriendo: después se verifica el contenedor y se espera a forager. Estrategia solo
+# reinicia si passivbot ya corría: con el bot detenido escribe y no arranca (``docker_action`` None, ver _con_arranque).
+ACCIONES_CON_ARRANQUE = ("start", "graceful", "perfil", "estrategia")
+
+
+def _con_arranque(job: "Job", outcome: str, payload: Dict[str, Any]) -> bool:
+    return outcome == "ok" and job.accion in ACCIONES_CON_ARRANQUE and bool(payload.get("docker_action"))
 
 
 def catalogo_de(accion: str) -> List[tuple]:
@@ -248,6 +253,10 @@ def catalogo_de(accion: str) -> List[tuple]:
         from futuresboard import perfiles  # perfiles importa rescate y c3: import diferido
 
         return perfiles.PERFIL_STEPS
+    if accion == "estrategia":
+        from futuresboard import estrategia
+
+        return estrategia.ESTRATEGIA_STEPS
     return bot_control.START_STEPS
 
 
@@ -343,6 +352,9 @@ class JobRegistry:
         data["fin"] = _now_iso()
         error = (f"{motivo} Revisar el estado de passivbot"
                  f"{' y de Binance' if data.get('accion') == 'apagar' else ''} antes de reintentar.")
+        if data.get("accion") == "estrategia":
+            error += (" La estrategia puede haber quedado escrita sin reiniciar passivbot: revisá en Estrategia si está "
+                      "\"pendiente de reinicio\" y en Versiones qué quedó.")
         if data.get("accion") == "perfil":
             # Sin vuelta atrás automática: el rescate se guarda antes de escribir forager.
             error += (" El perfil puede haber quedado a medias (el rescate del perfil guardado con la TWE de antes en "
@@ -480,7 +492,7 @@ def _run(job: Job, action: str, params: Dict[str, Any], ctx: JobContext,
     try:
         try:
             status, payload, outcome = _execute(job, ctx, work)
-            if outcome == "ok" and job.accion in ACCIONES_CON_ARRANQUE:
+            if _con_arranque(job, outcome, payload):
                 try:
                     bot_control.verify_running(ctx.settings, reporter=job)
                 except bot_control.BotControlError as exc:
@@ -488,11 +500,11 @@ def _run(job: Job, action: str, params: Dict[str, Any], ctx: JobContext,
                     status, outcome = exc.status_code, "error"
                     payload = {**payload, "ok": False, "error": str(exc)}
         finally:
-            if outcome == "ok" and job.accion in ACCIONES_CON_ARRANQUE:
+            if _con_arranque(job, outcome, payload):
                 # Cancelable ANTES de soltar el lock: un Apagar que llegue en el medio no recibe 409.
                 job.set_cancelable(True)
             handle.release()
-        if outcome == "ok" and job.accion in ACCIONES_CON_ARRANQUE:
+        if _con_arranque(job, outcome, payload):
             # Paso informativo, sin lock: otra acción lo puede cortar.
             try:
                 bot_control.wait_for_forager(ctx.settings, bot_control.forager_warmup_seconds(),
@@ -529,6 +541,9 @@ def _execute(job: Job, ctx: JobContext, work: Callable[[Job], Dict[str, Any]]) -
 
 def audit_detail(payload: Dict[str, Any]) -> str:
     detail = payload.get("error") or payload.get("docker_action", "")
+    if payload.get("cambios_texto"):
+        # Estrategia, perfil y Volver: el diff resumido ("+SOLUSDT · pares a la vez 4 → 5").
+        detail = f"{detail} · {payload['cambios_texto']}" if detail else str(payload["cambios_texto"])
     if payload.get("resumen") is not None:
         # Apagar: el resumen del cierre (órdenes canceladas, posiciones cerradas, errores, restante).
         detail = f"{detail} | resumen: {json.dumps(payload['resumen'], ensure_ascii=False)}"
@@ -558,7 +573,7 @@ def recover_interrupted(registry: JobRegistry, logger: Any) -> Optional[Dict[str
     if not data:
         return None
     params = data.get("params") if isinstance(data.get("params"), dict) else {}
-    action = data.get("accion") if data.get("accion") in ("start", "perfil") else "stop"
+    action = data.get("accion") if data.get("accion") in ("start", "perfil", "estrategia") else "stop"
     user = str(data.get("usuario") or "?")
     logger.warning("Acción del panel %s interrumpida por un reinicio (job %s).", data.get("accion"), data.get("id"))
     try:
