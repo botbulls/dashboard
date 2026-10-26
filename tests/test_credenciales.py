@@ -529,3 +529,77 @@ def test_panel_sin_keys_en_config_apaga_con_la_del_archivo(secretos, tmp_path, e
     assert resp.status_code == 200
     assert {h.get("X-MBX-APIKEY") for _m, _p, q, h in binance.calls if "signature" in q} == {k}
     assert credenciales.de_app(app).estado()["key_ok_at"] is not None
+
+
+# ---------------------------------------------------------------- credenciales_meta.json con hilos (gthread)
+
+_META_LARGA = {"key": "Lm3p…9zQe", "key_id": "k" * 12, "huella_uid": "h" * 64, "linea_base_en": "2026-10-26T10:00:00Z",
+               "configurada_en": "2026-10-26T10:05:00Z", "configurada_por": "marcos",
+               "validada_en": "2026-10-26T10:05:00Z", "hedge": True, "entorno": "demo",
+               "anterior": {"key": "Ab12…cd34", "key_id": "a" * 12}}
+_META_CORTA = {"key": "Lm3p…9zQe", "key_id": "k" * 12, "huella_uid": "h" * 64, "linea_base_en": "2026-10-26T10:05:01Z",
+               "validada_en": "2026-10-26T10:05:01Z", "hedge": True, "entorno": "demo"}
+
+
+def test_guardar_meta_de_dos_hilos_a_la_vez_deja_un_json_valido(tmp_path, monkeypatch):
+    """gunicorn corre 8 hilos: el GET de la línea de base y el job pueden guardar la meta a la vez. Con un temporal fijo
+    por pid, los dos lo abrían con O_TRUNC, el archivo quedaba mezclado y el segundo os.replace daba
+    FileNotFoundError (revisión, hallazgo 7)."""
+    import threading
+
+    real_dump, real_replace = json.dump, os.replace
+    ambos_escribiendo = threading.Barrier(2, timeout=5)
+    largo_escrito = threading.Event()
+    largo_reemplazo = threading.Event()
+
+    def dump(obj, fh, *a, **k):
+        ambos_escribiendo.wait()  # los dos tienen su temporal abierto antes de escribir
+        if threading.current_thread().name == "get":
+            largo_escrito.wait(5)  # el corto escribe después del largo
+        real_dump(obj, fh, *a, **k)
+        if threading.current_thread().name == "job":
+            fh.flush()
+            largo_escrito.set()
+
+    def replace(src, dst):
+        if threading.current_thread().name == "get":
+            largo_reemplazo.wait(5)
+        try:
+            return real_replace(src, dst)
+        finally:
+            if threading.current_thread().name == "job":
+                largo_reemplazo.set()
+
+    monkeypatch.setattr(json, "dump", dump)
+    monkeypatch.setattr(os, "replace", replace)
+    errores = []
+
+    def correr(meta, nombre):
+        try:
+            credenciales.guardar_meta(tmp_path, meta)
+        except OSError as exc:
+            errores.append((nombre, type(exc).__name__))
+
+    hilos = [threading.Thread(target=correr, args=(_META_LARGA, "job"), name="job"),
+             threading.Thread(target=correr, args=(_META_CORTA, "get"), name="get")]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join(10)
+    monkeypatch.undo()
+    assert errores == []
+    final = json.loads((tmp_path / credenciales.META_FILE).read_text(encoding="utf-8"))
+    assert final in (_META_LARGA, _META_CORTA)
+    assert oct((tmp_path / credenciales.META_FILE).stat().st_mode & 0o777) == "0o600"
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_guardar_meta_sin_temporales_huerfanos_si_falla(tmp_path, monkeypatch):
+    def dump(*a, **k):
+        raise OSError("disco lleno")
+
+    monkeypatch.setattr(json, "dump", dump)
+    with pytest.raises(OSError):
+        credenciales.guardar_meta(tmp_path, _META_CORTA)
+    monkeypatch.undo()
+    assert not list(tmp_path.glob(".*"))

@@ -25,6 +25,7 @@ import logging
 import os
 import pathlib
 import re
+import tempfile
 import threading
 import time
 from typing import Any
@@ -379,13 +380,22 @@ def leer_meta(data_dir: pathlib.Path) -> Dict[str, Any]:
 
 
 def guardar_meta(data_dir: pathlib.Path, meta: Dict[str, Any]) -> None:
-    """Escritura atómica, 600. Solo los campos conocidos: nada que llegue de un request pasa sin filtrar."""
+    """Escritura atómica, 600. Solo los campos conocidos: nada que llegue de un request pasa sin filtrar.
+
+    Un temporal propio por llamada (``mkstemp``): gunicorn corre varios hilos en un proceso y el GET de la línea de base
+    y el job pueden guardar a la vez. Con un temporal fijo por pid los dos lo truncaban y el archivo quedaba mezclado.
+    """
     path = pathlib.Path(data_dir) / META_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump({k: meta.get(k) for k in META_CAMPOS if k in meta}, fh, ensure_ascii=False)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(prefix=f".{META_FILE}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({k: meta.get(k) for k in META_CAMPOS if k in meta}, fh, ensure_ascii=False)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        tmp = ""
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.unlink(tmp)
