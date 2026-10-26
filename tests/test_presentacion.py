@@ -317,3 +317,15 @@ def test_cdns_con_version_fija(client):  # noqa: F811
 def test_sin_recarga_automatica_de_la_pagina(client, con_datos, url):  # noqa: F811
     # La página no se recarga entera cada X segundos (molestaba y cerraba lo que estuvieras mirando).
     assert 'http-equiv="refresh"' not in _get(client, url)
+
+
+@pytest.mark.parametrize("url", ["/", "/login"])
+def test_scripts_de_cdn_con_integrity(client, url):  # noqa: F811
+    # H16 (spec bot-estrategia § 8, decisión 4): todo <script> de un CDN lleva integrity (SRI) y crossorigin
+    # "anonymous", así un CDN comprometido no puede servir otro archivo.
+    html = client.get(url).get_data(as_text=True)
+    scripts = re.findall(r'<script\b[^>]*\bsrc="https://[^"]+"[^>]*>', html)
+    assert scripts
+    for tag in scripts:
+        assert re.search(r'\bintegrity="sha(384|512)-[A-Za-z0-9+/=]{40,}"', tag), tag
+        assert 'crossorigin="anonymous"' in tag, tag
