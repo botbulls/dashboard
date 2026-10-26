@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% import "_inicio.html" as i %}
+{% import "_bot.html" as bot_ui %}
 {% block title %}Inicio{% endblock %}
 {% block acciones %}
     <form method="GET" name="daterangeform" class="bb-fecha">
@@ -12,9 +13,7 @@
     {# Franja de estado: lo primero que se ve, también a 390 px (bot, último pedido, modo de la plata, descargo). #}
     {% set r = rescate_resumen %}
     <section class="bb-franja" aria-label="Estado del bot y modo de la cuenta">
-        <button id="botStatus" type="button" class="badge bot-status-badge bg-secondary" data-bs-toggle="modal" data-bs-target="#botStatusModal" title="Ver el estado del bot">
-            <i class="fas fa-circle-notch fa-spin" aria-hidden="true"></i> <span class="bot-status-text">Cargando…</span>
-        </button>
+        {{ bot_ui.franja_estado(bot_status) }}
         <button type="button" class="last-order-badge" data-bs-toggle="modal" data-bs-target="#lastOrderModal" title="Ver el último pedido">
             <i class="far fa-clock" aria-hidden="true"></i>
             {{ i.ultimo_pedido(lastupdate) }}
@@ -23,6 +22,8 @@
         {{ i.franja_rescate(r, config.get('BINANCE_TESTNET')) }}
         <p class="bb-franja__nota" role="note">Herramienta, no asesor: no garantiza resultados. <a href="#pie">Leer más</a></p>
     </section>
+    {# Control rápido del bot (spec bot-estrategia § 2.2): botones según el estado; /api/vivo/inicio lo rearma. #}
+    {{ bot_ui.control(control) }}
     <div class="bb-modales">
 
         <!-- Last Order Modal -->
@@ -34,24 +35,6 @@
                         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
                     </div>
                     <div class="modal-body" id="lastOrderModalBody">
-                        <p>Cargando…</p>
-                    </div>
-                    <div class="modal-footer">
-                        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cerrar</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Bot Status Modal -->
-        <div class="modal fade" id="botStatusModal" tabindex="-1" aria-labelledby="botStatusModalLabel" aria-hidden="true">
-            <div class="modal-dialog modal-dialog-centered">
-                <div class="modal-content">
-                    <div class="modal-header">
-                        <h2 class="modal-title" id="botStatusModalLabel">Estado del bot</h2>
-                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
-                    </div>
-                    <div class="modal-body" id="botStatusModalBody">
                         <p>Cargando…</p>
                     </div>
                     <div class="modal-footer">
@@ -298,141 +281,6 @@ function graphClickEvent(event, array){
         graficos.forEach((c) => { c.update('none'); });
         if (moneda) moneda.resize();
     };
-})();
-
-// Bot status (passivbot) - no bloquea la carga de la pagina
-(function() {
-    let isUpdating = false;
-
-    function esc(v) {
-        const d = document.createElement('div');
-        d.textContent = v === null || v === undefined ? '-' : String(v);
-        return d.innerHTML;
-    }
-
-    const fmtNum = (v) => (window.BB && window.BB.fmt ? window.BB.fmt.num(v) : v);
-
-    function setBadge(text, cls, iconClass) {
-        const botStatusEl = document.getElementById('botStatus');
-        const botStatusText = botStatusEl?.querySelector('.bot-status-text');
-        if (!botStatusEl || !botStatusText) return;
-        const icon = botStatusEl.querySelector('i');
-        if (icon) {
-            icon.className = iconClass;
-        }
-        botStatusText.textContent = text;
-        botStatusEl.className = 'badge bot-status-badge ' + cls;
-    }
-
-    function setModal(html) {
-        const modalBody = document.getElementById('botStatusModalBody');
-        if (modalBody) {
-            modalBody.innerHTML = html + `
-                <div class="mt-3">
-                    <small class="text-muted">Actualizado a las ${new Date().toLocaleTimeString('es-AR')}</small>
-                </div>`;
-        }
-    }
-
-    function render(data) {
-        if (!data.enabled) {
-            setBadge('Sin panel', 'bg-secondary', 'fas fa-question-circle');
-            setModal(`<p class="text-muted mb-0">${esc(data.message || 'Control del bot no configurado.')}</p>`);
-            return;
-        }
-        const c = data.container || {};
-        const running = c.running === true;
-        // Los modos salen del HJSON: solo significan algo si forager los lee (modes_supported).
-        const modesOk = data.modes_supported === true;
-        const graceful = modesOk && data.long_mode === 'graceful_stop' && data.short_mode === 'graceful_stop';
-        const pendiente = data.config_pending === true
-            ? ' <span class="badge bg-warning text-dark">pendiente de reinicio</span>' : '';
-        const modos = modesOk
-            ? `long <strong>${esc(data.long_mode)}</strong> / short <strong>${esc(data.short_mode)}</strong>`
-            : '<span class="text-muted">n/a (forager no los lee)</span>';
-        let title, text, cls, iconClass;
-        if (running && graceful) {
-            text = 'Parada gradual'; cls = 'bg-warning'; iconClass = 'fas fa-exclamation-triangle';
-            title = '<h6 class="text-warning"><i class="fas fa-exclamation-triangle"></i> Parada gradual (graceful stop)</h6><p class="text-muted small mb-2">No abre nuevas posiciones; gestiona las abiertas.</p>';
-        } else if (running) {
-            text = 'Operando'; cls = 'bg-success'; iconClass = 'fas fa-check-circle';
-            title = '<h6 class="text-success"><i class="fas fa-check-circle"></i> Operando</h6>';
-        } else {
-            text = 'Detenido'; cls = 'bg-danger'; iconClass = 'fas fa-times-circle';
-            title = '<h6 class="text-danger"><i class="fas fa-times-circle"></i> Detenido</h6><p class="text-muted small mb-2">Si hay posiciones u órdenes abiertas, quedan en el exchange sin gestión.</p>';
-        }
-        setBadge(text, cls, iconClass);
-        setModal(`
-            <div class="mb-3">
-                ${title}
-                <ul class="list-unstyled ms-3 mb-0">
-                    <li><i class="fas ${running ? 'fa-check text-success' : 'fa-times text-danger'}"></i> ${esc(c.name || 'passivbot')}: <strong>${esc(c.status || 'desconocido')}</strong></li>
-                    <li><i class="fas fa-sliders-h"></i> Riesgo: <strong>${esc(data.riesgo)}</strong> <span class="text-muted small">(TWE long ${esc(fmtNum(data.twe_long))} / short ${esc(fmtNum(data.twe_short))})</span>${pendiente}</li>
-                    <li><i class="fas fa-random"></i> Modos: ${modos}</li>
-                    ${data.config_pending === true ? '<li class="text-warning small">La config cambió después del último arranque de passivbot: lo que se ve arriba todavía no está en efecto.</li>' : ''}
-                </ul>
-                ${data.message ? `<p class="text-warning small mt-2 mb-0">${esc(data.message)}</p>` : ''}
-            </div>`);
-    }
-
-    function updateBotStatus() {
-        if (!document.getElementById('botStatus') || isUpdating) return;
-        isUpdating = true;
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000);
-        fetch('/api/bot/status', { cache: 'no-cache', credentials: 'same-origin', signal: controller.signal })
-            .then(r => {
-                if (r.redirected) throw new Error('Sesión expirada');
-                return r.json().then(d => ({ ok: r.ok, d }));
-            })
-            .then(({ ok, d }) => {
-                if (!ok && d.enabled !== false) throw new Error(d.error || 'Error');
-                render(d);
-                if (window.BB && window.BB.perfilSidebar) window.BB.perfilSidebar(d);
-            })
-            .catch(error => {
-                console.error('Error fetching bot status:', error);
-                setBadge('Sin datos', 'bg-secondary', 'fas fa-question-circle');
-                setModal('<p class="text-danger">No se pudo leer el estado del bot. Se reintenta en 30 s.</p>');
-            })
-            .finally(() => {
-                clearTimeout(timeoutId);
-                isUpdating = false;
-            });
-    }
-
-    // Con en_vivo.js activo el estado llega en su JSON cada 15 s (evento fb-bot-status) y no se pide aparte cada 30 s.
-    let vivoActivo = false, intervalo = null;
-    window.addEventListener('fb-vivo-activo', () => {
-        vivoActivo = true;
-        if (intervalo) { clearInterval(intervalo); intervalo = null; }
-    });
-    window.addEventListener('fb-bot-status-error', () => {
-        setBadge('Sin datos', 'bg-secondary', 'fas fa-question-circle');
-        setModal('<p class="text-danger">No se pudo leer el estado del bot. Se reintenta en la próxima actualización.</p>');
-    });
-
-    function initBotStatus() {
-        const start = () => { updateBotStatus(); if (!vivoActivo) intervalo = setInterval(updateBotStatus, 30000); };
-        if (window.requestIdleCallback) {
-            requestIdleCallback(start, { timeout: 2000 });
-        } else {
-            setTimeout(start, 1000);
-        }
-    }
-
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', initBotStatus);
-    } else {
-        initBotStatus();
-    }
-
-    const botStatusModal = document.getElementById('botStatusModal');
-    if (botStatusModal) {
-        botStatusModal.addEventListener('show.bs.modal', updateBotStatus);
-    }
-    // El panel de control (base.html) publica el estado tras cada accion.
-    window.addEventListener('fb-bot-status', (e) => { if (e.detail) render(e.detail); });
 })();
 
 // Last order functionality

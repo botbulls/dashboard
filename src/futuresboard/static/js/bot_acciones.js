@@ -301,6 +301,15 @@
             texto: 'passivbot se reiniciará en parada gradual (graceful stop): no abrirá nuevas posiciones y seguirá gestionando las abiertas hasta cerrarlas.',
             check: false,
         }),
+        // Detenido con posiciones u órdenes sin bot: es el mismo Apagar (funciona con passivbot ya detenido).
+        cerrar_todo: () => ({
+            url: '/api/bot/stop',
+            body: { modo: 'apagar' },
+            titulo: 'Cerrar todo en Binance',
+            texto: 'passivbot ya está detenido. Se cancelarán TODAS las órdenes abiertas (incluidas las condicionales) y se cerrarán TODAS las posiciones de USDⓈ-M Futures A MERCADO, en ambos lados. Es irreversible: el precio de cierre puede ser peor que el esperado (slippage) y se realizan las ganancias o pérdidas actuales.',
+            check: true,
+            boton: 'Cerrar todo',
+        }),
         apagar: () => ({
             url: '/api/bot/stop',
             body: { modo: 'apagar' },
@@ -313,7 +322,14 @@
     function pedirConfirmacion(accion) {
         pending = typeof accion === 'string' ? ACCIONES[accion]() : accion;
         confirmEl.querySelector('[data-bot-confirm="titulo"]').textContent = pending.titulo;
-        confirmEl.querySelector('[data-bot-confirm="texto"]').textContent = pending.texto;
+        const textoEl = confirmEl.querySelector('[data-bot-confirm="texto"]');
+        textoEl.textContent = pending.texto || '';
+        textoEl.classList.toggle('d-none', !pending.texto);
+        const detalle = confirmEl.querySelector('[data-bot-confirm="detalle"]');
+        if (detalle) {
+            detalle.replaceChildren(...(pending.nodos || []));
+            detalle.classList.toggle('d-none', !(pending.nodos && pending.nodos.length));
+        }
         confirmEl.querySelector('[data-bot-confirm="check-label"]').textContent = pending.checkLabel || CHECK_APAGAR;
         confirmEl.querySelector('[data-bot-confirm="check-wrap"]').classList.toggle('d-none', !pending.check);
         confirmCheck.checked = false;
@@ -690,6 +706,115 @@
         }), 'No se pudo preparar el perfil.');
     }
 
+    // ---- Iniciar / Reanudar / Reiniciar con la estrategia guardada (POST /api/bot/start {reanudar: true}) ----
+    const el = (tag, cls, texto) => {
+        const e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (texto !== undefined && texto !== null) e.textContent = texto;
+        return e;
+    };
+    const lista = (v) => (Array.isArray(v) ? (v.length ? v.join(', ') : 'todos (lista vacía)') : (v === null || v === undefined ? '—' : String(v)));
+    const valor = (clave, v) => (clave.startsWith('pares') ? lista(v) : (v === null || v === undefined ? '—' : n(v)));
+
+    // Resumen del plan: qué va a operar contra el último arranque, y los avisos (todo con textContent).
+    function nodosPlan(plan) {
+        const nodos = [];
+        const v = plan.vigente || {};
+        const antes = (plan.ultimo && plan.ultimo.resumen) || null;
+        const cambios = {};
+        (plan.cambios || []).forEach((c) => { cambios[c.clave] = c; });
+        const sec = el('div', 'bb-modal-seccion');
+        sec.appendChild(el('h3', '', 'Qué va a operar'));
+        const tabla = el('table', 'bb-diff');
+        const thead = el('thead');
+        const trh = el('tr');
+        const th0 = el('th', '', 'Qué'); th0.scope = 'col';
+        const th1 = el('th', '', 'Último arranque'); th1.scope = 'col';
+        if (plan.ultimo && plan.ultimo.ts) th1.appendChild(el('small', '', `${plan.ultimo.ts.replace('T', ' ').slice(0, 16)} UTC · ${plan.ultimo.usuario || '?'}`));
+        const th2 = el('th', '', 'Ahora arranca con'); th2.scope = 'col';
+        trh.append(th0, th1, th2);
+        thead.appendChild(trh);
+        const tbody = el('tbody');
+        const filas = [['pares_long', 'Pares', 'approved_symbols_long'], ['n_longs', 'Pares a la vez', 'n_longs'],
+            ['twe_long', 'TWE long', 'twe_long']];
+        filas.forEach(([clave, titulo, sub]) => {
+            const tr = el('tr');
+            const th = el('th', '', titulo); th.scope = 'row';
+            th.appendChild(el('small', '', sub));
+            const tdA = el('td');
+            const tdB = el('td');
+            const cambio = cambios[clave];
+            if (!antes) {
+                tdA.textContent = 'sin registro';
+                tdB.textContent = valor(clave, v[clave]);
+            } else if (cambio) {
+                tdA.appendChild(el('del', '', valor(clave, cambio.antes)));
+                tdB.appendChild(el('ins', '', valor(clave, cambio.ahora)));
+            } else {
+                tdA.textContent = valor(clave, antes[clave]);
+                tdB.className = 'bb-igual';
+                tdB.textContent = `${valor(clave, v[clave])} (igual)`;
+            }
+            tr.append(th, tdA, tdB);
+            tbody.appendChild(tr);
+        });
+        if (v.lw !== null && v.lw !== undefined) {
+            const tr = el('tr');
+            const th = el('th', '', 'Límite por par'); th.scope = 'row';
+            th.appendChild(el('small', '', 'lw = TWE / pares a la vez'));
+            tr.append(th, el('td', '', antes && antes.lw !== undefined && antes.lw !== null ? n(Number(antes.lw).toFixed(2)) : '—'),
+                el('td', '', n(Number(v.lw).toFixed(2))));
+            tbody.appendChild(tr);
+        }
+        const modos = plan.modos || {};
+        if (modos.long_mode && modos.long_mode !== 'normal') {
+            const tr = el('tr');
+            const th = el('th', '', 'Modos'); th.scope = 'row';
+            th.appendChild(el('small', '', 'long_mode / short_mode'));
+            const td = el('td');
+            td.appendChild(el('del', '', modos.long_mode));
+            const td2 = el('td');
+            td2.appendChild(el('ins', '', 'normal'));
+            tr.append(th, td, td2);
+            tbody.appendChild(tr);
+        }
+        tabla.append(thead, tbody);
+        sec.appendChild(tabla);
+        nodos.push(sec);
+        const av = el('div', 'bb-modal-seccion');
+        av.appendChild(el('h3', '', 'Antes de iniciar'));
+        const ul = el('ul', 'bb-avisos');
+        (plan.avisos || []).forEach((a) => {
+            const li = el('li', `bb-alerta bb-alerta--${a.tipo === 'info' ? 'info' : 'aviso'}`);
+            const i = el('i', a.tipo === 'info' ? 'fas fa-info-circle' : 'fas fa-exclamation-triangle');
+            i.setAttribute('aria-hidden', 'true');
+            const div = el('div');
+            div.append(el('strong', '', a.titulo || ''), el('span', '', a.texto || ''));
+            li.append(i, div);
+            ul.appendChild(li);
+        });
+        av.appendChild(ul);
+        nodos.push(av);
+        return nodos;
+    }
+
+    function pedirInicio() {
+        pedirPlan('/api/bot/start', { reanudar: true }, (d) => {
+            const plan = d.plan || {};
+            const nombre = { iniciar: 'Iniciar', reanudar: 'Reanudar', reiniciar: 'Reiniciar' }[plan.como] || 'Iniciar';
+            return {
+                url: '/api/bot/start',
+                body: { reanudar: true, confirmar: true, plan_hash: d.plan_hash },
+                titulo: `${nombre} passivbot`,
+                texto: plan.cambios ? '' : d.error,
+                nodos: plan.cambios ? nodosPlan(plan) : null,
+                check: !!plan.requiere_casilla,
+                checkLabel: 'Revisé lo que va a operar y lo que cambió desde el último arranque.',
+                boton: nombre,
+            };
+        }, 'No se pudo preparar el inicio.');
+    }
+
     function alClick(b) {
         if (b.disabled) return;
         const accion = b.getAttribute('data-bot-accion');
@@ -707,6 +832,10 @@
         }
         if (accion === 'perfil') {
             pedirPlanPerfil();
+            return;
+        }
+        if (accion === 'iniciar' || accion === 'reanudar' || accion === 'reiniciar') {
+            pedirInicio();
             return;
         }
         if (!ACCIONES[accion]) return;

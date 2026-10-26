@@ -557,6 +557,7 @@ def test_js_en_vivo_contrato():
 def test_home_actualiza_graficos_sin_recrearlos(client, con_datos):  # noqa: F811
     html = _get(client, "/").get_data(as_text=True)
     assert "window.BB.vivoGraficos = function (g)" in html and "c.update('none')" in html
-    # El poll propio del estado del bot (30 s) se apaga cuando en_vivo.js está activo: no se le pide a Docker dos veces.
-    assert "if (!vivoActivo) intervalo = setInterval(updateBotStatus, 30000);" in html
-    assert "window.addEventListener('fb-vivo-activo'" in html
+    # El estado del bot (franja y control rápido) llega como bloques de /api/vivo/inicio: Inicio no tiene un poll propio
+    # contra Docker (spec bot-estrategia § 2.2).
+    assert "setInterval(updateBotStatus" not in html and "updateBotStatus" not in html
+    assert 'data-vivo-bloque="franja_bot"' in html and 'data-vivo-bloque="control_bot"' in html

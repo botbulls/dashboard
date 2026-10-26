@@ -32,6 +32,7 @@ from futuresboard import resumen_rescate
 from futuresboard import scraper
 from futuresboard import telegram_notify
 from futuresboard import db
+from futuresboard import formato
 from futuresboard.config import BINANCE_FUTURES_MAINNET_URL
 from futuresboard.config import state_dir
 
@@ -538,7 +539,14 @@ def index_page():
         timeframe="week",
         vivo=_vivo_ctx(url_for("vivo.inicio")),
         **_datos_inicio(startdate, enddate),
+        **_bot_inicio(),
     )
+
+
+def _bot_inicio() -> dict:
+    """Estado del bot para la franja y el control rápido de Inicio (inspect con el tope corto, como en vivo)."""
+    st, _http = bot_status_payload(docker_timeout=BOT_STATUS_RAPIDO_S)
+    return {"bot_status": st, "control": contexto_control(st)}
 
 
 @app.route("/dashboard/<start>/<end>", methods=["GET"])
@@ -579,6 +587,7 @@ def dashboard_page(start, end):
         "home.html",
         vivo=_vivo_ctx(url_for("vivo.inicio", start=startdate, end=enddate)),
         **_datos_inicio(startdate, enddate),
+        **_bot_inicio(),
     )
 
 
@@ -1595,6 +1604,69 @@ def _estrategia_vigente() -> tuple[dict | None, str | None]:
     return vigente, None
 
 
+def _pares_cortos(pares) -> str:
+    """["BNBUSDT", "BTCUSDT", "ETHUSDT"] -> "BNB, BTC y ETH"."""
+    cortos = [p[:-4] if isinstance(p, str) and p.endswith("USDT") else str(p) for p in pares or []]
+    if len(cortos) <= 1:
+        return "".join(cortos)
+    return ", ".join(cortos[:-1]) + " y " + cortos[-1]
+
+
+def _fecha_utc(momento: datetime | None) -> str:
+    return f"{momento:%d/%m %H:%M} UTC" if momento else ""
+
+
+_TITULOS_ACCION = {"start": "inicio", "graceful": "parada gradual", "apagar": "apagar", "perfil": "perfil"}
+_ESTADOS_JOB = {"ok": "ok", "error": "con error", "interrumpido": "interrumpida", "en_curso": "en curso"}
+
+
+def ultima_accion() -> dict | None:
+    """La última acción del panel (``bot_job_last.json``), con un título en palabras. Sin IP (el job no la guarda)."""
+    data = _bot_jobs().load_persisted()
+    if not data:
+        return None
+    params = data.get("params") if isinstance(data.get("params"), dict) else {}
+    accion = data.get("accion")
+    titulo = _TITULOS_ACCION.get(accion, str(accion))
+    if accion == "start" and params.get("reanudar"):
+        titulo = {"reanudar": "reanudar", "reiniciar": "reiniciar"}.get(params.get("como"), "iniciar")
+    elif accion == "start" and params.get("twe_long") is not None:
+        titulo = f"TWE manual {formato.num(params.get('twe_long'))}"
+    elif accion == "start" and params.get("riesgo"):
+        titulo = f"inicio con riesgo {params.get('riesgo')}"
+    elif accion == "perfil":
+        nombre = (perfiles.PERFILES.get(params.get("perfil")) or {}).get("nombre") or params.get("perfil")
+        titulo = f"perfil {nombre}"
+    return {**{k: v for k, v in data.items() if k != "pid"}, "titulo": titulo,
+            "estado_texto": _ESTADOS_JOB.get(data.get("estado"), str(data.get("estado")))}
+
+
+def contexto_control(st: dict) -> dict:
+    """Lo que necesita el control rápido de Inicio (``_bot.html`` → ``control``): la página y /api/vivo/inicio."""
+    est = st.get("estrategia") or {}
+    c = st.get("container") or {}
+    ahora = datetime.now().astimezone()
+    desde = bot_control.parse_docker_time(c.get("started_at")) if c.get("running") else None
+    parado = bot_control.parse_docker_time(c.get("finished_at")) if not c.get("running") else None
+    perfil = (st.get("perfiles") or {}).get(st.get("perfil_vigente") or "") or {}
+    ultima = ultima_accion()
+    return {
+        "enabled": bool(st.get("enabled")),
+        "estado": st.get("estado_bot") or bot_control.ESTADO_SIN_DATOS,
+        "error": st.get("error") or st.get("message") or "",
+        "perfil": perfil.get("nombre") or "Personalizado",
+        "twe": est.get("twe_long", st.get("twe_long")),
+        "n_longs": est.get("n_longs", st.get("n_longs")),
+        "pares": _pares_cortos(est.get("pares_long")),
+        "desde": _fecha_utc(desde),
+        "hace": _hace((ahora - desde).total_seconds()) if desde else "",
+        "detenido_desde": _fecha_utc(parado),
+        "ultima": f"{ultima['titulo']}, {ultima['estado_texto']}" if ultima else "",
+        "expo": st.get("exposicion") or {},
+        "bloqueo": st.get("rescate_start_bloqueado"),
+    }
+
+
 @app.route("/bot", methods=["GET"])
 def bot_page():
     st, _http = bot_status_payload(docker_timeout=BOT_STATUS_RAPIDO_S)
@@ -1633,6 +1705,8 @@ def bot_start():
     (si no, 409 con ``requiere_confirmacion``)."""
     body = request.get_json(silent=True)
     body = body if isinstance(body, dict) else {}
+    if "reanudar" in body:
+        return _bot_reanudar(body)
     manual = "twe_long" in body
     riesgo = body.get("riesgo")
     params = {"twe_long": body.get("twe_long")} if manual else {"riesgo": riesgo}
@@ -1663,12 +1737,73 @@ def bot_start():
         settings.require_enabled()
         return settings, None
 
+    usuario = session.get("username") or "?"
+
     def work(store, settings, _extra, rep):
         # Se vuelve a chequear dentro del job, ya con el lock de acciones tomado.
         _check_rescate_start(store.data_dir)
-        return bot_control.start_bot(settings, store, riesgo, reporter=rep, twe_long=twe)
+        return bot_control.start_bot(settings, store, riesgo, reporter=rep, twe_long=twe, usuario=usuario)
 
     return _run_bot_action("start", params, validate, work)
+
+
+def _bot_reanudar(body: dict):
+    """Iniciar / Reanudar / Reiniciar con la estrategia guardada: ``{"reanudar": true}`` (camino ``mantener_twe``:
+    modos a normal, sin tocar TWE ni pares). Spec bot-estrategia § 2.2 y § 4.
+
+    Detenido (o con la config pendiente de reinicio): primero ``409 {requiere_confirmacion, plan, plan_hash}`` con lo
+    que va a operar y qué cambió desde el último arranque; arranca con ``{"reanudar": true, "confirmar": true,
+    "plan_hash": ...}``. Corriendo con la config en efecto (Reanudar desde parada gradual, Reiniciar): de un toque.
+    Dentro del job, con el lock, se vuelve a armar el plan: si cambió algo, 409 y no arranca."""
+    params: dict = {"reanudar": True}
+    try:
+        if body.get("reanudar") is not True:
+            raise ValueError("reanudar tiene que ser true.")
+        if "riesgo" in body or "twe_long" in body:
+            raise ValueError("reanudar arranca con la estrategia guardada: no se manda riesgo ni twe_long.")
+        confirmar = body.get("confirmar", False)
+        if not isinstance(confirmar, bool):
+            raise ValueError("confirmar tiene que ser true o false.")
+        enviado = body.get("plan_hash")
+        if enviado is not None and not isinstance(enviado, str):
+            raise ValueError("plan_hash tiene que ser texto.")
+    except ValueError as exc:
+        _rescate_audit("start", params, "rechazado", str(exc))
+        return _json_response({"ok": False, "error": str(exc)}, 400)
+    settings = bot_control.Settings()
+    try:
+        _check_rescate_start(_bot_store().data_dir)
+        settings.require_enabled()
+        plan = bot_control.plan_reanudar(settings, _bot_store())
+    except bot_control.BotControlError as exc:
+        _rescate_audit("start", params, "rechazado", str(exc))
+        return _json_response({**exc.payload, "ok": False, "error": str(exc)}, exc.status_code)
+    params["como"] = plan["como"]
+    if plan["requiere_plan"] and (not confirmar or enviado != plan["plan_hash"]):
+        if confirmar:
+            texto = ("El resumen ya no corresponde: cambió la estrategia o el estado del bot desde que se armó. "
+                     "Revisalo de nuevo.\n\n" + plan["texto"])
+            _rescate_audit("start", params, "rechazado", "plan_hash viejo o ausente")
+        else:
+            texto = plan["texto"]
+            _rescate_audit("start", params, "requiere_confirmacion", plan["texto"])
+        return _json_response({"ok": False, "requiere_confirmacion": True, "error": texto, "plan": plan,
+                               "plan_hash": plan["plan_hash"]}, 409)
+    esperado = plan["plan_hash"]
+    usuario = session.get("username") or "?"
+
+    def work(store, settings, _extra, rep):
+        _check_rescate_start(store.data_dir)
+        actual = bot_control.plan_reanudar(settings, store)
+        if actual["plan_hash"] != esperado:
+            err = bot_control.BotControlError("La estrategia o el estado del bot cambió desde el resumen: no se arrancó. "
+                                              "Pedí Iniciar de nuevo para ver lo que va a operar.")
+            err.status_code = 409
+            raise err
+        return bot_control.start_bot(settings, store, None, reporter=rep, mantener_twe=True, usuario=usuario,
+                                     origen=actual["como"])
+
+    return _run_bot_action("start", params, lambda: (settings, None), work)
 
 
 @app.route("/api/bot/perfil", methods=["POST"])

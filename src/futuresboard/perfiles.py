@@ -351,7 +351,7 @@ def aplicar(settings: bot_control.Settings, store: bot_control.Store, nombre: st
               f"{'on' if cfg.get('upnl_habilitado') else 'off'}, retiro {cfg.get('retiro_frecuencia')}"))
     try:
         out = bot_control.start_bot(settings, store, None, docker=docker, reporter=_SinValidar(rep),
-                                    twe_long=perfil["twe_long"])
+                                    twe_long=perfil["twe_long"], usuario=usuario, origen="perfil")
     except Exception as exc:  # noqa: BLE001 - cualquier falla decide la vuelta atrás del rescate y se re-lanza
         incierto = isinstance(exc, bot_control.DockerError) and (
             exc.uncertain or bool(getattr(exc.__cause__, "uncertain", False)))

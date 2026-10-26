@@ -686,8 +686,12 @@ a.bb-moneda { transition: background-color var(--bb-dur) var(--bb-ease); }
 .bb-control__resumen { display: grid; gap: 2px; min-width: 0; }
 .bb-control__linea1 { font-size: var(--bb-fs-16); font-weight: 600; display: flex; flex-wrap: wrap; gap: 0 var(--bb-s2); align-items: baseline; }
 .bb-control__linea2 { font-size: var(--bb-fs-13); color: var(--bb-text-2); }
+.bb-control__linea2 .bb-num { white-space: nowrap; }
 .bb-control__linea2 a, .bb-control__linea1 a { font-weight: 500; }
 .bb-control__botones { display: flex; gap: var(--bb-s2); flex-wrap: wrap; justify-content: flex-end; }
+/* Un botón peligroso (Apagar, Cerrar todo) junto a Iniciar / Reanudar: más aire en escritorio y, en el celu, en
+   renglones distintos y separados (nunca pegados: un dedo que erra no cierra todo a mercado). */
+.bb-control__botones--separados { gap: var(--bb-s2) var(--bb-s6); }
 .bb-control__nota { grid-column: 1 / -1; margin: 0; font-size: var(--bb-fs-13); color: var(--bb-text-2); border-top: 1px solid var(--bb-border); padding-top: var(--bb-s2); }
 
 /* ------------------------------------------------------------------ 18c. Grillas de tarjetas de estado (Bot) */
@@ -913,6 +917,8 @@ a.bb-moneda { transition: background-color var(--bb-dur) var(--bb-ease); }
   .bb-control { grid-template-columns: minmax(0, 1fr); padding: var(--bb-s3); }
   .bb-control__botones { justify-content: stretch; }
   .bb-control__botones .btn { flex: 1 1 0; }
+  .bb-control__botones--separados { flex-direction: column; gap: var(--bb-s5); }
+  .bb-control__botones--separados .btn { flex: none; width: 100%; }
   .bb .bb-pildora-bot { min-height: var(--bb-tap); }
   .bb-paso { grid-template-columns: minmax(0, 1fr); }
   .bb-paso__num { display: none; }

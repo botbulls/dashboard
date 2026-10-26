@@ -167,6 +167,10 @@ def inicio():
     out["periodo"] = {"start": ctx["startdate"], "end": ctx["enddate"]}
     out["fuentes"] = {k: {**f, "at": _iso(f["at"])} for k, f in ctx["fuentes"].items()}
     out["bot"] = _bot()
+    # Franja y control rápido del bot (spec bot-estrategia § 2.2): el mismo macro que la página.
+    datos_bot = out["bot"]["datos"]
+    b["franja_bot"] = _macro("_bot.html", "franja_estado", datos_bot)
+    b["control_bot"] = _macro("_bot.html", "control", bp.contexto_control(datos_bot))
     return _respuesta(out)
 
 

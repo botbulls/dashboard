@@ -1336,7 +1336,8 @@ def make_start(data_dir: pathlib.Path, bot_settings: bot_control.Settings,
                 if client.inspect(bot_settings.container).get("running"):
                     return "ya_corriendo", {"ok": True, "docker_action": "ninguna"}
                 payload = bot_control.start_bot(bot_settings, store, plan.get("riesgo"), docker=client,
-                                                mantener_twe=bool(plan.get("mantener_twe")))
+                                                mantener_twe=bool(plan.get("mantener_twe")),
+                                                usuario=USUARIO_START, origen="c3_reinicio")
                 bot_control.verify_running(bot_settings, docker=client)
                 outcome = "ok"
             except bot_control.BotControlError as exc:

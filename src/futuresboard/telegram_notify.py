@@ -204,7 +204,10 @@ def format_bot_action(action: str, params: Dict[str, Any], outcome: str, payload
     if outcome not in ("ok", "error"):
         return None
     ok = outcome == "ok"
-    if action == "start" and params.get("twe_long") is not None:
+    if action == "start" and params.get("reanudar"):
+        como = {"reanudar": "REANUDAR", "reiniciar": "REINICIAR"}.get(params.get("como"), "INICIAR")
+        titulo = f"{como} con la estrategia guardada"
+    elif action == "start" and params.get("twe_long") is not None:
         titulo = f"START TWE manual {esc(params.get('twe_long'))}"
     elif action == "start":
         titulo = f"START riesgo {esc(params.get('riesgo'))}"

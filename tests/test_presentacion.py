@@ -74,7 +74,8 @@ def test_franja_de_estado_primero_en_la_home(client):  # noqa: F811
     html = _get(client, "/")
     franja = html.index('class="bb-franja"')
     # Estado del bot y último pedido: botones con texto (no solo ícono), antes que los KPIs y el rescate.
-    assert re.search(r'<button id="botStatus" type="button" class="badge bot-status-badge[^"]*"', html)
+    # El estado del bot es un link a Bot (spec bot-estrategia § 2.2: antes abría un modal).
+    assert re.search(r'<a id="botStatus" class="badge bot-status-badge[^"]*" href="/bot"', html)
     assert '<span class="bot-status-text">' in html
     assert re.search(r'<button type="button" class="last-order-badge"', html)
     assert "Último pedido" in html
@@ -230,7 +231,7 @@ def test_menu_del_celu_con_boton_de_cerrar(client, con_datos):  # noqa: F811
 
 @pytest.mark.parametrize("url,hooks", [
     ("/", ['id="lineChart"', 'id="barChart"', "function graphClickEvent", 'name="daterange"', 'name="daterangeform"',
-           'id="lastOrderModal"', 'id="botStatusModal"', 'id="graficoDiario"']),
+           'id="lastOrderModal"', 'data-vivo-bloque="control_bot"', 'id="graficoDiario"']),
     ("/positions", ['id="orders"', "positions_datatable"]),
     ("/history", ['id="orders"', 'id="oldfiles"']),
     ("/projection", ['id="hype"', 'id="lineChart"']),
