@@ -130,18 +130,36 @@ def ciclo(entorno: Entorno) -> Dict[str, Any]:
         except Exception as exc:  # noqa: BLE001 - un par raro no corta el ciclo
             log.warning("Chequeo de forager de %s falló (%s)", symbol, exc.__class__.__name__)
             r = {"estado": SIN_DATOS, "motivos": [f"Error inesperado ({exc.__class__.__name__})."], "chequeos": []}
-        antes = (previo["pares"].get(symbol) or {}).get("conocido")
+        prev_par = previo["pares"].get(symbol) or {}
+        antes = prev_par.get("conocido")
         conocido = antes if r["estado"] == SIN_DATOS else r["estado"]
         r["conocido"] = conocido
-        r["desde"] = (previo["pares"].get(symbol) or {}).get("desde") if conocido == antes else ahora
-        if r["estado"] != SIN_DATOS and conocido != antes and (antes is not None or conocido == DESCARTA):
-            try:
-                r["avisado"] = bool(_enviar(texto_aviso(symbol, conocido, r["motivos"])))
-            except Exception:  # noqa: BLE001 - notificar nunca corta el ciclo
-                r["avisado"] = False
+        r["desde"] = prev_par.get("desde") if conocido == antes else ahora
+        pendiente = prev_par.get("aviso_pendiente") if isinstance(prev_par.get("aviso_pendiente"), dict) else None
+        cambio = r["estado"] != SIN_DATOS and conocido != antes and (antes is not None or conocido == DESCARTA)
+        if cambio and pendiente is not None:
+            # Volvió antes de que saliera el aviso del cambio anterior: no se avisa ninguno de los dos.
+            pass
+        elif cambio:
+            _avisar(r, symbol, conocido, r["motivos"])
+        elif pendiente is not None and pendiente.get("estado") == conocido:
+            motivos = r["motivos"] if r["estado"] == conocido else list(pendiente.get("motivos") or [])
+            _avisar(r, symbol, conocido, motivos)
         salida["pares"][symbol] = r
     _guardar_seguro(entorno, salida)
     return salida
+
+
+def _avisar(r: Dict[str, Any], symbol: str, estado: str, motivos: List[str]) -> None:
+    """Manda el aviso del cambio. Si no sale, queda ``aviso_pendiente`` en el par y se reintenta en el ciclo siguiente
+    mientras siga en ese estado: el estado conocido avanza igual, porque Bot y el texto de "sin datos" lo usan
+    (revisión, hallazgo 15). Sin Telegram configurado no queda pendiente: nunca saldría."""
+    try:
+        r["avisado"] = bool(_enviar(texto_aviso(symbol, estado, motivos)))
+    except Exception:  # noqa: BLE001 - notificar nunca corta el ciclo
+        r["avisado"] = False
+    if not r["avisado"] and telegram_notify.TelegramConfig.from_env().enabled:
+        r["aviso_pendiente"] = {"estado": estado, "motivos": list(motivos)}
 
 
 def _guardar_seguro(entorno: Entorno, estado: Dict[str, Any]) -> None:

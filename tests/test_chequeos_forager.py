@@ -80,6 +80,62 @@ def test_un_aviso_por_cambio_de_estado(entorno, red, telegram):
     assert len(telegram) == 2 and "vuelve a pasar" in telegram[1] and "BTCUSDT" in telegram[1]
 
 
+def test_aviso_que_no_salio_se_reintenta_en_el_ciclo_siguiente(entorno, red, monkeypatch):
+    """Si Telegram falla justo en el ciclo del cambio, el aviso queda pendiente y se reintenta mientras el par siga
+    así. Antes el estado conocido avanzaba igual y el aviso no llegaba nunca (revisión, hallazgo 15)."""
+    monkeypatch.setenv(telegram_notify.ENV_TOKEN, "t")
+    monkeypatch.setenv(telegram_notify.ENV_CHAT_ID, "c")
+    entregados, intentos, falla = [], [], [True]
+
+    def enviar(texto):
+        intentos.append(texto)
+        if falla[0]:
+            return False
+        entregados.append(texto)
+        return True
+
+    monkeypatch.setattr(chequeos_forager, "_enviar", enviar)
+    chequeos_forager.ciclo(entorno)
+    red.demo.precios["BTCUSDT"] = "2000000"
+    binance_publico.limpiar_cache()
+    estado = chequeos_forager.ciclo(entorno)
+    btc = estado["pares"]["BTCUSDT"]
+    assert btc["conocido"] == "descarta" and btc["aviso_pendiente"]["estado"] == "descarta" and entregados == []
+    falla[0] = False
+    for _ in range(3):
+        binance_publico.limpiar_cache()
+        estado = chequeos_forager.ciclo(entorno)
+    assert len(entregados) == 1 and "forager descartaría BTCUSDT" in entregados[0]
+    assert "aviso_pendiente" not in estado["pares"]["BTCUSDT"]
+
+
+def test_aviso_pendiente_se_descarta_si_el_par_vuelve_antes(entorno, red, monkeypatch):
+    monkeypatch.setenv(telegram_notify.ENV_TOKEN, "t")
+    monkeypatch.setenv(telegram_notify.ENV_CHAT_ID, "c")
+    entregados, falla = [], [True]
+    monkeypatch.setattr(chequeos_forager, "_enviar", lambda texto: (not falla[0]) and (entregados.append(texto) or True))
+    chequeos_forager.ciclo(entorno)
+    red.demo.precios["BTCUSDT"] = "2000000"
+    binance_publico.limpiar_cache()
+    chequeos_forager.ciclo(entorno)
+    falla[0] = False
+    red.demo.precios["BTCUSDT"] = "80000"  # volvió antes de que el aviso saliera
+    binance_publico.limpiar_cache()
+    estado = chequeos_forager.ciclo(entorno)
+    assert entregados == [] and "aviso_pendiente" not in estado["pares"]["BTCUSDT"]
+    assert estado["pares"]["BTCUSDT"]["conocido"] == "ok"
+
+
+def test_sin_telegram_configurado_no_quedan_avisos_pendientes(entorno, red, monkeypatch):
+    monkeypatch.delenv(telegram_notify.ENV_TOKEN, raising=False)
+    monkeypatch.delenv(telegram_notify.ENV_CHAT_ID, raising=False)
+    monkeypatch.setattr(chequeos_forager, "_enviar", lambda texto: False)
+    red.demo.set_status("XRPUSDT", "SETTLING")
+    estado = chequeos_forager.ciclo(entorno)
+    assert estado["pares"]["XRPUSDT"]["conocido"] == "descarta"
+    assert "aviso_pendiente" not in estado["pares"]["XRPUSDT"]
+
+
 def test_primer_ciclo_con_un_par_descartado_avisa(entorno, red, telegram):
     red.demo.set_status("XRPUSDT", "SETTLING")
     estado = chequeos_forager.ciclo(entorno)
