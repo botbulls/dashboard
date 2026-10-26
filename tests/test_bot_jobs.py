@@ -406,7 +406,9 @@ def test_apagar_no_espera_a_que_termine_el_start_cortado(client, app, env, docke
 def test_panel_tiene_apagar_en_el_modal_de_progreso(client):  # noqa: F811
     html = client.get("/").get_data(as_text=True)
     assert 'data-bot-job="apagar"' in html and 'data-bot-job="cerrar"' in html
-    assert "job.cancelable" in html
+    js = (pathlib.Path(__file__).resolve().parents[1] / "src" / "futuresboard" / "static" / "js"
+          / "bot_acciones.js").read_text(encoding="utf-8")
+    assert "job.cancelable" in js
 
 
 # ---------------------------------------------------------------- telegram: una vez al terminar

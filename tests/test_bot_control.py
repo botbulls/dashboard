@@ -331,7 +331,8 @@ def audit_lines(app):
 @pytest.mark.parametrize(
     "method,url",
     [("get", "/api/bot/status"), ("post", "/api/bot/start"), ("post", "/api/bot/stop"),
-     ("get", "/api/bot/jobs/activo"), ("get", "/api/bot/jobs/0123456789abcdef")],
+     ("get", "/api/bot/jobs/activo"), ("get", "/api/bot/jobs/0123456789abcdef"), ("get", "/bot"),
+     ("get", "/estrategia")],
 )
 def test_auth_required(app, env, docker, method, url):
     resp = getattr(app.test_client(), method)(url)
@@ -532,7 +533,7 @@ def test_home_renders_without_env(client, monkeypatch):
     with mock.patch("futuresboard.blueprint.requests.get", side_effect=Exception("offline")):
         resp = client.get("/")
     assert resp.status_code == 200
-    assert b'id="menu_admin"' in resp.data
+    assert b'id="botJobModal"' in resp.data and b'id="menu_admin"' not in resp.data
     assert b"slctdaeo" not in resp.data
     assert b"guardian" not in resp.data.lower()
 

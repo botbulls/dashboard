@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Bot{% endblock %}
+{% block bajada %}<p>passivbot (forager): estado y acciones. Herramienta, no asesor.</p>{% endblock %}
+{% block content %}
+{% set st = bot_status or {} %}
+{% set c = st.get('container') or {} %}
+<div data-bot-recargar hidden></div>
+
+<section class="bb-seccion" aria-labelledby="bbTituloEstado">
+    <h2 class="bb-seccion__titulo" id="bbTituloEstado">Estado</h2>
+    <div class="card">
+        <div class="card-header"><h3 class="bb-card-titulo">passivbot</h3><span class="bb-card-sub">{{ c.get('name') or 'forager' }}</span></div>
+        <div class="card-body">
+            <ul class="bb-dato-lista">
+                <li><span>Contenedor</span><span>{{ c.get('status') or 'sin datos' }}</span></li>
+                <li><span>Modos long / short</span><span>{% if st.get('modes_supported') %}{{ st.get('long_mode') or '—' }} / {{ st.get('short_mode') or '—' }}{% else %}n/a (forager no los lee){% endif %}</span></li>
+                <li><span>Config de forager</span><span>{% if st.get('config_pending') %}pendiente de reinicio{% elif c.get('running') %}en efecto{% else %}se aplica al iniciar{% endif %}</span></li>
+            </ul>
+            {% if st.get('message') or st.get('error') %}<p class="bb-alerta bb-alerta--aviso mt-3" role="note"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i><span>{{ st.get('error') or st.get('message') }}</span></p>{% endif %}
+        </div>
+    </div>
+</section>
+
+<section class="bb-seccion" aria-labelledby="bbTituloAcciones">
+    <h2 class="bb-seccion__titulo" id="bbTituloAcciones">Acciones</h2>
+    <p class="bb-panel__aviso d-none" data-bot-panel="deshabilitado"><span data-bot-panel="deshabilitado-msg"></span></p>
+    <div class="bb-acciones-bot">
+        <div class="bb-accion">
+            <h3>Parada gradual</h3>
+            <p data-bot-panel="graceful-nota">No abre nuevas posiciones; sigue gestionando las abiertas.</p>
+            <button type="button" class="btn btn-outline-secondary" data-bot-accion="graceful"><i class="fas fa-pause" aria-hidden="true"></i> Parada gradual</button>
+        </div>
+        <div class="bb-accion bb-accion--peligro">
+            <h3>Apagar</h3>
+            <p>Detiene passivbot, cancela TODAS las órdenes abiertas y cierra TODAS las posiciones a mercado. Irreversible: pide confirmación con casilla.</p>
+            <button type="button" class="btn btn-danger" data-bot-accion="apagar"><i class="fas fa-power-off" aria-hidden="true"></i> Apagar…</button>
+        </div>
+    </div>
+    <p class="bb-motivo"><i class="fas fa-lock" aria-hidden="true"></i> Para cambiar perfil o TWE, <a href="{{ url_for('main.estrategia_page') }}">Estrategia</a>.</p>
+</section>
+{% endblock %}

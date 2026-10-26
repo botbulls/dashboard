@@ -13,8 +13,8 @@
    después de otra más nueva se descarta (número de pedido). Datos viejos: además del color, una vez en el aviso.
    No pide nada al cargar (la página llega con los datos), usa setTimeout encadenado, se pausa con la pestaña oculta y
    refresca apenas vuelve, espera más entre reintentos si falla y, si la sesión venció (redirect al login o a
-   Cloudflare Access), avisa y deja de pedir. No actualiza con un modal abierto ni con el foco en un campo del panel del
-   bot. No hace nada si la página se abrió desde file:// (las capturas usan el HTML guardado). */
+   Cloudflare Access), avisa y deja de pedir. No actualiza con un modal abierto ni con el foco en un campo de los
+   controles del bot. No hace nada si la página se abrió desde file:// (las capturas usan el HTML guardado). */
 (function () {
   'use strict';
   var raiz = document.getElementById('bbVivo');
@@ -124,8 +124,9 @@
   // ------------------------------------------------------------------ cuándo no se toca la página
   function bloqueado() {
     if (document.querySelector('.modal.show')) return true;  // confirmaciones, progreso del bot, velas, detalle
-    var a = document.activeElement, panel = document.getElementById('menu_admin');
-    return !!(panel && a && panel.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName));
+    // Un campo de los controles del bot con el foco (perfil, TWE): no se toca la página mientras se escribe.
+    var a = document.activeElement, panel = a && a.closest ? a.closest('[data-bot-controles]') : null;
+    return !!(panel && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName));
   }
 
   // ------------------------------------------------------------------ valores sueltos

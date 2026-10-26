@@ -1508,19 +1508,54 @@ def _run_bot_action(action: str, params: dict, validate, work):
     return _json_response({"ok": True, "job_id": job.id, "job": job.to_dict()}, 202)
 
 
+# Tope del inspect a Docker cuando la página o el JS solo necesitan el estado para pintar (píldora, Inicio, Bot):
+# con el docker-proxy colgado la página sale igual y el estado dice "sin datos" (como /api/vivo/inicio).
+BOT_STATUS_RAPIDO_S = 3
+
+
+def exposicion_scraper() -> dict:
+    """Posiciones y órdenes abiertas según la base del scraper (no Binance): el cuarto estado del bot (detenido con
+    exposición) y el control rápido de Inicio. Nunca lanza: sin base, ``error`` y ceros."""
+    try:
+        posiciones = db.query("SELECT symbol, positionSide, positionAmt, entryPrice, unrealizedProfit FROM positions "
+                              "WHERE ABS(positionAmt) > 0 ORDER BY symbol ASC")
+        ordenes = db.query("SELECT symbol, side, positionSide, origQty, price FROM orders ORDER BY symbol ASC")
+    except Exception:  # noqa: BLE001 - defensivo: el estado del bot no se cae por la base
+        current_app.logger.exception("No se pudo leer posiciones y órdenes para el estado del bot")
+        return {"posiciones": 0, "ordenes": 0, "pares": [], "upnl": 0.0, "nocional": 0.0, "detalle": [],
+                "error": "No se pudo leer la base del scraper."}
+    detalle = [{"symbol": r[0], "lado": r[1], "cantidad": float(r[2]), "precio_entrada": float(r[3] or 0),
+                "upnl": float(r[4] or 0)} for r in posiciones]
+    pares = sorted({r[0] for r in posiciones} | {r[0] for r in ordenes})
+    return {
+        "posiciones": len(posiciones),
+        "ordenes": len(ordenes),
+        "pares": pares,
+        "upnl": round(sum(p["upnl"] for p in detalle), 2),
+        "nocional": round(sum(abs(p["cantidad"] * p["precio_entrada"]) for p in detalle), 2),
+        "detalle": detalle,
+    }
+
+
 def bot_status_payload(docker_timeout: float | None = None) -> tuple[dict, int]:
     """Estado del bot y HTTP status: lo devuelven /api/bot/status y, dentro de su JSON, /api/vivo/inicio.
 
     ``docker_timeout``: tope del inspect al docker-proxy (default ``bot_control.HTTP_TIMEOUT_SECONDS``, 10 s).
+    ``estado_bot`` (operando / gradual / detenido / expuesto / sin_datos) y ``exposicion`` (base del scraper) van
+    también en el error: la píldora y el punto del menú los pintan igual.
     """
     settings = bot_control.Settings()
     docker = None
     if docker_timeout is not None and settings.enabled:
         docker = bot_control.DockerClient(settings.docker_url, timeout=docker_timeout)
+    exposicion = exposicion_scraper()
     try:
         out = bot_control.get_status(settings, docker=docker)
     except bot_control.BotControlError as exc:
-        return {"enabled": settings.enabled, "error": str(exc)}, exc.status_code
+        return {"enabled": settings.enabled, "error": str(exc), "estado_bot": bot_control.ESTADO_SIN_DATOS,
+                "exposicion": exposicion}, exc.status_code
+    out["exposicion"] = exposicion
+    out["estado_bot"] = bot_control.estado_del_bot(out, exposicion)
     data_dir = _bot_store().data_dir
     out["rescate_start_bloqueado"] = rescate.start_bloqueado(data_dir)
     # Perfiles de riesgo y TWE manual (docs/perfiles.md): definiciones y el perfil vigente según los valores.
@@ -1536,8 +1571,48 @@ def bot_status_payload(docker_timeout: float | None = None) -> tuple[dict, int]:
 
 @app.route("/api/bot/status", methods=["GET"])
 def bot_status():
-    out, status = bot_status_payload()
+    """``?rapido=1``: inspect con tope corto (la píldora de cada página, ver static/js/bot_acciones.js)."""
+    rapido = request.args.get("rapido") == "1"
+    out, status = bot_status_payload(docker_timeout=BOT_STATUS_RAPIDO_S if rapido else None)
     return _json_response(out, status)
+
+
+# --------------------------------------------------------------------------------------
+# Páginas Bot y Estrategia (diseno/bot-estrategia/spec.md § 2.3 y § 2.4); reemplazan a la rueda #menu_admin
+# --------------------------------------------------------------------------------------
+
+
+def _estrategia_vigente() -> tuple[dict | None, str | None]:
+    """Claves de estrategia de la config de forager (solo lectura) o el motivo por el que no se pudo leer."""
+    try:
+        cfg = bot_control.read_forager_config(bot_control.Settings().require_config())
+    except bot_control.BotControlError as exc:
+        return None, str(exc)
+    vigente = bot_control.resumen_estrategia(cfg)
+    rescate_cfg, _err = rescate.load_config(_bot_store().data_dir)
+    vigente["perfil"] = perfiles.detectar(cfg, rescate_cfg)
+    vigente["long_mode"], vigente["short_mode"] = cfg.get("long_mode"), cfg.get("short_mode")
+    return vigente, None
+
+
+@app.route("/bot", methods=["GET"])
+def bot_page():
+    st, _http = bot_status_payload(docker_timeout=BOT_STATUS_RAPIDO_S)
+    return render_template("bot.html", coin_list=get_coins(), custom=current_app.config["CUSTOM"], bot_status=st)
+
+
+@app.route("/estrategia", methods=["GET"])
+def estrategia_page():
+    """Estrategia: lo vigente en solo lectura, más Perfil y TWE manual (los mismos endpoints que tenía la rueda).
+
+    La edición de pares y pares a la vez (borrador, chequeos, versiones) entra en ``data-estrategia-editor``: la
+    agrega el flujo de ``POST /api/bot/estrategia`` (spec § 3.3), que todavía no existe."""
+    st, _http = bot_status_payload(docker_timeout=BOT_STATUS_RAPIDO_S)
+    vigente, error = _estrategia_vigente()
+    return render_template("estrategia.html", coin_list=get_coins(), custom=current_app.config["CUSTOM"],
+                           bot_status=st, vigente=vigente, error_vigente=error, perfiles=perfiles.catalogo()["perfiles"],
+                           twe_manual={"min": str(bot_control.TWE_MANUAL_MIN), "max": str(bot_control.TWE_MANUAL_MAX),
+                                       "paso": str(bot_control.TWE_MANUAL_PASO)})
 
 
 def _check_rescate_start(data_dir: pathlib.Path) -> None:

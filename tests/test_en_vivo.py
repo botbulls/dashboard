@@ -543,7 +543,7 @@ def test_js_en_vivo_contrato():
     assert "visibilitychange" in js and "document.hidden" in js
     assert "redirect: 'manual'" in js and "opaqueredirect" in js
     assert "location.protocol === 'file:'" in js  # las capturas abren el HTML guardado: no pide nada
-    assert ".modal.show" in js and "menu_admin" in js
+    assert ".modal.show" in js and "[data-bot-controles]" in js and "menu_admin" not in js
     assert "prefers-reduced-motion" in js
     # Una respuesta vieja no pisa a una más nueva; la calculadora recalcula; "hace 89 s" -> "hace 2 min" no es otro
     # aviso; al reemplazar un bloque entero, los avisos que ya estaban no se vuelven a anunciar.

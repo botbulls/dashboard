@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Estrategia{% endblock %}
+{% block bajada %}<p>Qué opera passivbot: perfil, exposición (TWE) y pares. Herramienta, no asesor.</p>{% endblock %}
+{% block content %}
+{#- data-bot-recargar: después de una acción (perfil, TWE) la página se vuelve a armar en el server. -#}
+<div data-bot-recargar hidden></div>
+
+{#- 1. Vigente: solo lectura, de la config de forager (new.json). -#}
+<section class="bb-seccion" id="bbEstrategiaVigente" aria-labelledby="bbTituloVigente">
+    <h2 class="bb-seccion__titulo" id="bbTituloVigente">Vigente <span class="bb-seccion__sub">config de forager (new.json)</span></h2>
+    {% if error_vigente %}
+        <p class="bb-alerta bb-alerta--aviso" role="alert"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i><span>No se pudo leer la estrategia: {{ error_vigente }}</span></p>
+    {% else %}
+        {% set v = vigente %}
+        {% set p = perfiles.get(v.perfil) if v.perfil else none %}
+        {% set c = (bot_status or {}).get('container') or {} %}
+        <div class="card">
+            <div class="card-body">
+                <div class="bb-vigente">
+                    <span class="bb-etiqueta {{ 'bb-etiqueta--vigente' if p else 'bb-etiqueta--neutra' }}">{{ ('Perfil ' ~ p.nombre) if p else 'Personalizado' }}</span>
+                    <span>TWE <strong class="bb-num" data-value="{{ v.twe_long }}">{{ v.twe_long|num }}</strong></span>
+                    <span>·</span>
+                    <span><strong>{{ v.n_longs if v.n_longs is not none else '—' }} a la vez</strong></span>
+                    {% if v.lw is not none %}<span>·</span><span>lw {{ v.lw|num(2) }} por par</span>{% endif %}
+                    {% if (bot_status or {}).get('config_pending') %}
+                        <span class="bb-etiqueta bb-etiqueta--aviso">pendiente de reinicio</span>
+                    {% elif c.get('running') %}
+                        <span class="bb-etiqueta bb-etiqueta--ok">en efecto</span>
+                    {% else %}
+                        <span class="bb-etiqueta bb-etiqueta--neutra">se aplica al iniciar</span>
+                    {% endif %}
+                </div>
+                <ul class="bb-dato-lista mt-3">
+                    <li><span>Pares (approved_symbols_long)</span><span>{{ v.pares_long|join(', ') if v.pares_long else 'todos (lista vacía)' }}</span></li>
+                    <li><span>Pares a la vez (n_longs)</span><span>{{ v.n_longs if v.n_longs is not none else '—' }}</span></li>
+                    <li><span>TWE long / short</span><span>{{ v.twe_long|num }} / {{ v.twe_short|num }}</span></li>
+                    <li><span>Short</span><span>{{ 'apagado (n_shorts 0)' if v.n_shorts == 0 else 'n_shorts ' ~ v.n_shorts }}</span></li>
+                    <li><span>Modos long / short</span><span>{{ v.long_mode or 'normal' }} / {{ v.short_mode or 'normal' }}</span></li>
+                </ul>
+            </div>
+            <div class="card-footer">lw = TWE / pares a la vez: lo que forager le da a cada par (todos reciben el mismo). Los pares y los pares a la vez se cambian, por ahora, a mano en la config.</div>
+        </div>
+    {% endif %}
+</section>
+
+{#- 2. Perfil y 3. TWE: los mismos controles e IDs que tenía la rueda (bot_acciones.js), con su confirmación y su job.
+    data-bot-controles: en_vivo.js no toca la página con el foco en estos campos. -#}
+<section class="bb-seccion" aria-labelledby="bbTituloPerfil" data-bot-controles>
+    <h2 class="bb-seccion__titulo" id="bbTituloPerfil">Perfil y TWE</h2>
+    <p class="bb-panel__aviso d-none" data-bot-panel="deshabilitado"><span data-bot-panel="deshabilitado-msg"></span></p>
+    <div class="bb-acciones-bot">
+        <div class="bb-accion">
+            <h3><label for="botPerfilSelect">Perfil de riesgo</label></h3>
+            <select id="botPerfilSelect" name="perfil" class="form-select">
+                {% for clave, pf in perfiles.items() %}<option value="{{ clave }}">{{ pf.nombre }}{% if clave == 'conservador' %} (TWE 3, sin rescate){% elif clave == 'con_rescate' %} (TWE 4 + rescate + retiro){% endif %}</option>{% endfor %}
+            </select>
+            <p data-bot-panel="perfil-vigente"></p>
+            <details class="bb-detalle">
+                <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Qué hace y números del backtest</summary>
+                <p class="mt-1" data-bot-panel="perfil-desc"></p>
+            </details>
+            <button type="button" class="btn btn-primary" data-bot-accion="perfil">Aplicar perfil…</button>
+            <p>TWE de forager + rescate, disparo por uPnL y retiro en una sola acción. Antes de aplicar se muestra qué cambia. Backtest, no promesa: herramienta, no asesor.</p>
+        </div>
+        <div class="bb-accion">
+            <h3><label for="botTweInput">TWE manual</label></h3>
+            <p id="botTweAyuda">TWE long de {{ twe_manual.min|num }} a {{ twe_manual.max|num }}, en pasos de {{ twe_manual.paso|num }}.</p>
+            <input id="botTweInput" name="twe_long" type="number" min="0.5" max="8" step="0.25" inputmode="decimal" class="form-control" aria-describedby="botTweAyuda botTweAdvertencia">
+            <span class="d-none" id="botTweAdvertencia" data-bot-panel="twe-advertencia" role="alert"></span>
+            <button type="button" class="btn btn-outline-secondary" data-bot-accion="twe">Iniciar con esta TWE…</button>
+            <p>Escribe twe_long en la config de forager (modo normal) y reinicia passivbot.</p>
+        </div>
+    </div>
+</section>
+
+{#- Lugar del editor de la estrategia (spec § 2.4, pasos 2-6): exposición con sus consecuencias, pares con chequeos
+    (necesita el manifiesto de configs, § 5.1), avanzado en solo lectura y versiones con "volver". Lo arma el flujo de
+    POST /api/bot/estrategia (§ 3.3), con el mismo lock y el mismo modal de confirmación que el resto. -#}
+<section class="bb-seccion" data-estrategia-editor hidden aria-hidden="true"></section>
+{% endblock %}

@@ -1078,6 +1078,63 @@ def get_status(settings: Settings, docker: Optional[DockerClient] = None) -> Dic
     return out
 
 
+# Estado del bot en una palabra (spec bot-estrategia § 2.1-2.2): píldora, punto del menú y control rápido de Inicio.
+ESTADO_OPERANDO = "operando"
+ESTADO_GRADUAL = "gradual"
+ESTADO_DETENIDO = "detenido"
+# Detenido con posiciones u órdenes abiertas: nadie las gestiona (Apagar que cerró a medias, docker stop a mano).
+ESTADO_EXPUESTO = "expuesto"
+ESTADO_SIN_DATOS = "sin_datos"
+
+
+def estado_del_bot(status: Dict[str, Any], exposicion: Optional[Dict[str, Any]]) -> str:
+    """Uno de los ``ESTADO_*`` a partir de ``get_status`` y de la exposición que ve el scraper.
+
+    Un error de Docker o el panel deshabilitado es ``sin_datos``, nunca "detenido": no se sabe si corre. En parada
+    gradual cuenta el lado long (con ``n_shorts`` 0 es el único que opera) y solo si forager lee los modos.
+    """
+    if not status.get("enabled") or status.get("error"):
+        return ESTADO_SIN_DATOS
+    container = status.get("container") or {}
+    if container.get("status") in (None, "unknown"):
+        return ESTADO_SIN_DATOS
+    if container.get("running"):
+        if status.get("modes_supported") and status.get("long_mode") == MODE_GRACEFUL_STOP:
+            return ESTADO_GRADUAL
+        return ESTADO_OPERANDO
+    expo = exposicion or {}
+    if (expo.get("posiciones") or 0) > 0 or (expo.get("ordenes") or 0) > 0:
+        return ESTADO_EXPUESTO
+    return ESTADO_DETENIDO
+
+
+def _lista_pares(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(s) for s in value if isinstance(s, str)]
+
+
+def resumen_estrategia(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Las claves de estrategia de la config de forager, como las muestran Estrategia, Iniciar y el registro de arranques.
+
+    ``lw`` = twe_long / n_longs (lo que forager le da a cada bot, ``forager.py:126``); None si no se puede calcular.
+    """
+    n_longs, n_shorts = n_pares(cfg)
+    twe = cfg.get("twe_long")
+    lw = None
+    if isinstance(twe, (int, float)) and not isinstance(twe, bool) and n_longs:
+        lw = float(twe) / n_longs
+    return {
+        "twe_long": twe,
+        "twe_short": cfg.get("twe_short"),
+        "n_longs": n_longs,
+        "n_shorts": n_shorts,
+        "pares_long": _lista_pares(cfg.get("approved_symbols_long")),
+        "pares_short": _lista_pares(cfg.get("approved_symbols_short")),
+        "lw": lw,
+    }
+
+
 def _inspect_existing(docker: DockerClient, name: str) -> Dict[str, Any]:
     """Inspect previo a tocar la config: falla rapido si el proxy no responde o no hay contenedor."""
     info = docker.inspect(name)

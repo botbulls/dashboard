@@ -1,0 +1,34 @@
+{#- Estado del bot en el shell (spec bot-estrategia § 2.1): píldora fuera de Inicio y punto en el ítem Bot del menú.
+    Cuatro estados (bot_control.estado_del_bot): operando, parada gradual, detenido (neutro) y detenido con posiciones
+    u órdenes sin bot (rojo). static/js/bot_acciones.js los vuelve a pintar con el mismo texto cuando llega el estado
+    (evento fb-bot-status); sin estado al render, la píldora dice "Bot" y el JS lo pide. -#}
+
+{% macro texto_expuesto(expo) -%}
+{%- set p = (expo or {}).get('posiciones') or 0 -%}
+{%- set o = (expo or {}).get('ordenes') or 0 -%}
+{%- if p -%}Sin bot · {{ p }} {{ 'posición' if p == 1 else 'posiciones' }}{%- else -%}Sin bot · {{ o }} {{ 'orden' if o == 1 else 'órdenes' }}{%- endif -%}
+{%- endmacro %}
+
+{% macro pildora(st) -%}
+{%- set e = (st or {}).get('estado_bot') -%}
+{%- set d = {
+    'operando': ('Operando', 'is-operando', 'fas fa-check-circle'),
+    'gradual': ('Parada gradual', 'is-gradual', 'fas fa-exclamation-triangle'),
+    'detenido': ('Detenido', 'is-parado', 'fas fa-stop-circle'),
+    'expuesto': (texto_expuesto((st or {}).get('exposicion')), 'is-detenido', 'fas fa-times-circle'),
+    'sin_datos': ('Bot sin datos', 'is-parado', 'fas fa-question-circle'),
+}.get(e, ('Bot', 'is-parado', 'fas fa-robot')) -%}
+<a class="bb-pildora-bot {{ d[1] }}" href="{{ url_for('main.bot_page') }}" data-bot-pildora{% if e %} data-bot-estado="{{ e }}"{% endif %} title="Ir a Bot"><i class="{{ d[2] }}" aria-hidden="true"></i><span><span class="bb-sr">Bot: </span><span data-bot-pildora-texto>{{ d[0] }}</span></span></a>
+{%- endmacro %}
+
+{% macro punto(st) -%}
+{%- set e = (st or {}).get('estado_bot') -%}
+{%- set d = {
+    'operando': ('ok', 'operando'),
+    'gradual': ('aviso', 'en parada gradual'),
+    'detenido': ('gris', 'detenido, sin posiciones ni órdenes'),
+    'expuesto': ('peligro', 'detenido con posiciones u órdenes sin bot'),
+    'sin_datos': ('gris', 'sin datos del estado'),
+}.get(e, ('gris', 'cargando el estado')) -%}
+<span class="bb-punto bb-punto--{{ d[0] }}" data-bot-punto{% if e %} data-bot-estado="{{ e }}"{% endif %} aria-hidden="true"></span><span class="bb-sr" data-bot-punto-texto>bot {{ d[1] }}</span>
+{%- endmacro %}
