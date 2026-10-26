@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}Estrategia{% endblock %}
+{% block bajada %}<p>Qué opera passivbot: perfil, exposición (TWE) y pares. Herramienta, no asesor.</p>{% endblock %}
+{% block content %}
+{#- data-bot-recargar: después de una acción (perfil, TWE) la página se vuelve a armar en el server. -#}
+<div data-bot-recargar hidden></div>
+
+{#- 1. Vigente: solo lectura, de la config de forager (new.json). -#}
+<section class="bb-seccion" id="bbEstrategiaVigente" aria-labelledby="bbTituloVigente">
+    <h2 class="bb-seccion__titulo" id="bbTituloVigente">Vigente <span class="bb-seccion__sub">config de forager (new.json)</span></h2>
+    {% if error_vigente %}
+        <p class="bb-alerta bb-alerta--aviso" role="alert"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i><span>No se pudo leer la estrategia: {{ error_vigente }}</span></p>
+    {% else %}
+        {% set v = vigente %}
+        {% set p = perfiles.get(v.perfil) if v.perfil else none %}
+        {% set c = (bot_status or {}).get('container') or {} %}
+        <div class="card">
+            <div class="card-body">
+                <div class="bb-vigente">
+                    <span class="bb-etiqueta {{ 'bb-etiqueta--vigente' if p else 'bb-etiqueta--neutra' }}">{{ ('Perfil ' ~ p.nombre) if p else 'Personalizado' }}</span>
+                    <span>TWE <strong class="bb-num" data-value="{{ v.twe_long }}">{{ v.twe_long|num }}</strong></span>
+                    <span>·</span>
+                    <span><strong>{{ v.n_longs if v.n_longs is not none else '—' }} a la vez</strong></span>
+                    {% if v.lw is not none %}<span>·</span><span>lw {{ v.lw|num(2) }} por par</span>{% endif %}
+                    <span class="bb-motivo" data-estrategia-guardada></span>
+                    <a class="ms-auto" href="#bbVersiones">Versiones</a>
+                    {% if (bot_status or {}).get('config_pending') %}
+                        <span class="bb-etiqueta bb-etiqueta--aviso">pendiente de reinicio</span>
+                    {% elif c.get('running') %}
+                        <span class="bb-etiqueta bb-etiqueta--ok">en efecto</span>
+                    {% else %}
+                        <span class="bb-etiqueta bb-etiqueta--neutra">se aplica al iniciar</span>
+                    {% endif %}
+                </div>
+                {%- if v.perfil_motivo %}
+                <p class="bb-motivo mt-2 mb-0"><i class="fas fa-info-circle" aria-hidden="true"></i> <span>Personalizado: {{ v.perfil_motivo }}.</span></p>
+                {%- endif %}
+                <ul class="bb-dato-lista mt-3">
+                    <li><span>Pares (approved_symbols_long)</span><span>{{ v.pares_long|join(', ') if v.pares_long else 'todos (lista vacía)' }}</span></li>
+                    <li><span>Pares a la vez (n_longs)</span><span>{{ v.n_longs if v.n_longs is not none else '—' }}</span></li>
+                    <li><span>TWE long / short</span><span>{{ v.twe_long|num }} / {{ v.twe_short|num }}</span></li>
+                    <li><span>Short</span><span>{{ 'apagado (n_shorts 0)' if v.n_shorts == 0 else 'n_shorts ' ~ v.n_shorts }}</span></li>
+                    <li><span>Modos long / short</span><span>{{ v.long_mode or 'normal' }} / {{ v.short_mode or 'normal' }}</span></li>
+                </ul>
+            </div>
+            <div class="card-footer">lw = TWE / pares a la vez: lo que forager le da a cada par (todos reciben el mismo). TWE, pares y pares a la vez se cambian abajo, en Exposición y Pares: nada se guarda hasta revisar y aplicar.</div>
+        </div>
+    {% endif %}
+</section>
+
+{#- 1. Perfil: los mismos controles e IDs que tenía la rueda (bot_acciones.js), con su confirmación y su job. La TWE
+    se edita en Exposición (spec § 2.6); el atajo "Iniciar con esta TWE…" salió porque arrancaba passivbot sin el
+    resumen ni la casilla de Iniciar (revisión, hallazgo 19).
+    data-bot-controles: en_vivo.js no toca la página con el foco en estos campos. -#}
+<section class="bb-seccion" aria-labelledby="bbTituloPerfil" data-bot-controles><div class="bb-paso"><span class="bb-paso__num" aria-hidden="true">1</span><div>
+    <h2 id="bbTituloPerfil">Perfil</h2>
+    <p class="bb-paso__bajada">Los perfiles son paquetes medidos: TWE, rescate y los 4 pares. Si cambiás algo de abajo, pasa a Personalizado.</p>
+    <p class="bb-panel__aviso d-none" data-bot-panel="deshabilitado"><span data-bot-panel="deshabilitado-msg"></span></p>
+    <div class="bb-acciones-bot">
+        <div class="bb-accion">
+            <h3><label for="botPerfilSelect">Perfil de riesgo</label></h3>
+            <select id="botPerfilSelect" name="perfil" class="form-select">
+                {% for clave, pf in perfiles.items() %}<option value="{{ clave }}">{{ pf.nombre }}{% if clave == 'conservador' %} (TWE 3, sin rescate){% elif clave == 'con_rescate' %} (TWE 4 + rescate + retiro){% endif %}</option>{% endfor %}
+            </select>
+            <p data-bot-panel="perfil-vigente"></p>
+            <details class="bb-detalle">
+                <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Qué hace y números del backtest</summary>
+                <p class="mt-1" data-bot-panel="perfil-desc"></p>
+            </details>
+            <button type="button" class="btn btn-primary" data-bot-accion="perfil">Aplicar perfil…</button>
+            <p>TWE de forager + rescate, disparo por uPnL y retiro en una sola acción. Antes de aplicar se muestra qué cambia. Backtest, no promesa: herramienta, no asesor.</p>
+        </div>
+    </div>
+    <p class="bb-motivo"><i class="fas fa-info-circle" aria-hidden="true"></i> Backtest OOS (ventanas de 12 meses desde 2023-11-10, sobre los 10.000 de futuros) con BNB, BTC, ETH y XRP y sus configs clock. Es un backtest, no una promesa: herramienta, no asesor.</p>
+</div></div></section>
+
+{#- Editor de la estrategia (spec § 2.4, pasos 2-5): un borrador que no se guarda hasta "Revisar y aplicar". Lo arma
+    static/js/estrategia.js con GET /api/bot/estrategia (chequeos contra Binance, con caché): la página no llama a Binance
+    al armarse. Aplica con POST /api/bot/estrategia (plan 409 → confirmación → job con el mismo lock que el resto). -#}
+<div data-estrategia-editor data-url="{{ url_for('main.bot_estrategia') }}" data-url-candidatos="{{ url_for('main.bot_estrategia_candidatos') }}" data-url-versiones="{{ url_for('main.bot_estrategia_versiones') }}" data-url-volver="{{ url_for('main.bot_estrategia_volver') }}" data-url-rotacion="{{ url_for('main.bot_estrategia_rotacion') }}" data-bot-controles>
+    <p class="bb-alerta bb-alerta--info" data-estrategia="cargando" role="status"><i class="fas fa-circle-notch fa-spin" aria-hidden="true"></i><span>Cargando la estrategia y los chequeos de cada par (Binance{{ ' Demo' if config.get('BINANCE_TESTNET') }})…</span></p>
+    <p class="bb-alerta bb-alerta--aviso d-none" data-estrategia="error" role="alert"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i><span data-estrategia="error-texto"></span></p>
+
+    <section class="bb-seccion d-none" data-estrategia="seccion" aria-labelledby="bbTituloExposicion"><div class="bb-paso"><span class="bb-paso__num" aria-hidden="true">2</span><div>
+        <h2 id="bbTituloExposicion">Exposición</h2>
+        <p class="bb-paso__bajada" data-estrategia="exposicion-bajada">La TWE es cuánto puede llegar a exponerse la cuenta en total, en veces el balance. Se reparte en partes iguales entre los pares que opera a la vez.</p>
+        <div class="bb-exposicion">
+            <div class="card"><div class="card-body bb-controles">
+                <div class="bb-campo">
+                    <label for="bbTwe">TWE long</label>
+                    <div class="bb-stepper"><button type="button" data-paso="twe" data-dir="-1" aria-label="Bajar TWE long">−</button><input id="bbTwe" type="text" inputmode="decimal" autocomplete="off" aria-describedby="bbTweAyuda"><button type="button" data-paso="twe" data-dir="1" aria-label="Subir TWE long">+</button></div>
+                    <p class="bb-campo__ayuda" id="bbTweAyuda">De 0,5 a 8 en pasos de 0,25. Arriba de 4 pide confirmación: en el backtest aparecen liquidaciones desde TWE 6.</p>
+                </div>
+                <div class="bb-campo">
+                    <label for="bbNLongs">Pares a la vez</label>
+                    <div class="bb-stepper"><button type="button" data-paso="n" data-dir="-1" aria-label="Bajar pares a la vez">−</button><input id="bbNLongs" type="text" inputmode="numeric" autocomplete="off" aria-describedby="bbNLongsAyuda"><button type="button" data-paso="n" data-dir="1" aria-label="Subir pares a la vez">+</button></div>
+                    <p class="bb-campo__ayuda" id="bbNLongsAyuda" aria-live="polite"></p>
+                </div>
+            </div></div>
+            <dl class="bb-derivados" aria-label="Consecuencias calculadas" data-estrategia="derivados"></dl>
+        </div>
+        <p class="bb-motivo"><i class="fas fa-info-circle" aria-hidden="true"></i> <span data-estrategia="exposicion-nota"></span></p>
+    </div></div></section>
+
+    <section class="bb-seccion d-none" data-estrategia="seccion" aria-labelledby="bbTituloPares"><div class="bb-paso"><span class="bb-paso__num" aria-hidden="true">3</span><div>
+        <h2 id="bbTituloPares">Pares</h2>
+        <p class="bb-paso__bajada">Con qué monedas puede operar forager (approved_symbols_long). Solo se aceptan pares con config clock propia y que forager no descarte.</p>
+        <ul class="bb-pares" aria-labelledby="bbTituloPares" data-estrategia="pares"></ul>
+        <p class="bb-motivo"><i class="fas fa-info-circle" aria-hidden="true"></i> <span>1.ª compra = balance × lw × qty_pct_entry de la config del par. Si queda debajo del mínimo de Binance, passivbot compra el mínimo y la entrada queda más grande que lo que pide la config. Los chequeos de forager se vuelven a correr en cada ciclo sobre los pares aprobados (Bot → Pares ahora).</span></p>
+    </div></div></section>
+
+    <section class="bb-seccion d-none" data-estrategia="seccion" aria-labelledby="bbTituloAvanzado"><div class="bb-paso"><span class="bb-paso__num" aria-hidden="true">4</span><div>
+        <h2 id="bbTituloAvanzado">Avanzado</h2>
+        <details class="bb-detalle">
+            <summary><i class="fas fa-chevron-right" aria-hidden="true"></i> Lo que también decide qué opera forager (solo lectura)</summary>
+            <div class="card bb-tabla-card mt-2"><table class="table bb-tabla-avanzado mb-0" aria-label="Claves de forager que el panel no edita"><tbody data-estrategia="avanzado"></tbody></table></div>
+        </details>
+    </div></div></section>
+
+    <section class="bb-seccion d-none" data-estrategia="seccion" aria-labelledby="bbTituloVersiones" id="bbVersiones"><div class="bb-paso"><span class="bb-paso__num" aria-hidden="true">5</span><div>
+        <h2 id="bbTituloVersiones">Versiones</h2>
+        <p class="bb-paso__bajada">Cada cambio guarda una copia de new.json. Volver restaura solo TWE, pares y pares a la vez, con la misma revisión y confirmación que un cambio nuevo.</p>
+        <div class="card bb-tabla-card">
+            <ul class="bb-versiones" data-estrategia="versiones" aria-labelledby="bbTituloVersiones"><li class="bb-version"><span class="bb-motivo">Cargando versiones…</span></li></ul>
+            <div class="card-footer" data-estrategia="versiones-pie">Se guardan las últimas copias. Las de Parada gradual, Apagar (deja forager en parada gradual) e Iniciar / Reanudar solo cambian modos: se agrupan con la anterior. Horas UTC.</div>
+        </div>
+    </div></div></section>
+
+    {#- Barra de cambios sin aplicar: pegada abajo mientras el borrador sea distinto de lo vigente. -#}
+    <div class="bb-cambios d-none" data-estrategia="cambios" role="region" aria-label="Cambios sin aplicar">
+        <div class="bb-cambios__texto"><strong data-estrategia="cambios-titulo"></strong><span data-estrategia="cambios-lista"></span>
+            <ul class="bb-avisos d-none" data-estrategia="bloqueos" role="alert"></ul></div>
+        <div class="bb-cambios__botones">
+            <button type="button" class="btn btn-outline-secondary" data-estrategia-accion="descartar">Descartar</button>
+            <button type="button" class="btn btn-primary" data-estrategia-accion="revisar">Revisar y aplicar</button>
+        </div>
+    </div>
+</div>
+
+{#- Agregar un par (spec § 2.4): buscador sobre los perpetuos USDT del endpoint que opera y el manifiesto de configs. -#}
+<div class="modal fade" id="bbAgregarParModal" tabindex="-1" aria-labelledby="bbAgregarParLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-lg modal-fullscreen-sm-down">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title" id="bbAgregarParLabel">Agregar un par</h2>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+            </div>
+            <div class="modal-body" style="display:grid;gap:12px">
+                <div class="bb-campo">
+                    <label for="bbBuscarPar">Par</label>
+                    <div class="bb-buscador"><i class="fas fa-search" aria-hidden="true"></i><input id="bbBuscarPar" class="form-control" type="search" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="20" placeholder="Ej.: SOL" aria-describedby="bbBuscarParAyuda"></div>
+                    <p class="bb-campo__ayuda" id="bbBuscarParAyuda">Busca en los perpetuos USDT de Binance{{ ' (Demo)' if config.get('BINANCE_TESTNET') }} y en las configs clock de passivbot. Los chequeos son los mismos que se vuelven a correr al aplicar.</p>
+                </div>
+                <p class="mb-0 small" data-agregar="estado" role="status" aria-live="polite"></p>
+                <ul class="bb-resultados" data-agregar="resultados" aria-label="Resultados"></ul>
+                <fieldset class="bb-modo-par d-none" data-agregar="modo">
+                    <legend>Pares a la vez</legend>
+                    <div data-agregar="modos" style="display:grid;gap:8px"></div>
+                </fieldset>
+            </div>
+            <div class="modal-footer bb-confirmacion__pie">
+                <p class="bb-confirmacion__riesgo">Todavía no se guarda nada: después revisás el cambio completo.</p>
+                <div class="bb-confirmacion__botones">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+                    <button type="button" class="btn btn-primary" data-agregar="confirmar" disabled>Agregar al borrador</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+<script src="{{ estatico('js/estrategia.js') }}" defer></script>
+{% endblock %}

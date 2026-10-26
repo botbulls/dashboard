@@ -204,12 +204,21 @@ def format_bot_action(action: str, params: Dict[str, Any], outcome: str, payload
     if outcome not in ("ok", "error"):
         return None
     ok = outcome == "ok"
-    if action == "start" and params.get("twe_long") is not None:
+    if action == "start" and params.get("reanudar"):
+        como = {"reanudar": "REANUDAR", "reiniciar": "REINICIAR"}.get(params.get("como"), "INICIAR")
+        titulo = f"{como} con la estrategia guardada"
+    elif action == "start" and params.get("twe_long") is not None:
         titulo = f"START TWE manual {esc(params.get('twe_long'))}"
     elif action == "start":
         titulo = f"START riesgo {esc(params.get('riesgo'))}"
     elif action == "perfil":
         titulo = f"PERFIL {esc(params.get('perfil'))}"
+    elif action == "estrategia":
+        titulo = "VOLVER a una versión de la estrategia" if params.get("volver") else "ESTRATEGIA"
+    elif action == "credenciales":
+        titulo = "VOLVER a la API key anterior" if params.get("volver") else "CAMBIAR la API key"
+    elif action == "credenciales_validar":
+        titulo = "VALIDAR la key anterior (volver)" if params.get("volver") else "VALIDAR una API key nueva"
     elif action == "stop" and params.get("modo") == "apagar":
         titulo = "APAGAR (stop + cierre de posiciones)"
     elif action == "stop":
@@ -219,10 +228,15 @@ def format_bot_action(action: str, params: Dict[str, Any], outcome: str, payload
     icon = "✅" if ok else "❌"
     estado = "OK" if ok else "FALLÓ"
     lines = [f"{icon} <b>{titulo}</b>: {estado}", f"Usuario: {esc(user)}"]
+    if action in ("credenciales", "credenciales_validar") and params.get("key"):
+        # Solo la key enmascarada (4 + … + 4): nunca la key entera ni el secret (spec bot-estrategia § 10.4, paso 6).
+        lines.append(f"Key: {esc(params.get('key'))} · {esc(params.get('entorno') or '')}".rstrip(" ·"))
     if payload.get("docker_action"):
         lines.append(f"Docker: {esc(payload.get('docker_action'))}")
     if not ok and payload.get("error"):
         lines.append(f"Error: {esc(payload.get('error'))}")
+    if payload.get("cambios_texto"):
+        lines.append(f"Cambios: {esc(payload.get('cambios_texto'))}")
     if payload.get("warning"):
         lines.append(f"⚠️ {esc(payload.get('warning'))}")
     if isinstance(payload.get("resumen"), dict):

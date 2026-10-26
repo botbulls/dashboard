@@ -64,7 +64,19 @@ Browser ──(sesión + CSRF)──> dashboard (Flask)
 | GET | `/api/bot/status` | – | Estado del contenedor, preset de riesgo deducido (`bajo`/`medio`/`alto`/`personalizado`/`desconocido`), `twe_long`, `twe_short`, `long_mode`, `short_mode`, `enabled`, `modes_supported`, `config_pending`. |
 | POST | `/api/bot/start` | `{"riesgo": "bajo"\|"medio"\|"alto"}` o `{"twe_long": n}` (TWE manual, ver [perfiles.md](perfiles.md#twe-manual)) | Escribe `twe_long`/`twe_short` del preset (o la TWE manual), `long_mode=normal`, `short_mode` (ver abajo); `start` si está detenido, `restart` si corre. |
 | POST | `/api/bot/perfil` | `{"perfil": "conservador"\|"con_rescate"}` (+ `"confirmar": true`) | Perfil de riesgo: TWE de forager + rescate, disparo por uPnL y retiro en una sola acción (ver [perfiles.md](perfiles.md)). |
-| POST | `/api/bot/stop` | `{"modo": "graceful"\|"apagar"}` | `graceful`: `long_mode=short_mode=graceful_stop` + start o restart (requiere `FUTURESBOARD_FORAGER_SUPPORTS_MODES=1`, si no 409). `apagar`: `stop` del contenedor y después cancela **todas** las órdenes y cierra **todas** las posiciones de USDⓈ-M Futures a mercado (ver "Apagar" abajo); no toca la config. |
+| POST | `/api/bot/stop` | `{"modo": "graceful"\|"apagar"}` | `graceful`: `long_mode=short_mode=graceful_stop` + start o restart (requiere `FUTURESBOARD_FORAGER_SUPPORTS_MODES=1`, si no 409). `apagar`: `stop` del contenedor y después cancela **todas** las órdenes y cierra **todas** las posiciones de USDⓈ-M Futures a mercado (ver "Apagar" abajo). Antes del stop deja `long_mode`/`short_mode` en `graceful_stop` en la config; si no puede escribirla, sigue igual. |
+
+| GET | `/api/bot/estrategia` | – | Estrategia vigente, derivados (lw, máximos, caída que liquida), lugares ocupados, pares con sus chequeos, avanzado y `base_hash`. Consulta la API pública de Binance (con caché). |
+| GET | `/api/bot/estrategia/candidatos?q=SOL` | – | Hasta 10 pares del endpoint que opera (y del manifiesto de configs) con sus chequeos. |
+| GET | `/api/bot/estrategia/rotacion?pares=A,B,C&n=2` | – | Qué elegiría forager hoy con más pares que lugares: réplica de `sort_symbols` y de sus lugares con las velas de 15 m de ahora, en el endpoint que opera y, en Demo, también en real. Estimación (S1). |
+| GET | `/api/bot/estrategia/versiones` | – | Versiones de la estrategia (backups de `new.json` agrupados: los que solo cambian modos van con la anterior), con cuándo, quién, qué cambió y la diferencia con la vigente. |
+| POST | `/api/bot/estrategia/volver` | `{"backup", "base_hash"}` (+ `"confirmar": true, "plan_hash"`) | Volver a una versión: el mismo plan, confirmación y job que un cambio de estrategia, con TWE, pares a la vez y pares de ese backup (nada más). Bloquea si un par de esa versión ya no pasa los chequeos o si viola la regla de exposición. |
+| POST | `/api/bot/estrategia` | `{"twe_long", "n_longs", "pares", "base_hash"}` (+ `"confirmar": true, "plan_hash"`) | Cambio de estrategia: sin `confirmar`, 409 con el plan (diff, avisos, `plan_hash`) o con los `bloqueos`; con `confirmar`, el job. Escribe también `approved_symbols_short` (= long) y `twe_short` 1; no toca los modos. Reinicia passivbot si corre; detenido, escribe y no arranca. Ver [Estrategia](#estrategia-pares-y-pares-a-la-vez). |
+| GET | `/bot/credenciales` | – | Página propia del cambio de API key (CSP, solo JS local). 404 con `FUTURESBOARD_CREDENCIALES_WEB` apagado. |
+| GET | `/api/bot/credenciales` | – | Bot → "Conexión con Binance": entorno, key enmascarada (4 + 4), cuenta verificada, hedge, quién y cuándo, permisos (real) y quién la usa. Nunca key, secret ni uid. La primera vez guarda la línea de base (huella del uid). |
+| POST | `/api/bot/credenciales/validar` | `{"api_key", "api_secret"}` | Chequeos con Binance (§ 10.2): 200 con `pendiente_id` (5 min, un uso) o 422 con el motivo. 429 pasadas 5 validaciones en 15 min. |
+| POST | `/api/bot/credenciales` | `{"pendiente_id"}` (+ `"plan_hash", "password", "confirmar": true`) | Sin confirmar, 409 con el plan; con la contraseña del panel (limitador del login), el job (202). Pendiente vencido o usado: 409. |
+| POST | `/api/bot/credenciales/volver` | `{}` (después igual que arriba) | Volver a la key del último respaldo (7 días): la valida y responde el plan. |
 
 Presets (históricos del guardian): bajo 4/1, medio 6/2, alto 8/3 (`twe_long`/`twe_short`).
 
@@ -110,6 +122,12 @@ El log de auditoría guarda el mensaje de error completo, incluida la restauraci
 
 `POST /api/bot/stop {"modo": "apagar"}` hace, en este orden y bajo el lock de acciones:
 
+0. **Deja forager en parada gradual**: escribe `long_mode` y `short_mode` en `graceful_stop` (backup y escritura
+   atómica, como Parada gradual; guarda `short_mode_before_stop` para el próximo START). Si algo vuelve a arrancar
+   passivbot (por ejemplo un `docker compose up -d`), no abre pares nuevos; Iniciar los vuelve a `normal`. **Nunca
+   frena el Apagar**: si no puede escribir (archivo de solo lectura, HJSON roto, sin `FUTURESBOARD_FORAGER_CONFIG`),
+   el paso queda en error u omitido, el aviso va al resultado (`warning`) y a Telegram, y sigue con el stop. Vale
+   igual para el Apagar del tope del rescate y el de C3 (todos llaman a `stop_bot(..., "apagar")`).
 1. **Detiene passivbot** con el cliente Docker (`POST /containers/{name}/stop`, `304` = ya estaba
    detenido) y confirma con `GET /containers/{name}/json` que no corre. Si el stop falla (error
    HTTP, timeout, contenedor inexistente) o sigue corriendo: **502 y no se toca Binance**. Cerrar
@@ -223,6 +241,52 @@ falla (`EBUSY`) o passivbot sigue viendo el inode viejo.
 `ts`, `user`, `action`, `params`, `result` (`ok`/`rechazado`/`error`/`interrumpido`), `detail`, `remote_addr`.
 En Apagar, `detail` incluye `resumen: {...}` con el JSON del cierre.
 
+## Estrategia: pares y pares a la vez
+
+Diseño completo en `diseno/bot-estrategia/spec.md` (§ 2.4 y § 3). En corto:
+
+- **Chequeos por par** (`futuresboard/estrategia.py`), contra la API pública del endpoint que opera (Demo con
+  `BINANCE_TESTNET`), sin credenciales, con el timeout del scraper y caché (`exchangeInfo` 10 min):
+  formato, perpetuo USDT en TRADING, config que elegiría forager (manifiesto de passivbot), edad con la primera vela
+  1M contra `market_age_threshold`, mínimo de Binance contra `max_min_cost` (en Demo informa también el de real),
+  500 velas de 15 m, lista negra, backtest (los 4 pares y el md5 de su config) y 1.ª compra contra el mínimo.
+- **Manifiesto de configs** (`live_configs_manifest.json`, junto a `new.json`): lo escribe forager (botbulls/passivbot#6).
+  Sin un manifiesto usable no se pueden **agregar** pares (el motivo lo dice); sí cambiar TWE, pares a la vez y quitar.
+- **Regla de exposición**: `n_longs ≥ |P ∪ O|`, con P = pares con posición (estén o no en la lista nueva) y O = pares de
+  la lista nueva con órdenes abiertas (base del scraper). Quitar un par con posición no baja los lugares: forager le da
+  la misma lw a todos, también al que sale en parada gradual. Techo: pares + los que salen con posición.
+- **Escritura**: plan 409 → confirmación (con casilla si hay avisos: sin backtest, TWE > 4, quitar con posición,
+  Personalizado con rescate, un par que forager descartaría) → job con el mismo lock, backup y escritura atómica.
+  Si Docker rechaza el reinicio se restaura el backup. Cada cambio queda en `bot_actions.log` (acción `estrategia`,
+  con el diff resumido) y en `estrategia_versiones.jsonl` (quién, qué, backup y hash antes y después).
+- **Rotación** (`futuresboard/rotacion.py`): con más pares que lugares, la vista previa de qué elegiría forager es una
+  réplica en Python puro de `forager.sort_symbols` y de los lugares de `generate_yaml`. `tests/test_rotacion.py` la
+  compara con el resultado del código real de forager sobre las mismas velas (`tests/fixtures/rotacion/generar.py`
+  regenera el fixture con el intérprete de passivbot).
+- **Chequeos por ciclo** (`futuresboard/chequeos_forager.py`): un hilo del worker de gunicorn repite los filtros de
+  forager sobre los aprobados cada `update_interval_minutes`, deja el resultado en `chequeos_forager.json` (Bot → Pares
+  ahora) y avisa por Telegram solo cuando un par cambia de estado. Binance caído es "sin datos": no avisa.
+
+## API key de Binance: `/secretos` y cambio desde el panel
+
+Diseño completo en `diseno/bot-estrategia/spec.md` § 10. En corto:
+
+- **Una sola fuente** (`futuresboard/credenciales.py`): `/secretos/api-keys.json` (formato de passivbot, usuario `user`
+  de `new.json`). Panel, scraper y rescate tienen un proveedor por proceso que relee el archivo si cambia
+  `(st_ino, st_mtime_ns, st_size)`. **Todos** los clientes de Binance piden key y secret en cada request (también el
+  Apagar del tope, el de C3 y las velas). Con el archivo inválido siguen con la última key válida y lo dicen en el latido.
+  Sin el directorio `/secretos` (migración), la key sale de `config.json`.
+- **Latidos**: `scraper_latido.json` y `rescate_state.servicio` llevan `key_id` (12 hex del sha256 de la API key, nunca
+  del secret) y `key_ok_at` (última firma OK). Bot → "Conexión con Binance" los compara con la key del archivo; passivbot
+  cuenta cuando crea una orden después de arrancar.
+- **Cambio desde la web** (`futuresboard/cambio_key.py`), detrás de `FUTURESBOARD_CREDENCIALES_WEB`: página propia
+  `/bot/credenciales` (sin `base.html` ni scripts de terceros, con CSP), validación con Binance (formato HMAC, misma
+  cuenta por la huella del uid, hedge mode, la sonda del permiso de operar, permisos en real), re-auth con la contraseña
+  del panel (limitador del login), 5 validaciones cada 15 min, pendiente de 5 min y un uso, job con el lock (respaldo
+  600 en `/secretos-respaldo`, escritura atómica, restart de passivbot; si Docker lo rechaza se restaura copiando el
+  respaldo) y espera a los consumidores sin el lock. Ninguna respuesta, log, historial ni Telegram lleva la key entera,
+  el secret ni el uid.
+
 ## Variables de entorno
 
 | Variable | Default | Descripción |
@@ -231,11 +295,17 @@ En Apagar, `detail` incluye `resumen: {...}` con el JSON del cierre.
 | `FUTURESBOARD_PASSIVBOT_CONTAINER` | `client17-passivbot` | Nombre del contenedor de passivbot. |
 | `FUTURESBOARD_FORAGER_CONFIG` | (vacía) | Ruta del HJSON de forager dentro del contenedor del dashboard. Sin ella START y graceful quedan deshabilitados; Apagar funciona. |
 | `FUTURESBOARD_FORAGER_SUPPORTS_MODES` | `0` | Habilita Graceful stop. Activar solo con forager parcheado (ver arriba). |
+| `FUTURESBOARD_CHEQUEOS_FORAGER` | `1` | `0` apaga el hilo de los chequeos de forager por ciclo (Bot → Pares ahora y avisos por Telegram). |
 | `FUTURESBOARD_SECRET_KEY` | efímera + warning | Fijarla para que las sesiones (y el token CSRF) sobrevivan reinicios. Ver [login.md](login.md) para cookies, usuarios y rate limit. |
+| `FUTURESBOARD_SECRETOS_DIR` | `/secretos` | Directorio de `api-keys.json`. Si no existe, la key sale de `config.json`. |
+| `FUTURESBOARD_SECRETOS_RESPALDO_DIR` | `/secretos-respaldo` | Respaldos del cambio de key (solo el panel lo monta). |
+| `FUTURESBOARD_PASSIVBOT_USER` | `binance_01` | Usuario de `api-keys.json` si no se puede leer `new.json` (el scraper no monta `/forager`). |
+| `FUTURESBOARD_CREDENCIALES_WEB` | `0` | `1` habilita cambiar la API key desde el panel. Apagado, la página y los POST responden 404. En prod, solo con DALE. |
+| `FUTURESBOARD_CREDENCIALES_ESPERA_SECONDS` | `150` | Cuánto espera el job a que los 4 tomen la key nueva (sin el lock, cancelable). |
 
-Apagar no agrega variables: usa `API_KEY` / `API_SECRET` / `API_BASE_URL` / `EXCHANGE` de
-`config.json` y el modo de prueba existente (`FUTURESBOARD_BINANCE_TESTNET`). La API key
-necesita permiso de **trading de futuros** (antes el dashboard solo leía).
+Apagar usa la key de `/secretos/api-keys.json` (o `API_KEY` / `API_SECRET` de `config.json` mientras no exista el
+directorio), `API_BASE_URL` / `EXCHANGE` de `config.json` y el modo de prueba existente
+(`FUTURESBOARD_BINANCE_TESTNET`). La API key necesita permiso de **trading de futuros** (antes el dashboard solo leía).
 
 Se eliminan `FUTURESBOARD_ADMIN_URL`, `FUTURESBOARD_BOT_URL`, `FUTURESBOARD_BOT_SERVICE_NAME`
 y `FUTURESBOARD_BOT_SERVICE_PORT`.

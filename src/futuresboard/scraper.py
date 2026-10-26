@@ -20,6 +20,7 @@ import requests  # type: ignore
 from flask import current_app
 from flask import Flask
 
+from futuresboard import credenciales
 from futuresboard import db
 
 
@@ -151,12 +152,26 @@ def frescura(database, now: float | None = None, intervalo_defecto: int | None =
     }
 
 
+# Datos "al día": la última vuelta OK tiene a lo sumo 3 intervalos (Bot → Latidos usa la misma vara).
+FRESCO_INTERVALOS = 3
+
+
+def intervalo_web(config) -> int | None:
+    """Intervalo del hilo de scrape del web (None si el web no scrapea: compose con servicio scraper)."""
+    return None if config.get("DISABLE_AUTO_SCRAPE") else config.get("AUTO_SCRAPE_INTERVAL")
+
+
+def datos_frescos(f: dict) -> bool:
+    """``frescura`` dentro del umbral. Sin latido ni ``scrape_state.json`` no hay evidencia: no está fresca."""
+    edad = f.get("edad_segundos")
+    return edad is not None and edad <= FRESCO_INTERVALOS * (f.get("intervalo_segundos") or 60)
+
+
 def frescura_web(config, now: float | None = None) -> dict:
     """``frescura`` para el web (``app.config``): sin un latido más nuevo y con el hilo del web prendido
     (compose sin servicio scraper), el intervalo es el ``AUTO_SCRAPE_INTERVAL`` del web. Sin eso el indicador
     "en vivo" usaría el umbral de 180 s y se pondría amarillo entre dos vueltas de 300 s del hilo."""
-    defecto = None if config.get("DISABLE_AUTO_SCRAPE") else config.get("AUTO_SCRAPE_INTERVAL")
-    return frescura(config["DATABASE"], now=now, intervalo_defecto=defecto)
+    return frescura(config["DATABASE"], now=now, intervalo_defecto=intervalo_web(config))
 
 
 def auto_scrape(app):
@@ -177,16 +192,33 @@ def _auto_scrape(app):
             time.sleep(interval)
 
 
-def hashing(query_string, exchange="binance", timestamp=None):
+def _proveedor():
+    """La key del proceso (``futuresboard.credenciales``): se relee si cambió el archivo, en cada pedido."""
+    return credenciales.de_app(current_app._get_current_object())
+
+
+def _credencial(requerida=True):
+    """Key y secret para UN pedido. Sin credenciales: error del pedido (firmado) o header vacío (público)."""
+    try:
+        return _proveedor().actuales()
+    except credenciales.SinCredenciales as exc:
+        if requerida:
+            raise HTTPRequestError(url="", code=-5, msg=f"sin credenciales de Binance: {exc}") from exc
+        return None
+
+
+def hashing(query_string, exchange="binance", timestamp=None, cred=None):
+    # ``cred``: la misma lectura del proveedor para la firma y para el header (send_signed_request la pasa).
+    cred = cred or _credencial()
     if exchange == "bybit":
-        query_string = f"{timestamp}{current_app.config['API_KEY']}5000" + query_string
+        query_string = f"{timestamp}{cred.api_key}5000" + query_string
         return hmac.new(
-            bytes(current_app.config["API_SECRET"].encode("utf-8")),
+            bytes(cred.api_secret.encode("utf-8")),
             query_string.encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
     return hmac.new(
-        bytes(current_app.config["API_SECRET"].encode("utf-8")),
+        bytes(cred.api_secret.encode("utf-8")),
         query_string.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
@@ -196,13 +228,16 @@ def get_timestamp():
     return int(time.time() * 1000)
 
 
-def dispatch_request(http_method, signature=None, timestamp=None):
+def dispatch_request(http_method, signature=None, timestamp=None, cred=None):
+    if cred is None:
+        cred = _credencial(requerida=False)
+    api_key = cred.api_key if cred is not None else ""
     session = requests.Session()
     session.headers.update(
         {
             "Content-Type": "application/json;charset=utf-8",
-            "X-MBX-APIKEY": current_app.config["API_KEY"],
-            "X-BAPI-API-KEY": current_app.config["API_KEY"],
+            "X-MBX-APIKEY": api_key,
+            "X-BAPI-API-KEY": api_key,
             "X-BAPI-SIGN": f"{signature}",
             "X-BAPI-SIGN-TYPE": "2",
             "X-BAPI-TIMESTAMP": f"{timestamp}",
@@ -225,6 +260,9 @@ def _msg_timeout(exc) -> str:
 
 # used for sending request requires the signature
 def send_signed_request(http_method, url_path, payload={}, exchange="binance"):
+    # Una sola lectura de la key por pedido (spec bot-estrategia § 10.3): si el archivo cambia en el medio, el pedido
+    # sale entero con la que tomó al empezar (firma y header de la misma key).
+    cred = _credencial()
     if exchange == "binance":
         payload["timestamp"] = get_timestamp()
     query_string = urlencode(OrderedDict(sorted(payload.items())))
@@ -234,7 +272,7 @@ def send_signed_request(http_method, url_path, payload={}, exchange="binance"):
 
     url = f"{current_app.config['API_BASE_URL']}{url_path}?{query_string}"
     if exchange == "binance":
-        url += f"&signature={hashing(query_string, exchange)}"
+        url += f"&signature={hashing(query_string, exchange, cred=cred)}"
 
     # print("{} {}".format(http_method, url))
     params = {"url": url, "params": {}, "timeout": BINANCE_TIMEOUT}
@@ -242,8 +280,9 @@ def send_signed_request(http_method, url_path, payload={}, exchange="binance"):
         timestamp = get_timestamp()
         response = dispatch_request(
             http_method,
-            hashing(query_string=query_string, exchange=exchange, timestamp=timestamp),
+            hashing(query_string=query_string, exchange=exchange, timestamp=timestamp, cred=cred),
             timestamp=timestamp,
+            cred=cred,
         )(**params)
         headers = response.headers
         try:
@@ -259,6 +298,7 @@ def send_signed_request(http_method, url_path, payload={}, exchange="binance"):
                 raise HTTPRequestError(
                     url=url, code=json_response["retCode"], msg=json_response["retMsg"]
                 )
+        _proveedor().firma_ok(cred)  # key_ok_at del latido: última firma que Binance aceptó
         return headers, json_response
     except requests.exceptions.Timeout as e:
         raise HTTPRequestError(url=url, code=-4, msg=_msg_timeout(e))
@@ -896,6 +936,7 @@ def build_app(config) -> Flask:
     app.config.from_mapping(**json.loads(config.json()))
     for value in (config.API_KEY, config.API_SECRET):
         logs.register_secret(value)
+    credenciales.configurar_app(app)  # /secretos/api-keys.json con recarga; config.json de respaldo
     return app
 
 
@@ -923,8 +964,10 @@ def run_loop(app, *, interval=None, detener=None, max_vueltas=None) -> int:
                 log.error("Vuelta %d con error (%s): %s", vuelta, exc.__class__.__name__, redact_url(exc))
             duracion = time.time() - inicio
             if ok:
+                # key_id / key_ok_at / key_error: la key con la que firma este proceso (del proveedor, nunca la key).
                 _write_latido(database, {"at": time.time(), "vuelta": vuelta, "intervalo": interval,
-                                         "duracion_segundos": round(duracion, 3), "pid": os.getpid()})
+                                         "duracion_segundos": round(duracion, 3), "pid": os.getpid(),
+                                         **credenciales.de_app(app).latido()})
                 log.info("Vuelta %d OK en %.1f s; próxima en %s s", vuelta, duracion, interval)
             else:
                 log.warning("Vuelta %d sin éxito en %.1f s (sin latido); reintento en %s s",

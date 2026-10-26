@@ -22,19 +22,24 @@ import math
 import os
 import pathlib
 import re
+import secrets
 import shutil
 import tempfile
 import time
 from typing import Any
+from typing import Callable
 from typing import Dict
 from typing import Iterator
 from typing import List
 from typing import Optional
+from typing import Tuple
 from urllib.parse import quote
 from urllib.parse import urlencode
 
 import hjson
 import requests
+
+from futuresboard import credenciales as credenciales_mod
 
 ENV_DOCKER_URL = "FUTURESBOARD_DOCKER_URL"
 ENV_CONTAINER = "FUTURESBOARD_PASSIVBOT_CONTAINER"
@@ -92,6 +97,10 @@ HTTP_TIMEOUT_SECONDS = 10
 MAX_BACKUPS = 20
 
 AUDIT_LOG_NAME = "bot_actions.log"
+# Un renglón por arranque de passivbot (Iniciar, Reanudar, Reiniciar, START por API, perfil y el reinicio automático
+# de C3): con qué estrategia arrancó (hash y resumen). Iniciar lo usa para mostrar qué cambió desde el último arranque.
+ARRANQUES_FILE_NAME = "bot_arranques.jsonl"
+MAX_ARRANQUES = 200
 STATE_FILE_NAME = "bot_control_state.json"
 LOCK_FILE_NAME = ".bot_control.lock"
 
@@ -120,6 +129,8 @@ START_STEPS: List[tuple] = [
 ]
 GRACEFUL_STEPS: List[tuple] = list(START_STEPS)
 APAGAR_STEPS: List[tuple] = [
+    # Antes del stop (decisión 2, spec bot-estrategia § 3.4): si algo vuelve a arrancar passivbot, no abre pares nuevos.
+    ("parada_gradual", "Dejar forager en parada gradual"),
     ("detener", "Detener passivbot"),
     ("verificar_detenido", "Verificar que passivbot está detenido"),
     ("cancelar_ordenes", "Cancelar órdenes"),
@@ -262,15 +273,22 @@ class DockerClient:
     def inspect(self, name: str) -> Dict[str, Any]:
         resp = self._request("GET", self._url(name, "/json"))
         if resp.status_code == 404:
-            return {"name": name, "status": "not_found", "running": False, "started_at": None}
+            return {"name": name, "status": "not_found", "running": False, "started_at": None, "finished_at": None,
+                    "restart_count": None, "image": None}
         if resp.status_code != 200:
             raise DockerError(f"Docker respondio {resp.status_code} al consultar el contenedor.")
-        state = (resp.json() or {}).get("State") or {}
+        data = resp.json() or {}
+        state = data.get("State") or {}
+        restart_count = data.get("RestartCount")  # nivel superior del inspect, no adentro de State
         return {
             "name": name,
             "status": state.get("Status") or "unknown",
             "running": bool(state.get("Running")),
             "started_at": state.get("StartedAt"),
+            "finished_at": state.get("FinishedAt"),
+            "restart_count": restart_count if isinstance(restart_count, int) and not isinstance(restart_count, bool)
+            else None,
+            "image": (data.get("Config") or {}).get("Image"),
         }
 
     def _action(self, name: str, action: str, params: Optional[Dict[str, Any]] = None) -> str:
@@ -329,15 +347,17 @@ class BinanceFuturesClient:
     X-MBX-APIKEY), pero con timeout, sesión reutilizada y errores sin URL/firma/credenciales.
     """
 
-    def __init__(self, base_url: str, api_key: str, api_secret: str,
-                 session: Optional[requests.Session] = None, algo_optional: bool = False) -> None:
-        if not base_url or not api_key or not api_secret:
+    def __init__(self, base_url: str, api_key: str = "", api_secret: str = "",
+                 session: Optional[requests.Session] = None, algo_optional: bool = False,
+                 credenciales: Optional[Any] = None) -> None:
+        # Key y secret se piden en CADA request (spec bot-estrategia § 10.3): con un proveedor
+        # (futuresboard.credenciales), un cambio de key llega a este cliente sin recrearlo.
+        self._cred = credenciales if credenciales is not None else credenciales_mod.Fijas(api_key, api_secret)
+        if not base_url or not self._cred.disponible():
             raise DisabledError(
                 "Apagar requiere API_KEY, API_SECRET y API_BASE_URL de Binance Futures configurados."
             )
         self.base_url = base_url.rstrip("/")
-        self._api_key = api_key
-        self._api_secret = api_secret.encode("utf-8")
         self.http = session or requests.Session()
         # Solo en demo/testnet: si el endpoint de órdenes algo no existe (404) se puede omitir.
         # En producción el endpoint existe, así que un 404 es un error de configuración.
@@ -347,14 +367,20 @@ class BinanceFuturesClient:
                  signed: bool = True) -> Any:
         query_params = dict(params or {})
         headers: Dict[str, str] = {}
+        cred = None
         if signed:
+            # Una sola lectura por pedido: la firma y el header salen de la misma key aunque el archivo cambie.
+            try:
+                cred = self._cred.actuales()
+            except credenciales_mod.SinCredenciales as exc:
+                raise DisabledError(f"Sin credenciales de Binance: {exc}") from exc
             query_params["recvWindow"] = BINANCE_RECV_WINDOW
             query_params["timestamp"] = int(time.time() * 1000)
         query = urlencode(query_params)
-        if signed:
-            signature = hmac.new(self._api_secret, query.encode("utf-8"), hashlib.sha256).hexdigest()
+        if cred is not None:
+            signature = hmac.new(cred.api_secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
             query = f"{query}&signature={signature}"
-            headers["X-MBX-APIKEY"] = self._api_key
+            headers["X-MBX-APIKEY"] = cred.api_key
         url = f"{self.base_url}{path}" + (f"?{query}" if query else "")
         try:
             resp = self.http.request(method, url, headers=headers, timeout=HTTP_TIMEOUT_SECONDS)
@@ -376,6 +402,8 @@ class BinanceFuturesClient:
             # 200 sin JSON (proxy, WAF, página de mantenimiento): no es una respuesta de Binance.
             raise BinanceError(f"Binance respondió {resp.status_code} sin JSON válido en {method} {path}.",
                                http_status=resp.status_code)
+        if cred is not None:
+            self._cred.firma_ok(cred)
         return data
 
     def _list(self, path: str) -> List[Dict[str, Any]]:
@@ -1041,6 +1069,8 @@ def get_status(settings: Settings, docker: Optional[DockerClient] = None) -> Dic
         "config_available": False,
         # True: la config cambio despues del ultimo arranque de passivbot (no esta en efecto).
         "config_pending": None,
+        "started_at": None,
+        "restart_count": None,
         "message": "",
         "presets": {k: {"twe_long": v[0], "twe_short": v[1]} for k, v in RISK_PRESETS.items()},
     }
@@ -1059,6 +1089,7 @@ def get_status(settings: Settings, docker: Optional[DockerClient] = None) -> Dic
             twe_short=cfg.get("twe_short"),
         )
         out["n_longs"], out["n_shorts"] = n_pares(cfg)
+        out["estrategia"] = resumen_estrategia(cfg)
         # Un modo invalido no rompe el status: se muestra el valor crudo y el motivo.
         for side in ("long", "short"):
             key = f"{side}_mode"
@@ -1072,10 +1103,264 @@ def get_status(settings: Settings, docker: Optional[DockerClient] = None) -> Dic
 
     docker = docker or DockerClient(settings.docker_url)
     out["container"] = docker.inspect(settings.container)
+    # Desde cuándo corre y cuántas veces lo reinició Docker (un bucle de reinicios se ve acá, spec § 8 H17).
+    out["started_at"] = out["container"].get("started_at")
+    out["restart_count"] = out["container"].get("restart_count")
     if out["config_available"] and settings.forager_config is not None:
         out["config_pending"] = config_pending(settings.forager_config, out["container"])
     out["message"] = " ".join(messages)
     return out
+
+
+# Estado del bot en una palabra (spec bot-estrategia § 2.1-2.2): píldora, punto del menú y control rápido de Inicio.
+ESTADO_OPERANDO = "operando"
+ESTADO_GRADUAL = "gradual"
+ESTADO_DETENIDO = "detenido"
+# Detenido con posiciones u órdenes abiertas: nadie las gestiona (Apagar que cerró a medias, docker stop a mano).
+ESTADO_EXPUESTO = "expuesto"
+# Detenido y sin poder verificar la exposición: la base del scraper es ilegible o vieja. No se afirma "sin posiciones
+# ni órdenes" sin evidencia; se ofrecen Iniciar… y Cerrar todo… (revisión, hallazgo 18).
+ESTADO_SIN_VERIFICAR = "sin_verificar"
+ESTADO_SIN_DATOS = "sin_datos"
+
+
+def estado_del_bot(status: Dict[str, Any], exposicion: Optional[Dict[str, Any]]) -> str:
+    """Uno de los ``ESTADO_*`` a partir de ``get_status`` y de la exposición que ve el scraper.
+
+    Un error de Docker o el panel deshabilitado es ``sin_datos``, nunca "detenido": no se sabe si corre. En parada
+    gradual cuenta el lado long (con ``n_shorts`` 0 es el único que opera) y solo si forager lee los modos.
+    """
+    if not status.get("enabled") or status.get("error"):
+        return ESTADO_SIN_DATOS
+    container = status.get("container") or {}
+    if container.get("status") in (None, "unknown"):
+        return ESTADO_SIN_DATOS
+    if container.get("running"):
+        if status.get("modes_supported") and status.get("long_mode") == MODE_GRACEFUL_STOP:
+            return ESTADO_GRADUAL
+        return ESTADO_OPERANDO
+    expo = exposicion or {}
+    if (expo.get("posiciones") or 0) > 0 or (expo.get("ordenes") or 0) > 0:
+        return ESTADO_EXPUESTO  # aunque la base esté vieja: es la dirección segura
+    if expo.get("error") or expo.get("fresco") is False:
+        return ESTADO_SIN_VERIFICAR
+    return ESTADO_DETENIDO
+
+
+def _lista_pares(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(s) for s in value if isinstance(s, str)]
+
+
+def resumen_estrategia(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Las claves de estrategia de la config de forager, como las muestran Estrategia, Iniciar y el registro de arranques.
+
+    ``lw`` = twe_long / n_longs (lo que forager le da a cada bot, ``forager.py:126``); None si no se puede calcular.
+    """
+    n_longs, n_shorts = n_pares(cfg)
+    twe = cfg.get("twe_long")
+    lw = None
+    if isinstance(twe, (int, float)) and not isinstance(twe, bool) and n_longs:
+        lw = float(twe) / n_longs
+    return {
+        "twe_long": twe,
+        "twe_short": cfg.get("twe_short"),
+        "n_longs": n_longs,
+        "n_shorts": n_shorts,
+        "pares_long": _lista_pares(cfg.get("approved_symbols_long")),
+        "pares_short": _lista_pares(cfg.get("approved_symbols_short")),
+        "lw": lw,
+    }
+
+
+# Pares del backtest multianual de BotBulls (los de los perfiles). Un par fuera de esta lista no tiene backtest propio.
+# El chequeo por hash de la config clock necesita el manifiesto de configs (spec § 5.1): acá solo se mira el símbolo.
+PARES_BACKTEST = ("BNBUSDT", "BTCUSDT", "ETHUSDT", "XRPUSDT")
+
+
+def _canon_num(value: Any) -> Any:
+    """4, 4.0 y Decimal("4.00") -> "4": que el formato del HJSON no cambie el hash."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, decimal.Decimal)):
+        return value
+    d = decimal.Decimal(str(value))
+    return format(d.normalize(), "f") if d.is_finite() else str(value)
+
+
+def estrategia_hash(cfg: Dict[str, Any]) -> str:
+    """sha256 de la estrategia: ``twe_long``, ``twe_short``, ``n_longs``, ``approved_symbols_long`` y ``_short``.
+
+    **No** incluye ``long_mode`` / ``short_mode``: Apagar y Parada gradual los cambian sin cambiar la estrategia (si
+    entraran, C3 no reiniciaría nunca después de su propio Apagar). Las listas van ordenadas (forager no usa el orden)
+    y los números normalizados."""
+    datos: Dict[str, Any] = {k: _canon_num(cfg.get(k)) for k in ("twe_long", "twe_short", "n_longs")}
+    for key in ("approved_symbols_long", "approved_symbols_short"):
+        value = cfg.get(key)
+        datos[key] = sorted(str(x) for x in value) if isinstance(value, list) else value
+    texto = json.dumps(datos, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(texto.encode("utf-8")).hexdigest()
+
+
+def _append_arranque(path: pathlib.Path, line: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(line + "\n")
+    # Poda: se queda con los últimos MAX_ARRANQUES (reescritura atómica) cuando duplica el tope.
+    lineas = path.read_text(encoding="utf-8").splitlines()
+    if len(lineas) > 2 * MAX_ARRANQUES:
+        tmp = path.with_name(f".{path.name}.tmp")
+        tmp.write_text("\n".join(lineas[-MAX_ARRANQUES:]) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+
+
+def registrar_arranque(store: Store, cfg: Dict[str, Any], usuario: Optional[str], origen: str,
+                       docker_action: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Deja en ``bot_arranques.jsonl`` con qué estrategia arrancó passivbot. Devuelve el registro (None si no se
+    pudo escribir: nunca frena un arranque que Docker ya hizo)."""
+    entry = {
+        "id": secrets.token_hex(8),
+        "ts": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "usuario": usuario or "?",
+        "origen": origen,
+        "docker_action": docker_action,
+        "hash": estrategia_hash(cfg),
+        "resumen": resumen_estrategia(cfg),
+    }
+    try:
+        _append_arranque(store.data_dir / ARRANQUES_FILE_NAME, json.dumps(entry, ensure_ascii=False))
+    except (OSError, ValueError):
+        return None
+    return entry
+
+
+def ultimo_arranque(store: Store) -> Optional[Dict[str, Any]]:
+    """El último arranque registrado (renglones ilegibles se saltean) o None."""
+    try:
+        lineas = (store.data_dir / ARRANQUES_FILE_NAME).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for linea in reversed(lineas):
+        try:
+            entry = json.loads(linea)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and isinstance(entry.get("hash"), str):
+            return entry
+    return None
+
+
+_TITULOS_ESTRATEGIA = (("twe_long", "TWE long"), ("twe_short", "TWE short"), ("n_longs", "Pares a la vez"),
+                       ("pares_long", "Pares"), ("pares_short", "Pares short"))
+
+
+def cambios_estrategia(antes: Optional[Dict[str, Any]], ahora: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Diferencias entre dos ``resumen_estrategia`` (claves de ``_TITULOS_ESTRATEGIA``)."""
+    if not isinstance(antes, dict):
+        return []
+    out = []
+    for clave, titulo in _TITULOS_ESTRATEGIA:
+        a, b = antes.get(clave), ahora.get(clave)
+        if clave.startswith("pares"):
+            igual = sorted(a or []) == sorted(b or [])
+        else:
+            igual = _canon_num(a) == _canon_num(b)
+        if not igual:
+            out.append({"clave": clave, "titulo": titulo, "antes": a, "ahora": b})
+    return out
+
+
+def _fmt_num(value: Any) -> str:
+    texto = _canon_num(value)
+    return str(texto).replace(".", ",") if texto is not None else "—"
+
+
+def plan_reanudar(settings: Settings, store: Store, docker: Optional[DockerClient] = None) -> Dict[str, Any]:
+    """Resumen de Iniciar / Reanudar / Reiniciar con la estrategia guardada (``mantener_twe``), sin escribir nada.
+
+    ``como``: ``iniciar`` (detenido), ``reanudar`` (parada gradual) o ``reiniciar`` (operando). ``requiere_plan``:
+    detenido o con la config pendiente de reinicio (algo que todavía no operó): el panel muestra el resumen y arranca
+    solo con ``confirmar`` y este ``plan_hash``. ``requiere_casilla``: cambios desde el último arranque (o sin
+    registro), TWE > 4 o pares sin backtest. ``plan_hash`` cambia si cambia la estrategia, el último arranque, el
+    estado del contenedor o lo que pide la casilla.
+    """
+    settings.require_enabled()
+    path = settings.require_config()
+    docker = docker or DockerClient(settings.docker_url)
+    info = _inspect_existing(docker, settings.container)
+    cfg = read_forager_config(path)
+    _mode(cfg, "short")  # un short_mode que forager rechaza: 409 antes de mostrar nada (START lo rechazaría igual)
+    try:
+        long_mode = _mode(cfg, "long")
+    except InvalidModeError:
+        long_mode = str(cfg.get("long_mode"))
+    running = bool(info.get("running"))
+    if running:
+        como = "reanudar" if settings.modes_supported and long_mode == MODE_GRACEFUL_STOP else "reiniciar"
+    else:
+        como = "iniciar"
+    pendiente = config_pending(path, info) is True
+    vigente = resumen_estrategia(cfg)
+    h = estrategia_hash(cfg)
+    ultimo = ultimo_arranque(store)
+    cambios = cambios_estrategia(ultimo.get("resumen"), vigente) if ultimo else []
+    avisos: List[Dict[str, str]] = []
+    casilla = False
+    if ultimo is None:
+        casilla = True
+        avisos.append({"tipo": "aviso", "titulo": "Sin registro del último arranque.",
+                       "texto": "No se puede mostrar qué cambió desde el último arranque: revisá la estrategia antes "
+                                "de iniciar."})
+    elif ultimo.get("hash") != h:
+        casilla = True
+        avisos.append({"tipo": "aviso", "titulo": "La estrategia cambió desde el último arranque.",
+                       "texto": (f"La estrategia cambió desde el último arranque ({ultimo.get('ts')}, "
+                                 f"{ultimo.get('usuario')}) y todavía no operó: revisá qué cambió.")})
+    twe = cfg.get("twe_long")
+    if isinstance(twe, (int, float)) and not isinstance(twe, bool) and decimal.Decimal(str(twe)) > TWE_ADVERTENCIA:
+        casilla = True
+        avisos.append({"tipo": "aviso", "titulo": f"TWE {_fmt_num(twe)} por encima de {_fmt_num(TWE_ADVERTENCIA)}.",
+                       "texto": (f"TWE {_fmt_num(twe)} está por encima de {_fmt_num(TWE_ADVERTENCIA)}: en el backtest "
+                                 "2021-2026 aparecen liquidaciones desde TWE 6.")})
+    pares = vigente["pares_long"]
+    sin_backtest = [p for p in pares if p not in PARES_BACKTEST]
+    if not pares:
+        casilla = True
+        avisos.append({"tipo": "aviso", "titulo": "Sin lista de pares.",
+                       "texto": "approved_symbols_long está vacía: forager puede operar cualquier par."})
+    elif sin_backtest:
+        casilla = True
+        avisos.append({"tipo": "aviso", "titulo": "Pares sin backtest de BotBulls.",
+                       "texto": (f"{', '.join(sin_backtest)} sin backtest de BotBulls: el backtest y el rescate se "
+                                 f"midieron con {', '.join(PARES_BACKTEST)}.")})
+    accion = "reinicia" if running else "arranca"
+    avisos.append({"tipo": "info", "titulo": "Cómo arranca.",
+                   "texto": (f"Pone long_mode y short_mode en normal (sin tocar TWE ni pares), {accion} "
+                             f"{settings.container} y forager tarda ~90 s en elegir los pares.")})
+    requiere_plan = (not running) or pendiente
+    plan_hash = hashlib.sha256(json.dumps(
+        {"hash": h, "ultimo": (ultimo or {}).get("id"), "como": como, "casilla": casilla, "pendiente": pendiente},
+        sort_keys=True).encode("utf-8")).hexdigest()
+    lineas = [f"{'Iniciar' if como == 'iniciar' else como.capitalize()} passivbot con la estrategia guardada: "
+              f"TWE {_fmt_num(vigente['twe_long'])}, {vigente['n_longs']} a la vez, pares "
+              f"{', '.join(pares) if pares else 'todos'}."]
+    for c in cambios:
+        lineas.append(f"Cambió {c['titulo']}: {c['antes']} -> {c['ahora']}.")
+    lineas += [a["texto"] for a in avisos]
+    return {
+        "como": como,
+        "running": running,
+        "config_pending": pendiente,
+        "requiere_plan": requiere_plan,
+        "requiere_casilla": casilla,
+        "vigente": vigente,
+        "hash": h,
+        "modos": {"long_mode": long_mode, "despues": MODE_NORMAL},
+        "ultimo": ({k: ultimo.get(k) for k in ("id", "ts", "usuario", "origen", "resumen")} if ultimo else None),
+        "cambios": cambios,
+        "avisos": avisos,
+        "texto": "\n\n".join(lineas),
+        "plan_hash": plan_hash,
+    }
 
 
 def _inspect_existing(docker: DockerClient, name: str) -> Dict[str, Any]:
@@ -1212,7 +1497,9 @@ def validate_stop(settings: Settings, modo: Any) -> str:
 
 def start_bot(settings: Settings, store: Store, riesgo: Any,
               docker: Optional[DockerClient] = None, reporter: Optional[Reporter] = None,
-              mantener_twe: bool = False, twe_long: Optional[decimal.Decimal] = None) -> Dict[str, Any]:
+              mantener_twe: bool = False, twe_long: Optional[decimal.Decimal] = None,
+              usuario: Optional[str] = None, origen: Optional[str] = None,
+              estrategia: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """START del panel: aplica el preset ``riesgo`` (twe_long/twe_short), modos normales y reinicia passivbot.
 
     ``mantener_twe=True`` (solo lo usa el reinicio automático de C3 con una config "personalizado") no toca
@@ -1221,6 +1508,12 @@ def start_bot(settings: Settings, store: Store, riesgo: Any,
     ``twe_long`` (TWE manual o un perfil, ver ``futuresboard.perfiles``): escribe ese ``twe_long`` en vez del preset
     (``riesgo`` se ignora). ``twe_short``: ``TWE_SHORT_SOLO_LONG`` con ``n_shorts`` 0 (forager no lo usa); con shorts
     se deja el que está. El resto es idéntico al START con preset.
+
+    ``estrategia`` (solo con ``twe_long``: un perfil, S2): claves de estrategia que se escriben junto con la TWE (los 4
+    pares medidos y ``n_longs``), en la misma escritura atómica.
+
+    Con Docker OK deja el arranque en ``bot_arranques.jsonl`` (``registrar_arranque``: hash y resumen de la estrategia
+    con la que arrancó, ``usuario`` y ``origen``). Si el registro falla, el arranque sigue igual.
     """
     twe_manual = validate_twe_manual(twe_long) if twe_long is not None else None
     if twe_manual is None and not mantener_twe:
@@ -1253,6 +1546,9 @@ def start_bot(settings: Settings, store: Store, riesgo: Any,
         updates = {"twe_long": twe_valor(twe_manual)}
         if n_pares(cfg)[1] == 0:
             updates["twe_short"] = TWE_SHORT_SOLO_LONG
+        if estrategia:
+            updates.update({k: v for k, v in estrategia.items()
+                            if k in ("n_longs", "approved_symbols_long", "approved_symbols_short")})
         updates.update(long_mode=MODE_NORMAL, short_mode=new_short)
         riesgo = detect_preset({**cfg, **updates})
     else:
@@ -1267,6 +1563,9 @@ def start_bot(settings: Settings, store: Store, riesgo: Any,
     action, backup = _apply_and_restart(settings, store, docker, info, path, updates, prev_state, state,
                                         reporter)
     out = {"ok": True, "riesgo": riesgo, "docker_action": action, "config": updates, "backup": backup.name}
+    arranque = registrar_arranque(store, {**cfg, **updates}, usuario, origen or "start", action)
+    if arranque:
+        out["arranque"] = arranque["id"]
     if twe_manual is not None and twe_manual > TWE_ADVERTENCIA:
         out["warning"] = (f"TWE {twe_valor(twe_manual)} por encima de {twe_valor(TWE_ADVERTENCIA)}: en el backtest 2021-2026 "
                           "aparecen liquidaciones desde TWE 6. Herramienta, no asesor.")
@@ -1281,7 +1580,7 @@ def stop_bot(settings: Settings, store: Store, modo: Any,
     docker = docker or DockerClient(settings.docker_url)
 
     if modo == "apagar":
-        return _apagar(settings, docker, binance, reporter)
+        return _apagar(settings, docker, binance, reporter, store=store)
 
     (reporter or NULL_REPORTER).step("validar", PASO_EN_CURSO)
     path = settings.require_config()
@@ -1307,25 +1606,133 @@ def stop_bot(settings: Settings, store: Store, modo: Any,
             "backup": backup.name}
 
 
-def _apagar(settings: Settings, docker: DockerClient,
-            binance: Optional[BinanceFuturesClient], reporter: Optional[Reporter] = None) -> Dict[str, Any]:
-    """Detiene passivbot y después cancela todas las órdenes y cierra todas las posiciones.
+def _dejar_en_parada_gradual(settings: Settings, store: Optional[Store],
+                             rep: Reporter) -> Tuple[Optional[str], Optional[Callable[[], None]]]:
+    """Paso 1 de Apagar: ``long_mode`` y ``short_mode`` en ``graceful_stop`` (backup y escritura atómica, como Parada
+    gradual), para que un arranque externo (``docker compose up -d``) no vuelva a operar.
 
-    Si el stop falla (error HTTP, timeout, contenedor inexistente) o el contenedor sigue
-    corriendo, se corta con error SIN tocar Binance: cerrar con el bot vivo haría que reabra.
+    **Nunca lanza ni frena el Apagar**, que es una acción de emergencia: si no puede escribir, marca el paso (error u
+    omitido) y devuelve el aviso, que va al resultado y a Telegram. Guarda ``short_mode_before_stop`` igual que
+    Parada gradual, así Iniciar vuelve al short_mode de antes. Si ya estaba en parada gradual no escribe.
+
+    Devuelve ``(aviso, deshacer)``: ``deshacer`` (o None si no escribió) vuelve la config y el estado a lo de antes,
+    para cuando el stop falla y passivbot sigue corriendo con la config anterior."""
+    clave = "parada_gradual"
+    rep.step(clave, PASO_EN_CURSO)
+    path = settings.forager_config
+    if path is None:
+        aviso = (f"No se dejó forager en parada gradual: falta {ENV_FORAGER_CONFIG}. Se sigue con el Apagar; si algo "
+                 "vuelve a arrancar passivbot, opera normal.")
+        rep.step(clave, PASO_OMITIDO, aviso)
+        return aviso, None
+    try:
+        cfg = read_forager_config(path)
+        modos = []
+        for side in ("long", "short"):
+            try:
+                modos.append(_mode(cfg, side))
+            except InvalidModeError:
+                modos.append(None)
+        if modos == [MODE_GRACEFUL_STOP, MODE_GRACEFUL_STOP]:
+            rep.step(clave, PASO_OK, "Ya estaba en parada gradual: no se escribió nada.")
+            return None, None
+        state = store.load_state() if store is not None else None
+        tenia = state is not None and "short_mode_before_stop" in state
+        short_antes = state.get("short_mode_before_stop") if state is not None else None
+        backup = write_forager_config(path, {"long_mode": MODE_GRACEFUL_STOP, "short_mode": MODE_GRACEFUL_STOP})
+        guardo = False
+        if state is not None and modos[1] is not None and modos[1] not in STOP_MODE_VALUES:
+            state["short_mode_before_stop"] = modos[1]
+            with contextlib.suppress(OSError):
+                store.save_state(state)
+                guardo = True
+        rep.step(clave, PASO_OK, f"long_mode y short_mode en graceful_stop (backup {backup.name}). Si algo vuelve a "
+                                 "arrancar passivbot, no abre pares nuevos; Iniciar los vuelve a normal.")
+
+        def deshacer() -> None:
+            restore_forager_config(path, backup)
+            if guardo and store is not None:
+                st = store.load_state()
+                if tenia:
+                    st["short_mode_before_stop"] = short_antes
+                else:
+                    st.pop("short_mode_before_stop", None)
+                store.save_state(st)
+
+        return None, deshacer
+    except Exception as exc:  # noqa: BLE001 - la escritura nunca frena el Apagar
+        motivo = str(exc)[:200] if isinstance(exc, BotControlError) else exc.__class__.__name__
+        aviso = (f"No se pudo dejar forager en parada gradual ({motivo}). Se siguió con el Apagar; si algo vuelve a "
+                 "arrancar passivbot, opera normal.")
+        rep.step(clave, PASO_ERROR, aviso)
+        return aviso, None
+
+
+def _deshacer_parada_gradual(docker: DockerClient, container: str, deshacer: Optional[Callable[[], None]],
+                             exc: "DockerError", rep: Reporter) -> Optional[str]:
+    """El stop de Apagar falló: si passivbot sigue corriendo, opera con la config de antes, así que el archivo vuelve a
+    esa (si no, la píldora e Inicio dirían "Parada gradual" con forager operando normal). Con un resultado incierto
+    (timeout) no se adivina: queda escrito y se dice. Devuelve la frase para el error, o None (revisión, hallazgo 17)."""
+    if deshacer is None:
+        return None
+    if exc.uncertain:
+        return ("La config de forager quedó en graceful_stop; forager sigue con la de antes hasta que se reinicie.")
+    try:
+        corre = bool(docker.inspect(container).get("running"))
+    except BotControlError:
+        corre = False
+    if not corre:
+        return None
+    try:
+        deshacer()
+    except Exception as restore_exc:  # noqa: BLE001
+        motivo = str(restore_exc)[:200] if isinstance(restore_exc, BotControlError) else restore_exc.__class__.__name__
+        return (f"No se pudo volver a la config de forager de antes ({motivo}): quedó en graceful_stop y forager sigue "
+                "con la de antes hasta que se reinicie.")
+    rep.step("parada_gradual", PASO_OMITIDO, "El stop falló y passivbot sigue corriendo: se volvió a la config de "
+                                             "antes, la que usa forager.")
+    return "Se volvió a la config de forager de antes: passivbot sigue corriendo con ella."
+
+
+def _sumar_aviso(payload: Dict[str, Any], aviso: Optional[str]) -> Dict[str, Any]:
+    if aviso:
+        payload["warning"] = f"{payload['warning']} {aviso}" if payload.get("warning") else aviso
+    return payload
+
+
+def _apagar(settings: Settings, docker: DockerClient,
+            binance: Optional[BinanceFuturesClient], reporter: Optional[Reporter] = None,
+            store: Optional[Store] = None) -> Dict[str, Any]:
+    """Deja forager en parada gradual, detiene passivbot y después cancela todas las órdenes y cierra todas las
+    posiciones.
+
+    Lo primero nunca frena lo demás (``_dejar_en_parada_gradual``). Si el stop falla (error HTTP, timeout,
+    contenedor inexistente) o el contenedor sigue corriendo, se corta con error SIN tocar Binance: cerrar con el bot
+    vivo haría que reabra.
     """
     if binance is None:
         raise DisabledError("Apagar requiere el cliente de Binance Futures configurado.")
     rep = reporter or NULL_REPORTER
-    rep.step("detener", PASO_EN_CURSO, f"docker stop {settings.container} (hasta {STOP_TIMEOUT_SECONDS} s)")
-    result = docker.stop(settings.container)
-    rep.step("detener", PASO_OK, "Detenido." if result == "ok" else "Ya estaba detenido.")
-    rep.step("verificar_detenido", PASO_EN_CURSO)
-    info = docker.inspect(settings.container)
-    if info["status"] == "not_found":
-        raise DockerError(f"El contenedor {settings.container} no existe. No se cerró nada en Binance.")
-    if info["running"]:
-        raise DockerError("passivbot sigue corriendo después del stop. No se cerró nada en Binance.")
+    aviso, deshacer = _dejar_en_parada_gradual(settings, store, rep)
+    try:
+        rep.step("detener", PASO_EN_CURSO, f"docker stop {settings.container} (hasta {STOP_TIMEOUT_SECONDS} s)")
+        result = docker.stop(settings.container)
+        rep.step("detener", PASO_OK, "Detenido." if result == "ok" else "Ya estaba detenido.")
+        rep.step("verificar_detenido", PASO_EN_CURSO)
+        info = docker.inspect(settings.container)
+        if info["status"] == "not_found":
+            raise DockerError(f"El contenedor {settings.container} no existe. No se cerró nada en Binance.")
+        if info["running"]:
+            raise DockerError("passivbot sigue corriendo después del stop. No se cerró nada en Binance.")
+    except DockerError as exc:
+        nota = _deshacer_parada_gradual(docker, settings.container, deshacer, exc, rep)
+        if nota:
+            err = DockerError(f"{exc} {nota}", exc.payload)
+            err.uncertain = exc.uncertain
+            _sumar_aviso(err.payload, aviso)
+            raise err from exc
+        _sumar_aviso(exc.payload, aviso)
+        raise
     rep.step("verificar_detenido", PASO_OK, f"Estado: {info.get('status')}")
 
     resumen = close_all_futures(binance, rep)
@@ -1333,12 +1740,12 @@ def _apagar(settings: Settings, docker: DockerClient,
     if not resumen["completo"]:
         raise PartialCloseError(
             "passivbot quedó detenido pero el cierre fue parcial: revisar lo que quedó abierto en Binance.",
-            payload=base,
+            payload=_sumar_aviso(base, aviso),
         )
     if not resumen.get("algo_verificado", True):
         base["warning"] = ("Órdenes condicionales sin verificar: el endpoint no existe en demo/testnet. "
                            "Revisar en Binance.")
-    return {"ok": True, **base}
+    return {"ok": True, **_sumar_aviso(base, aviso)}
 
 
 # --------------------------------------------------------------------------------------

@@ -42,10 +42,44 @@ def _data_dir(app):  # noqa: F811
     return pathlib.Path(app.config["DATABASE"]).parent
 
 
+def _latido_scraper(app, edad_s=0.0):  # noqa: F811
+    import time
+
+    from futuresboard import scraper
+
+    scraper.latido_path(app.config["DATABASE"]).write_text(json.dumps({"at": time.time() - edad_s, "intervalo": 60}))
+
+
+@pytest.fixture(autouse=True)
+def _scraper_al_dia(request):
+    """Aplicar un perfil corre la regla de exposición, que solo confía en una base del scraper fresca."""
+    if "app" in request.fixturenames:
+        _latido_scraper(request.getfixturevalue("app"))
+
+
 @pytest.fixture
 def solo_long(env):  # noqa: F811
     env.write_text(SOLO_LONG)
     return env
+
+
+@pytest.fixture
+def manifiesto_medido(env):  # noqa: F811
+    """El manifiesto de configs de passivbot (generado con su código): las 4 configs con el md5 medido."""
+    from estrategia_fakes import manifiesto_fixture
+    from futuresboard import manifiesto
+
+    (env.parent / manifiesto.NOMBRE).write_text(json.dumps(manifiesto_fixture()))
+    return env
+
+
+MEDIDA = {"n_shorts": 0, "n_longs": 4, "approved_symbols_long": ["BNBUSDT", "BTCUSDT", "ETHUSDT", "XRPUSDT"]}
+
+
+def _manif():
+    from estrategia_fakes import manifiesto_fixture
+
+    return {"usable": True, "datos": manifiesto_fixture()}
 
 
 def _servicio_vivo(app, modo="real", upnl="real", retiro="real"):  # noqa: F811
@@ -102,19 +136,40 @@ def test_definiciones_del_pedido():
 
 def test_detectar():
     base = rescate.default_config()
-    assert perfiles.detectar({"twe_long": 3, "n_shorts": 0}, base) == "conservador"
-    assert perfiles.detectar({"twe_long": 3.0, "n_shorts": 0}, base) == "conservador"
-    assert perfiles.detectar({"twe_long": 3, "n_shorts": 2}, base) is None
-    assert perfiles.detectar({"twe_long": 3.25, "n_shorts": 0}, base) is None
-    assert perfiles.detectar(None, base) is None
+    m = _manif()
+    assert perfiles.detectar({**MEDIDA, "twe_long": 3}, base, m) == "conservador"
+    assert perfiles.detectar({**MEDIDA, "twe_long": 3.0}, base, m) == "conservador"
+    assert perfiles.detectar({**MEDIDA, "twe_long": 3, "n_shorts": 2}, base, m) is None
+    assert perfiles.detectar({**MEDIDA, "twe_long": 3.25}, base, m) is None
+    assert perfiles.detectar(None, base, m) is None
     cfg = dict(base)
     for k, v in perfiles.PERFILES["con_rescate"]["rescate"].items():
         cfg[k] = v if isinstance(v, (bool, str)) else str(v)
-    assert perfiles.detectar({"twe_long": 4, "n_shorts": 0}, cfg) == "con_rescate"
-    assert perfiles.detectar({"twe_long": 4, "n_shorts": 0}, {**cfg, "retiro_frecuencia": "mensual"}) == "con_rescate"
-    assert perfiles.detectar({"twe_long": 4, "n_shorts": 0}, {**cfg, "retiro_frecuencia": "off"}) is None
-    assert perfiles.detectar({"twe_long": 4, "n_shorts": 0}, {**cfg, "tope_perdida_pct": "50"}) is None
-    assert perfiles.detectar({"twe_long": 3, "n_shorts": 0}, cfg) is None
+    assert perfiles.detectar({**MEDIDA, "twe_long": 4}, cfg, m) == "con_rescate"
+    assert perfiles.detectar({**MEDIDA, "twe_long": 4}, {**cfg, "retiro_frecuencia": "mensual"}, m) == "con_rescate"
+    assert perfiles.detectar({**MEDIDA, "twe_long": 4}, {**cfg, "retiro_frecuencia": "off"}, m) is None
+    assert perfiles.detectar({**MEDIDA, "twe_long": 4}, {**cfg, "tope_perdida_pct": "50"}, m) is None
+    assert perfiles.detectar({**MEDIDA, "twe_long": 3}, cfg, m) is None
+
+
+def test_detectar_exige_los_4_pares_n_longs_4_y_los_md5_medidos():
+    base = rescate.default_config()
+    m = _manif()
+    con_sol = {**MEDIDA, "twe_long": 3, "approved_symbols_long": MEDIDA["approved_symbols_long"] + ["SOLUSDT"]}
+    d = perfiles.detectar_detalle(con_sol, base, m)
+    assert d["perfil"] is None and "4 medidos" in d["motivo"] and "Conservador" in d["motivo"]
+    d = perfiles.detectar_detalle({**MEDIDA, "twe_long": 3, "n_longs": 5}, base, m)
+    assert d["perfil"] is None and "4 a la vez" in d["motivo"]
+    otra = _manif()
+    otra["datos"]["symbols"]["BTCUSDT"]["md5"] = "0" * 32
+    d = perfiles.detectar_detalle({**MEDIDA, "twe_long": 3}, base, otra)
+    assert d["perfil"] is None and "BTCUSDT no es la medida" in d["motivo"]
+    # Sin manifiesto no se marca como medido, y lo dice.
+    for sin in (None, {"usable": False, "motivo": "passivbot todavía no publicó el manifiesto de configs."}):
+        d = perfiles.detectar_detalle({**MEDIDA, "twe_long": 3}, base, sin)
+        assert d["perfil"] is None and "configs sin verificar" in d["motivo"]
+    # Lo que no coincide por TWE o rescate no lleva motivo: es Personalizado sin más.
+    assert perfiles.detectar_detalle({**MEDIDA, "twe_long": 3.5}, base, m) == {"perfil": None, "motivo": None}
 
 
 # ---------------------------------------------------------------- confirmación previa (sin escribir nada)
@@ -161,10 +216,47 @@ def test_plan_avisa_si_el_servicio_no_protege(client, app, solo_long, docker):  
     assert "SIMULADOS" in _plan(client, "con_rescate").get_json()["error"]
 
 
-def test_plan_avisa_si_no_son_4_pares(client, app, env, docker):  # noqa: F811
+def test_plan_vuelve_a_los_4_pares_medidos(client, app, env, docker):  # noqa: F811
+    # S2: aplicar un perfil restablece su paquete medido: los 4 pares y 4 a la vez.
     env.write_text(SOLO_LONG.replace("n_longs: 4", "n_longs: 5"))
-    texto = _plan(client, "conservador").get_json()["error"]
-    assert "lw 0,6 con 5 pares" in texto and "se midieron con 4 pares" in texto
+    d = _plan(client, "conservador").get_json()
+    texto = d["error"]
+    assert "lw 0,75 con 4 pares" in texto
+    assert "Pares: BNBUSDT, BTCUSDT, ETHUSDT, XRPUSDT, 4 a la vez (antes: BTCUSDT, 5 a la vez)" in texto
+    assert d["plan"]["n_longs"] == 4
+
+
+def _con_posiciones(app, filas, ordenes=()):  # noqa: F811
+    import sqlite3
+
+    with sqlite3.connect(str(app.config["DATABASE"])) as con:
+        con.executemany("INSERT INTO positions (symbol, unrealizedProfit, leverage, entryPrice, positionSide, "
+                        "positionAmt) VALUES (?, ?, ?, ?, ?, ?)", filas)
+        con.executemany("INSERT INTO orders (origQty, price, side, positionSide, status, symbol, time, type) "
+                        "VALUES (?,?,?,?,?,?,?,?)", ordenes)
+
+
+def test_perfil_con_un_quinto_par_con_posicion_queda_en_5_lugares(client, app, solo_long, docker):  # noqa: F811
+    # Regla de exposición (spec § 3.2): SOL con posición sale de la lista; n_longs no baja de |P ∪ O| = 5.
+    _con_posiciones(app, [("SOLUSDT", 0, 10, 100.0, "LONG", 2.0), ("BTCUSDT", 0, 10, 80000.0, "LONG", 0.001)],
+                    [(0.07, 741.54, "BUY", "LONG", "NEW", "BNBUSDT", 1, "LIMIT"),
+                     (1, 1.3, "BUY", "LONG", "NEW", "XRPUSDT", 1, "LIMIT"),
+                     (1, 2400, "BUY", "LONG", "NEW", "ETHUSDT", 1, "LIMIT")])
+    d = _plan(client, "con_rescate").get_json()
+    assert d["plan"]["n_longs"] == 5
+    assert "SOLUSDT sale de la lista con posición" in d["error"] and "queda en 5 a la vez" in d["error"]
+    resp = _aplicar(client, "con_rescate")
+    assert resp.status_code == 200, resp.get_json()
+    cfg = hjson.loads(solo_long.read_text())
+    assert cfg["n_longs"] == 5 and cfg["approved_symbols_long"] == perfiles.PARES == cfg["approved_symbols_short"]
+
+
+def test_perfil_con_la_base_del_scraper_vieja_no_se_aplica(client, app, solo_long, docker):  # noqa: F811
+    _latido_scraper(app, edad_s=7200)
+    d = _plan(client, "con_rescate").get_json()
+    assert "Los datos del scraper tienen 2 h" in d["error"] and "El perfil no se aplica" in d["error"]
+    resp = _aplicar(client, "con_rescate")
+    assert resp.status_code != 200 and "Los datos del scraper tienen" in json.dumps(resp.get_json())
 
 
 def test_plan_avisa_prestamo_pendiente_al_pasar_a_conservador(client, app, solo_long, docker):  # noqa: F811
@@ -179,7 +271,7 @@ def test_plan_avisa_prestamo_pendiente_al_pasar_a_conservador(client, app, solo_
 # ---------------------------------------------------------------- aplicar de punta a punta
 
 
-def test_con_rescate_de_punta_a_punta(client, app, solo_long, docker):  # noqa: F811
+def test_con_rescate_de_punta_a_punta(client, app, solo_long, manifiesto_medido, docker):  # noqa: F811
     _servicio_vivo(app)
     resp = _aplicar(client, "con_rescate")
     assert resp.status_code == 200, resp.get_json()
@@ -190,7 +282,12 @@ def test_con_rescate_de_punta_a_punta(client, app, solo_long, docker):  # noqa: 
     cfg = hjson.loads(solo_long.read_text())
     assert (cfg["twe_long"], cfg["twe_short"]) == (4, 1)
     assert cfg["long_mode"] == "normal" and cfg["n_longs"] == 4 and cfg["n_shorts"] == 0
+    # S2: el perfil escribe también los 4 pares medidos (y la lista short igual).
+    assert cfg["approved_symbols_long"] == cfg["approved_symbols_short"] == ["BNBUSDT", "BTCUSDT", "ETHUSDT", "XRPUSDT"]
     assert docker.actions() == ["restart"]
+    versiones = (_data_dir(app) / "estrategia_versiones.jsonl").read_text().splitlines()
+    v = json.loads(versiones[-1])
+    assert v["accion"] == "perfil" and v["perfil"] == "con_rescate" and v["usuario"] == "cliente17" and v["backup"]
     r = _rescate_cfg(app)
     assert r["habilitado"] is True and r["generacion"] == 1
     assert (r["reserva_max_usdt"], r["paso_usdt"], r["umbral_ratio"], r["umbral_devolucion_ratio"],
@@ -210,7 +307,7 @@ def test_con_rescate_de_punta_a_punta(client, app, solo_long, docker):  # noqa: 
     assert r2["generacion"] == 1 and r2["retiro_desde"] == r["retiro_desde"]
 
 
-def test_conservador_deshabilita_y_conserva_los_valores(client, app, solo_long, docker):  # noqa: F811
+def test_conservador_deshabilita_y_conserva_los_valores(client, app, solo_long, manifiesto_medido, docker):  # noqa: F811
     body = {"habilitado": True, "reserva_max_usdt": 5000, "paso_usdt": 500, "umbral_ratio": 6,
             "umbral_devolucion_ratio": 24, "tope_perdida_pct": 40, "upnl_habilitado": True, "upnl_x_pct": 50,
             "upnl_paso_usdt": 500, "retiro_frecuencia": "mensual", "retiro_base_usdt": 8000}
@@ -451,9 +548,9 @@ def test_telegram_titulos():
 
 
 def test_panel_muestra_perfiles_y_twe_manual(client, app, solo_long, docker):  # noqa: F811
-    html = client.get("/rescate").get_data(as_text=True)
+    html = client.get("/estrategia").get_data(as_text=True)
     assert 'id="botPerfilSelect"' in html and 'data-bot-accion="perfil"' in html
-    assert 'id="botTweInput"' in html and 'min="0.5" max="8" step="0.25"' in html
+    assert 'id="botTweInput"' not in html  # la TWE va por Exposición, con el flujo de Estrategia (hallazgo 19)
     status = client.get("/api/bot/status").get_json()
     assert status["n_shorts"] == 0 and status["n_longs"] == 4
     assert status["twe_manual"] == {"min": "0.5", "max": "8", "paso": "0.25", "advertencia": "4"}
@@ -529,3 +626,13 @@ def test_reinicio_de_c3_conserva_una_twe_manual(tmp_path):
     cfg = hjson.loads(path.read_text())
     assert (cfg["twe_long"], cfg["twe_short"]) == (3.25, 1) and out["riesgo"] == "personalizado"
     assert fake.actions() == ["start"]
+
+
+def test_sin_manifiesto_el_perfil_aplicado_no_figura_como_medido(client, app, solo_long, docker):  # noqa: F811
+    _servicio_vivo(app)
+    assert _aplicar(client, "con_rescate").status_code == 200
+    status = client.get("/api/bot/status").get_json()
+    assert status["perfil_vigente"] is None
+    assert "configs sin verificar" in status["perfil_motivo"] and "passivbot todavía no publicó" in status["perfil_motivo"]
+    html = client.get("/estrategia").get_data(as_text=True)
+    assert "Personalizado: TWE y rescate de Con rescate, pero configs sin verificar" in html

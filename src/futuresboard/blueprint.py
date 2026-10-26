@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import csv
 import functools
+import hashlib
 import hmac
 import json
 import os
 import pathlib
+import re
 import secrets
+import time
 from datetime import date
 from datetime import datetime
 from datetime import timedelta
+from datetime import timezone
 from typing import Any
 
 import requests
@@ -23,15 +27,25 @@ from flask.helpers import url_for
 from flask import current_app
 from typing_extensions import TypedDict
 
+from futuresboard import acciones
+from futuresboard import binance_publico
 from futuresboard import bot_control
+from futuresboard import cambio_key
 from futuresboard import c3
+from futuresboard import chequeos_forager
+from futuresboard import conexion
+from futuresboard import credenciales
+from futuresboard import estrategia
 from futuresboard import jobs
+from futuresboard import manifiesto
 from futuresboard import perfiles
 from futuresboard import rescate
 from futuresboard import resumen_rescate
 from futuresboard import scraper
 from futuresboard import telegram_notify
 from futuresboard import db
+from futuresboard import formato
+from futuresboard import logs
 from futuresboard.config import BINANCE_FUTURES_MAINNET_URL
 from futuresboard.config import state_dir
 
@@ -538,7 +552,14 @@ def index_page():
         timeframe="week",
         vivo=_vivo_ctx(url_for("vivo.inicio")),
         **_datos_inicio(startdate, enddate),
+        **_bot_inicio(),
     )
+
+
+def _bot_inicio() -> dict:
+    """Estado del bot para la franja y el control rápido de Inicio (inspect con el tope corto, como en vivo)."""
+    st, _http = bot_status_payload(docker_timeout=BOT_STATUS_RAPIDO_S)
+    return {"bot_status": st, "control": contexto_control(st)}
 
 
 @app.route("/dashboard/<start>/<end>", methods=["GET"])
@@ -579,6 +600,7 @@ def dashboard_page(start, end):
         "home.html",
         vivo=_vivo_ctx(url_for("vivo.inicio", start=startdate, end=enddate)),
         **_datos_inicio(startdate, enddate),
+        **_bot_inicio(),
     )
 
 
@@ -1480,26 +1502,35 @@ def _reject(action: str, params: dict, status: int, payload: dict, outcome: str)
     return _json_response(payload, status)
 
 
-def _run_bot_action(action: str, params: dict, validate, work):
+def _run_bot_action(action: str, params: dict, validate, work, despues=None, si_no_arranca=None):
     """Valida de forma síncrona y lanza la acción como job (202 + job_id).
 
     ``validate()`` no hace I/O contra Docker ni Binance: enum, panel habilitado, modos y
     credenciales. Sus errores responden 400/403/409/503 en el momento, sin crear job.
     ``work(store, settings, extra, reporter)`` corre en el hilo del job.
+    ``despues(job, payload)``: paso sin el lock y cancelable (``jobs.launch``). ``si_no_arranca()``: se llama si el job
+    no se creó (validación o una acción en curso), por ejemplo para devolver un pendiente de un solo uso.
     """
     try:
         settings, extra = validate()
     except ValueError as exc:
+        if si_no_arranca is not None:
+            si_no_arranca()
         return _reject(action, params, 400, {"ok": False, "error": str(exc)}, "rechazado")
     except bot_control.BotControlError as exc:
+        if si_no_arranca is not None:
+            si_no_arranca()
         return _reject(action, params, exc.status_code, {**exc.payload, "ok": False, "error": str(exc)}, "error")
 
     store = _bot_store()
     ctx = jobs.JobContext(store, settings, session.get("username") or "?", request.remote_addr,
                           current_app.logger)
     try:
-        job = jobs.launch(_bot_jobs(), action, params, ctx, lambda rep: work(store, settings, extra, rep))
+        job = jobs.launch(_bot_jobs(), action, params, ctx, lambda rep: work(store, settings, extra, rep),
+                          despues=despues)
     except jobs.ActiveJobError as exc:
+        if si_no_arranca is not None:
+            si_no_arranca()
         return _json_response(
             {"ok": False, "error": "Ya hay una acción del panel en curso: esperá a que termine.",
              "job_id": exc.job_id},
@@ -1508,26 +1539,124 @@ def _run_bot_action(action: str, params: dict, validate, work):
     return _json_response({"ok": True, "job_id": job.id, "job": job.to_dict()}, 202)
 
 
+# Tope del inspect a Docker cuando la página o el JS solo necesitan el estado para pintar (píldora, Inicio, Bot):
+# con el docker-proxy colgado la página sale igual y el estado dice "sin datos" (como /api/vivo/inicio).
+BOT_STATUS_RAPIDO_S = 3
+
+
+def exposicion_scraper() -> dict:
+    """Posiciones y órdenes abiertas según la base del scraper (no Binance): el cuarto estado del bot (detenido con
+    exposición) y el control rápido de Inicio. Nunca lanza: sin base, ``error`` y ceros.
+
+    ``fresco``: la última vuelta OK del scraper tiene ≤ 3 intervalos (la vara de Bot → Latidos). Una base vieja no
+    prueba que no haya nada abierto; ``edad`` es su antigüedad para el texto."""
+    f = scraper.frescura_web(current_app.config)
+    frescura = {"fresco": scraper.datos_frescos(f),
+                "edad": _hace(f["edad_segundos"]) if f.get("edad_segundos") is not None else None}
+    try:
+        posiciones = db.query("SELECT symbol, positionSide, positionAmt, entryPrice, unrealizedProfit FROM positions "
+                              "WHERE ABS(positionAmt) > 0 ORDER BY symbol ASC")
+        ordenes = db.query("SELECT symbol, side, positionSide, origQty, price FROM orders ORDER BY symbol ASC")
+    except Exception:  # noqa: BLE001 - defensivo: el estado del bot no se cae por la base
+        current_app.logger.exception("No se pudo leer posiciones y órdenes para el estado del bot")
+        return {"posiciones": 0, "ordenes": 0, "pares": [], "upnl": 0.0, "nocional": 0.0, "detalle": [],
+                "error": "No se pudo leer la base del scraper.", **frescura}
+    detalle = [{"symbol": r[0], "lado": r[1], "cantidad": float(r[2]), "precio_entrada": float(r[3] or 0),
+                "upnl": float(r[4] or 0)} for r in posiciones]
+    pares = sorted({r[0] for r in posiciones} | {r[0] for r in ordenes})
+    return {
+        "posiciones": len(posiciones),
+        "ordenes": len(ordenes),
+        "pares": pares,
+        "upnl": round(sum(p["upnl"] for p in detalle), 2),
+        "nocional": round(sum(abs(p["cantidad"] * p["precio_entrada"]) for p in detalle), 2),
+        "detalle": detalle,
+        **frescura,
+    }
+
+
+def pares_ahora(estrategia: dict | None, exposicion: dict) -> dict:
+    """Lugares ocupados y, por par, posición (% del balance) y órdenes abiertas (base del scraper).
+
+    Para forager una orden abierta ocupa un lugar igual que una posición (``forager.py:130``): ocupados = pares con
+    posición ∪ pares con órdenes. ``fuera_de_lista``: con posición u órdenes y fuera de ``approved_symbols_long`` (sigue
+    en parada gradual hasta cerrar, spec § 1.2). Los chequeos de forager por ciclo (mínimo, edad, velas, TRADING)
+    necesitan exchangeInfo y velas cacheados (spec § 5.2): no van acá todavía."""
+    est = estrategia or {}
+    aprobados = list(est.get("pares_long") or [])
+    try:
+        fila = db.query("SELECT totalWalletBalance FROM account WHERE AID = 1", one=True)
+        balance = float(fila[0]) if fila is not None and fila[0] else None
+        ordenes = db.query("SELECT symbol, side FROM orders")
+    except Exception:  # noqa: BLE001 - defensivo: el estado no se cae por la base
+        balance, ordenes = None, []
+    por: dict = {}
+
+    def par(sym: str) -> dict:
+        return por.setdefault(sym, {"symbol": sym, "aprobado": sym in aprobados, "posicion": 0.0, "nocional": 0.0,
+                                    "pct_balance": None, "compras": 0, "ventas": 0})
+
+    for sym in aprobados:
+        par(sym)
+    for p in exposicion.get("detalle") or []:
+        if str(p.get("lado")).upper() == "SHORT":
+            continue
+        d = par(p["symbol"])
+        d["posicion"] += abs(p["cantidad"])
+        d["nocional"] += abs(p["cantidad"] * p["precio_entrada"])
+    for sym, side in ordenes:
+        d = par(sym)
+        d["compras" if side == "BUY" else "ventas"] += 1
+    ocupados = 0
+    for d in por.values():
+        d["nocional"] = round(d["nocional"], 2)
+        if balance:
+            d["pct_balance"] = round(d["nocional"] / balance * 100, 2)
+        con_algo = d["posicion"] > 0 or d["compras"] or d["ventas"]
+        d["estado"] = "posicion" if d["posicion"] > 0 else ("orden" if con_algo else "libre")
+        d["fuera_de_lista"] = bool(con_algo) and not d["aprobado"]
+        ocupados += 1 if con_algo else 0
+    orden = {s: i for i, s in enumerate(aprobados)}
+    pares = sorted(por.values(), key=lambda d: (not d["aprobado"], orden.get(d["symbol"], 0), d["symbol"]))
+    return {"lugares_total": est.get("n_longs"), "lugares_ocupados": ocupados, "pares": pares, "balance": balance}
+
+
 def bot_status_payload(docker_timeout: float | None = None) -> tuple[dict, int]:
     """Estado del bot y HTTP status: lo devuelven /api/bot/status y, dentro de su JSON, /api/vivo/inicio.
 
     ``docker_timeout``: tope del inspect al docker-proxy (default ``bot_control.HTTP_TIMEOUT_SECONDS``, 10 s).
+    ``estado_bot`` (operando / gradual / detenido / expuesto / sin_verificar / sin_datos) y ``exposicion`` (base del
+    scraper) van
+    también en el error: la píldora y el punto del menú los pintan igual.
     """
     settings = bot_control.Settings()
     docker = None
     if docker_timeout is not None and settings.enabled:
         docker = bot_control.DockerClient(settings.docker_url, timeout=docker_timeout)
+    exposicion = exposicion_scraper()
     try:
         out = bot_control.get_status(settings, docker=docker)
     except bot_control.BotControlError as exc:
-        return {"enabled": settings.enabled, "error": str(exc)}, exc.status_code
+        return {"enabled": settings.enabled, "error": str(exc), "estado_bot": bot_control.ESTADO_SIN_DATOS,
+                "exposicion": exposicion}, exc.status_code
+    out["exposicion"] = exposicion
+    out["estado_bot"] = bot_control.estado_del_bot(out, exposicion)
+    out["pares_ahora"] = pares_ahora(out.get("estrategia"), exposicion)
     data_dir = _bot_store().data_dir
     out["rescate_start_bloqueado"] = rescate.start_bloqueado(data_dir)
     # Perfiles de riesgo y TWE manual (docs/perfiles.md): definiciones y el perfil vigente según los valores.
     out.update(perfiles.catalogo())
     rescate_cfg, _err = rescate.load_config(data_dir)
-    out["perfil_vigente"] = (perfiles.detectar({k: out.get(k) for k in ("twe_long", "n_longs", "n_shorts")}, rescate_cfg)
-                             if out.get("config_available") else None)
+    # Un perfil es TWE + rescate + los 4 pares medidos, 4 a la vez y sus configs (manifiesto de passivbot).
+    detalle = {"perfil": None, "motivo": None}
+    if out.get("config_available"):
+        est = out.get("estrategia") or {}
+        detalle = perfiles.detectar_detalle(
+            {"twe_long": out.get("twe_long"), "n_longs": out.get("n_longs"), "n_shorts": out.get("n_shorts"),
+             "approved_symbols_long": est.get("pares_long")}, rescate_cfg,
+            manifiesto.leer(settings.forager_config, out.get("container")))
+    out["perfil_vigente"] = detalle["perfil"]
+    out["perfil_motivo"] = detalle["motivo"]
     out["perfil_ultimo"] = rescate_cfg.get("perfil")
     out["twe_manual"] = {"min": str(bot_control.TWE_MANUAL_MIN), "max": str(bot_control.TWE_MANUAL_MAX),
                          "paso": str(bot_control.TWE_MANUAL_PASO), "advertencia": str(bot_control.TWE_ADVERTENCIA)}
@@ -1536,8 +1665,930 @@ def bot_status_payload(docker_timeout: float | None = None) -> tuple[dict, int]:
 
 @app.route("/api/bot/status", methods=["GET"])
 def bot_status():
-    out, status = bot_status_payload()
+    """``?rapido=1``: inspect con tope corto (la píldora de cada página, ver static/js/bot_acciones.js)."""
+    rapido = request.args.get("rapido") == "1"
+    out, status = bot_status_payload(docker_timeout=BOT_STATUS_RAPIDO_S if rapido else None)
     return _json_response(out, status)
+
+
+# --------------------------------------------------------------------------------------
+# Páginas Bot y Estrategia (diseno/bot-estrategia/spec.md § 2.3 y § 2.4); reemplazan a la rueda #menu_admin
+# --------------------------------------------------------------------------------------
+
+
+def _estrategia_vigente() -> tuple[dict | None, str | None]:
+    """Claves de estrategia de la config de forager (solo lectura) o el motivo por el que no se pudo leer."""
+    try:
+        cfg = bot_control.read_forager_config(bot_control.Settings().require_config())
+    except bot_control.BotControlError as exc:
+        return None, str(exc)
+    vigente = bot_control.resumen_estrategia(cfg)
+    rescate_cfg, _err = rescate.load_config(_bot_store().data_dir)
+    detalle = perfiles.detectar_detalle(cfg, rescate_cfg, manifiesto.leer(bot_control.Settings().forager_config))
+    vigente["perfil"], vigente["perfil_motivo"] = detalle["perfil"], detalle["motivo"]
+    vigente["long_mode"], vigente["short_mode"] = cfg.get("long_mode"), cfg.get("short_mode")
+    return vigente, None
+
+
+def _pares_cortos(pares) -> str:
+    """["BNBUSDT", "BTCUSDT", "ETHUSDT"] -> "BNB, BTC y ETH"."""
+    cortos = [p[:-4] if isinstance(p, str) and p.endswith("USDT") else str(p) for p in pares or []]
+    if len(cortos) <= 1:
+        return "".join(cortos)
+    return ", ".join(cortos[:-1]) + " y " + cortos[-1]
+
+
+def _fecha_utc(momento: datetime | None) -> str:
+    return f"{momento:%d/%m %H:%M} UTC" if momento else ""
+
+
+_TITULOS_ACCION = {"start": "inicio", "graceful": "parada gradual", "apagar": "apagar", "perfil": "perfil",
+                   "estrategia": "estrategia", "credenciales": "cambio de API key"}
+_ESTADOS_JOB = {"ok": "ok", "error": "con error", "interrumpido": "interrumpida", "en_curso": "en curso"}
+
+
+def ultima_accion() -> dict | None:
+    """La última acción del panel (``bot_job_last.json``), con un título en palabras. Sin IP (el job no la guarda)."""
+    data = _bot_jobs().load_persisted()
+    if not data:
+        return None
+    params = data.get("params") if isinstance(data.get("params"), dict) else {}
+    accion = data.get("accion")
+    titulo = _TITULOS_ACCION.get(accion, str(accion))
+    if accion == "start" and params.get("reanudar"):
+        titulo = {"reanudar": "reanudar", "reiniciar": "reiniciar"}.get(params.get("como"), "iniciar")
+    elif accion == "start" and params.get("twe_long") is not None:
+        titulo = f"TWE manual {formato.num(params.get('twe_long'))}"
+    elif accion == "start" and params.get("riesgo"):
+        titulo = f"inicio con riesgo {params.get('riesgo')}"
+    elif accion == "perfil":
+        nombre = (perfiles.PERFILES.get(params.get("perfil")) or {}).get("nombre") or params.get("perfil")
+        titulo = f"perfil {nombre}"
+    elif accion == "estrategia":
+        titulo = "volver a una versión" if params.get("volver") else "estrategia"
+    elif accion == "credenciales":
+        titulo = ("volver a la API key anterior" if params.get("volver") else "cambio de API key") + \
+            (f" ({params.get('key')})" if params.get("key") else "")
+    return {**{k: v for k, v in data.items() if k != "pid"}, "titulo": titulo,
+            "estado_texto": _ESTADOS_JOB.get(data.get("estado"), str(data.get("estado")))}
+
+
+def contexto_control(st: dict) -> dict:
+    """Lo que necesita el control rápido de Inicio (``_bot.html`` → ``control``): la página y /api/vivo/inicio."""
+    est = st.get("estrategia") or {}
+    c = st.get("container") or {}
+    ahora = datetime.now().astimezone()
+    desde = bot_control.parse_docker_time(c.get("started_at")) if c.get("running") else None
+    parado = bot_control.parse_docker_time(c.get("finished_at")) if not c.get("running") else None
+    perfil = (st.get("perfiles") or {}).get(st.get("perfil_vigente") or "") or {}
+    ultima = ultima_accion()
+    return {
+        "enabled": bool(st.get("enabled")),
+        "estado": st.get("estado_bot") or bot_control.ESTADO_SIN_DATOS,
+        "error": st.get("error") or st.get("message") or "",
+        "perfil": perfil.get("nombre") or "Personalizado",
+        "twe": est.get("twe_long", st.get("twe_long")),
+        "n_longs": est.get("n_longs", st.get("n_longs")),
+        "pares": _pares_cortos(est.get("pares_long")),
+        "desde": _fecha_utc(desde),
+        "hace": _hace((ahora - desde).total_seconds()) if desde else "",
+        "detenido_desde": _fecha_utc(parado),
+        "ultima": f"{ultima['titulo']}, {ultima['estado_texto']}" if ultima else "",
+        "expo": st.get("exposicion") or {},
+        "bloqueo": st.get("rescate_start_bloqueado"),
+    }
+
+
+def latidos() -> dict:
+    """Latidos para Bot: scraper, servicio rescate, C3 y acciones del panel. Solo lee archivos y la memoria del
+    proceso: el de acciones mira el registro de jobs y el último persistido, nunca el lock de archivo (tomarlo, aunque
+    sea un instante, podría hacer que un Apagar responda 409)."""
+    data_dir = _bot_store().data_dir
+    f = scraper.frescura_web(current_app.config)
+    edad, intervalo = f["edad_segundos"], f["intervalo_segundos"] or 60
+    scr = {"estado": "sin_latido" if edad is None else ("late" if edad <= 3 * intervalo else "viejo"),
+           "edad": _hace(edad) if edad is not None else None, "intervalo": intervalo}
+    try:
+        r = rescate.panel_status(data_dir)
+        svc = r.get("servicio") or {}
+        hb = svc.get("heartbeat")
+        edad_r = (datetime.now().astimezone() - datetime.fromisoformat(hb)).total_seconds() if hb else None
+        res = {"estado": "late" if svc.get("vivo") else ("sin_latido" if not hb else "no_late"), "modo": svc.get("modo"),
+               "edad": _hace(edad_r) if edad_r is not None else None}
+    except Exception:  # noqa: BLE001 - un archivo roto no tira la página
+        res = {"estado": "sin_latido", "modo": None, "edad": None}
+    try:
+        c = c3.panel_status(data_dir)
+        c3_ = {"estado": c.get("estado"), "servicio_vivo": c.get("servicio_vivo"), "modo": c.get("modo"),
+               "parado": c.get("c3_parado"), "corte": (c.get("corte") or {}).get("en")}
+    except Exception:  # noqa: BLE001
+        c3_ = {"estado": None, "servicio_vivo": False, "modo": None, "parado": False, "corte": None}
+    activo = _bot_jobs().active()
+    persistido = _bot_jobs().load_persisted() or {}
+    if activo is not None:
+        acc = {"estado": "en_curso", "accion": activo.accion, "desde": activo.inicio}
+    elif persistido.get("estado") == jobs.ESTADO_EN_CURSO:
+        acc = {"estado": "en_curso", "accion": persistido.get("accion"), "desde": persistido.get("inicio")}
+    else:
+        acc = {"estado": "libre", "accion": None, "desde": None}
+    return {"scraper": scr, "rescate": res, "c3": c3_, "acciones": acc}
+
+
+def _fecha_iso_utc(valor) -> str:
+    try:
+        return f"{datetime.fromisoformat(str(valor)).astimezone(timezone.utc):%d/%m %H:%M:%S}"
+    except ValueError:
+        return str(valor or "")
+
+
+def _duracion(inicio, fin) -> str:
+    try:
+        s = (datetime.fromisoformat(str(fin)) - datetime.fromisoformat(str(inicio))).total_seconds()
+    except ValueError:
+        return ""
+    s = max(0, int(s))
+    return f"{s // 60} min {s % 60} s" if s >= 60 else f"{s} s"
+
+
+def _chequeos_ciclo(aprobados) -> dict | None:
+    """Último estado de los chequeos de forager por ciclo (``chequeos_forager``), solo de los aprobados de ahora. Lee
+    el archivo: Bot nunca llama a Binance al armarse."""
+    estado = chequeos_forager.leer_estado(_bot_store().data_dir)
+    if not estado:
+        return None
+    pares = estado.get("pares") or {}
+    aprobados = list(aprobados or [])
+    filas = [{"symbol": s, **pares[s]} for s in aprobados if isinstance(pares.get(s), dict)]
+    try:
+        edad = (datetime.now(timezone.utc) - datetime.fromisoformat(str(estado.get("ts")))).total_seconds()
+    except ValueError:
+        edad = None
+    return {"filas": filas, "hace": _hace(edad) if edad is not None else "", "error": estado.get("error"),
+            "intervalo_min": int((estado.get("intervalo_s") or 900) // 60), "endpoint": estado.get("endpoint"),
+            "sin_chequear": [s for s in aprobados if s not in pares]}
+
+
+def _ultima_orden_ms() -> int | None:
+    """Creación de la orden abierta más nueva según el scraper (para "passivbot creó órdenes después de arrancar")."""
+    try:
+        with db.connect(current_app.config["DATABASE"]) as conn:
+            row = conn.execute("SELECT MAX(time) FROM orders").fetchone()
+    except Exception:  # noqa: BLE001 - sin DB, sin dato
+        return None
+    return int(row[0]) if row and row[0] is not None else None
+
+
+def conexion_binance(st: dict) -> dict:
+    """Bot → "Conexión con Binance" (spec § 10.4, paso 1). Solo lee archivos y la memoria del proceso: nunca llama a
+    Binance. Sin key, secret ni uid (``futuresboard.conexion``)."""
+    prov = credenciales.de_app(current_app._get_current_object())
+    data_dir = _bot_store().data_dir
+    ahora = time.time()
+    latido_scr = scraper.read_latido(current_app.config["DATABASE"])
+    intervalo = latido_scr.get("intervalo") if isinstance(latido_scr.get("intervalo"), int) else None
+    scr_vivo = bool(latido_scr) and ahora - float(latido_scr["at"]) <= 3 * (intervalo or 60)
+    try:
+        estado_r, _err = rescate.load_state(data_dir)
+        servicio = estado_r.get("servicio") if isinstance(estado_r.get("servicio"), dict) else {}
+    except Exception:  # noqa: BLE001
+        estado_r, servicio = {}, {}
+    hb = servicio.get("heartbeat")
+    try:
+        edad_r = ahora - datetime.fromisoformat(hb).timestamp() if hb else None
+        res_vivo = edad_r is not None and edad_r <= 3 * int(servicio.get("intervalo") or rescate.DEFAULT_INTERVAL) + 30
+    except (TypeError, ValueError):
+        res_vivo = False
+    return conexion.vista(
+        prov.estado(), modo_secretos=prov.modo_secretos(), testnet=bool(current_app.config.get("BINANCE_TESTNET")),
+        meta=credenciales.leer_meta(data_dir), scraper_latido=latido_scr, scraper_vivo=scr_vivo,
+        scraper_intervalo=intervalo, rescate_servicio=servicio, rescate_vivo=res_vivo,
+        container=st.get("container"), ultima_orden_ms=_ultima_orden_ms(), ahora=ahora,
+        key_enmascarada=prov.enmascarada(), web=_cambio_web(prov),
+        rescate_no_firma=conexion.rescate_no_firma(estado_r))
+
+
+# --------------------------------------------------------------------------------------
+# Cambiar la API key desde el panel (spec bot-estrategia § 10.4 a § 10.7; futuresboard.cambio_key)
+# --------------------------------------------------------------------------------------
+
+# La página de la key no usa base.html ni scripts de terceros: todo local y esta CSP (§ 10.4, paso 0).
+CSP_CREDENCIALES = ("default-src 'self'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; "
+                    "base-uri 'none'")
+CAMBIO_EXTENSION = "futuresboard_cambio_key"
+
+
+def _cambio_estado() -> dict:
+    """Pendientes y límite de validaciones del proceso (gunicorn corre 1 worker). ``cliente``: fábrica de clientes de
+    Binance para validar (los tests ponen uno falso)."""
+    app_ = current_app._get_current_object()
+    est = app_.extensions.get(CAMBIO_EXTENSION)
+    if est is None:
+        est = app_.extensions.setdefault(CAMBIO_EXTENSION, {"pendientes": cambio_key.Pendientes(),
+                                                            "limite": cambio_key.Limitador(), "cliente": None})
+    return est
+
+
+def _cambio_motivo(prov=None) -> str | None:
+    """Por qué no se puede cambiar la key desde la web (None: se puede)."""
+    if not cambio_key.web_habilitada():
+        return (f"Apagado: se prende con {cambio_key.ENV_WEB}=1 en el entorno del panel (en dev para probar; en prod, "
+                "solo con DALE).")
+    prov = prov or credenciales.de_app(current_app._get_current_object())
+    if not prov.modo_secretos():
+        return ("Falta el directorio de credenciales (/secretos): la key todavía sale de config.json y el panel no "
+                "tiene dónde escribirla.")
+    if str(current_app.config.get("EXCHANGE") or "").lower() != "binance":
+        return "Solo para Binance Futures."
+    return None
+
+
+def _cambio_web(prov) -> dict:
+    motivo = _cambio_motivo(prov)
+    web = {"habilitada": motivo is None, "motivo": motivo, "url": None, "volver": None}
+    if motivo is None:
+        web["url"] = url_for("main.credenciales_page")
+        try:
+            r = cambio_key.respaldo_anterior(credenciales.directorio_respaldo(),
+                                             prov.estado().get("usuario") or credenciales.USUARIO_DEFECTO,
+                                             prov.estado().get("key_id"))
+        except Exception:  # noqa: BLE001
+            r = None
+        if r:
+            web["volver"] = {"key": r["key"], "fecha": conexion.fecha(r["fecha"]), "url": web["url"] + "?volver=1"}
+    return web
+
+
+def _cambio_entorno() -> cambio_key.Entorno:
+    cfg = current_app.config
+    testnet = bool(cfg.get("BINANCE_TESTNET"))
+    prov = credenciales.de_app(current_app._get_current_object())
+    data_dir = _bot_store().data_dir
+    try:
+        servicio = (rescate.load_state(data_dir)[0] or {}).get("servicio") or {}
+    except Exception:  # noqa: BLE001
+        servicio = {}
+    return cambio_key.Entorno(
+        testnet=testnet, futures_url=cfg.get("API_BASE_URL") or "",
+        spot_url=rescate.spot_base_url(testnet, os.environ.get(rescate.ENV_SPOT_URL, "").strip().rstrip("/")),
+        proveedor=prov, data_dir=data_dir, db_path=str(cfg["DATABASE"]), dir_secretos=prov.dir,
+        dir_respaldo=credenciales.directorio_respaldo(),
+        rescate_real=isinstance(servicio, dict) and servicio.get("modo") == "real",
+        cliente=_cambio_estado().get("cliente"))
+
+
+def _cambio_404():
+    """Con FUTURESBOARD_CREDENCIALES_WEB apagado, la página y los POST no existen."""
+    if not cambio_key.web_habilitada():
+        return _json_response({"ok": False, "error": "No existe."}, 404)
+    return None
+
+
+def _audit_cambio(action: str, params: dict, outcome: str, detail: str) -> None:
+    try:
+        _bot_store().audit(session.get("username") or "?", action, params, outcome, detail, request.remote_addr)
+    except OSError:
+        current_app.logger.exception("No se pudo escribir el log de auditoria")
+
+
+def _reautenticar(password) -> tuple[int, str] | None:
+    """La contraseña del panel, contra ``users`` (como /settings), con el MISMO limitador del login por usuario e IP
+    (``auth._reserve_attempt``: 5 fallos en 15 min). Cada fallo avisa por Telegram. None = ok."""
+    from werkzeug.security import check_password_hash
+
+    from futuresboard import auth
+
+    usuario = session.get("username") or ""
+    ip = auth._client_ip()
+    clave = (usuario.lower(), ip)
+    if auth._reserve_attempt(clave) is None:
+        current_app.logger.warning("Re-autenticación bloqueada por rate limit: usuario=%r ip=%s", usuario, ip)
+        return 429, "Demasiados intentos fallidos con la contraseña: probá de nuevo en unos minutos."
+    with db.connect(current_app.config["DATABASE"]) as conn:
+        row = conn.execute("SELECT password_hash FROM users WHERE username = ?", (usuario,)).fetchone()
+    valida = (bool(row) and isinstance(password, str) and bool(password)
+              and check_password_hash(row[0], password)
+              and not check_password_hash(row[0], auth.BLOCKED_DEFAULT_PASSWORD))
+    if valida:
+        auth._clear_failures(clave)
+        return None
+    current_app.logger.warning("Re-autenticación fallida en el cambio de API key: usuario=%r ip=%s", usuario, ip)
+    try:
+        telegram_notify.notify_bot_action("credenciales", {}, "error",
+                                          {"error": "Contraseña del panel incorrecta al confirmar el cambio de API "
+                                                    "key."}, usuario or "?")
+    except Exception:  # pragma: no cover - notify_bot_action no lanza
+        pass
+    return 403, "Contraseña incorrecta."
+
+
+def _container_rapido() -> dict | None:
+    settings = bot_control.Settings()
+    if not settings.enabled:
+        return None
+    try:
+        return bot_control.DockerClient(settings.docker_url, timeout=BOT_STATUS_RAPIDO_S).inspect(settings.container)
+    except bot_control.BotControlError:
+        return None
+
+
+@app.route("/bot/credenciales", methods=["GET"])
+def credenciales_page():
+    """Página propia del cambio de key: template mínimo sin base.html, solo JS y CSS locales, campos fuera de un
+    ``<form>`` y la CSP de § 10.4. Con el flag apagado, 404."""
+    if not cambio_key.web_habilitada():
+        return not_found(None)
+    prov = credenciales.de_app(current_app._get_current_object())
+    motivo = _cambio_motivo(prov)
+    if motivo is None:
+        # La primera vez, la línea de base de la key actual (huella del uid): Bot pasa a decir "UID verificado".
+        try:
+            cambio_key.asegurar_linea_base(_cambio_entorno())
+        except Exception:  # noqa: BLE001 - abrir la página nunca falla por Binance
+            current_app.logger.exception("No se pudo guardar la línea de base de la API key")
+    volver = None
+    if motivo is None and request.args.get("volver") == "1":
+        r = cambio_key.respaldo_anterior(credenciales.directorio_respaldo(),
+                                         prov.estado().get("usuario") or credenciales.USUARIO_DEFECTO,
+                                         prov.estado().get("key_id"))
+        volver = {"key": r["key"], "fecha": conexion.fecha(r["fecha"])} if r else {"key": None, "fecha": None}
+    testnet = bool(current_app.config.get("BINANCE_TESTNET"))
+    html = render_template("credenciales.html", motivo=motivo, volver=volver, testnet=testnet,
+                           key_actual=prov.enmascarada(), usuario=prov.estado().get("usuario") or "—",
+                           max_validaciones=cambio_key.VALIDACIONES_MAX)
+    resp = Response(html, mimetype="text/html")
+    resp.headers["Content-Security-Policy"] = CSP_CREDENCIALES
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    return resp
+
+
+@app.route("/api/bot/credenciales", methods=["GET"])
+def credenciales_ver():
+    """Bot → "Conexión con Binance" en JSON. Nunca devuelve key, secret ni uid. Con el cambio desde la web prendido, la
+    primera vez guarda la línea de base (huella del uid de la key actual, validada en ese momento)."""
+    prov = credenciales.de_app(current_app._get_current_object())
+    if _cambio_motivo(prov) is None:
+        try:
+            cambio_key.asegurar_linea_base(_cambio_entorno())
+        except Exception:  # noqa: BLE001 - ver la conexión nunca falla por Binance
+            current_app.logger.exception("No se pudo guardar la línea de base de la API key")
+    data = conexion_binance({"container": _container_rapido()})
+    return _json_response({"ok": True, **data})
+
+
+@app.route("/api/bot/credenciales/validar", methods=["POST"])
+@csrf_protect
+def credenciales_validar():
+    """``{api_key, api_secret}`` → chequeos de § 10.2 y, si pasa, ``pendiente_id`` (5 min, un uso). Nunca repite lo que
+    llegó: la key vuelve enmascarada y el secret no vuelve."""
+    no = _cambio_404()
+    if no is not None:
+        return no
+    motivo = _cambio_motivo()
+    if motivo:
+        return _json_response({"ok": False, "error": motivo}, 409)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _json_response({"ok": False, "error": "Se espera un objeto JSON con api_key y api_secret."}, 400)
+    api_key, api_secret = body.get("api_key"), body.get("api_secret")
+    del body
+    usuario = session.get("username") or "?"
+    try:
+        cambio_key.validar_formato(api_key, api_secret)
+    except ValueError as exc:
+        _audit_cambio("credenciales_validar", {"key": None}, "rechazado", str(exc))
+        # Telegram en cada intento (§ 10.6), también los que no llegan a Binance. Sin lo que se pegó.
+        telegram_notify.notify_bot_action("credenciales_validar", {}, "error", {"error": str(exc)}, usuario)
+        return _json_response({"ok": False, "error": str(exc),
+                               "chequeos": [{"clave": "formato", "estado": cambio_key.BLOQUEA, "texto": str(exc)}]}, 400)
+    enmascarada = credenciales.enmascarar(api_key)
+    est = _cambio_estado()
+    espera = est["limite"].intentar(usuario)
+    if espera is not None:
+        texto = (f"Hasta {cambio_key.VALIDACIONES_MAX} validaciones cada 15 minutos: probá de nuevo en "
+                 f"{max(1, espera // 60)} min.")
+        _audit_cambio("credenciales_validar", {"key": enmascarada}, "rechazado", texto)
+        telegram_notify.notify_bot_action("credenciales_validar", {"key": enmascarada}, "error", {"error": texto},
+                                          usuario)
+        return _json_response({"ok": False, "error": texto}, 429)
+    # Pasaron el límite y van a llegar a Binance: desde acá cualquier log que los nombre sale tapado. Después del
+    # limitador, así los 429 no agrandan para siempre el set que redact() recorre en cada línea de log (≤ 10 valores
+    # cada 15 min por usuario).
+    logs.register_secret(api_key)
+    logs.register_secret(api_secret)
+    env = _cambio_entorno()
+    try:
+        original = cambio_key.leer_archivo(env.dir_secretos)
+    except OSError as exc:
+        return _json_response({"ok": False, "error": f"No se pudo leer el archivo de credenciales "
+                                                     f"({exc.__class__.__name__})."}, 409)
+    res = cambio_key.validar(env, api_key, api_secret)
+    params = {"key": enmascarada, "cuenta": "otra" if res.otra_cuenta else ("misma" if res.ok else "sin_verificar"),
+              "entorno": "demo" if env.testnet else "real"}
+    if not res.ok:
+        _audit_cambio("credenciales_validar", params, "rechazado", res.motivo or "")
+        telegram_notify.notify_bot_action("credenciales_validar", params, "error", {"error": res.motivo}, usuario)
+        return _json_response({"ok": False, "key": enmascarada, "chequeos": res.chequeos, "error": res.motivo,
+                               "otra_cuenta": res.otra_cuenta}, 422)
+    p = est["pendientes"].crear(usuario=usuario, api_key=api_key, api_secret=api_secret,
+                                key_id=credenciales.key_id(api_key), enmascarada=enmascarada, huella=res.huella,
+                                archivo_sha=cambio_key.sha(original), hedge=res.hedge, permisos=res.permisos,
+                                chequeos=res.chequeos, huella_clave_id=res.huella_clave_id)
+    _audit_cambio("credenciales_validar", params, "ok", "validada: misma cuenta")
+    telegram_notify.notify_bot_action("credenciales_validar", params, "ok", {}, usuario)
+    return _json_response({"ok": True, "pendiente_id": p.id, "key": enmascarada, "chequeos": res.chequeos,
+                           "vence_en_s": cambio_key.PENDIENTE_TTL_S})
+
+
+def _cambio_confirmar(body, origen: str):
+    """Plan (409) o, con ``confirmar``, el mismo ``plan_hash`` y la contraseña del panel, el job (202) con el mismo
+    lock que START, perfil, stop y estrategia."""
+    usuario = session.get("username") or "?"
+    est = _cambio_estado()
+    try:
+        p = est["pendientes"].ver(body.get("pendiente_id"), usuario)
+    except cambio_key.PendienteError as exc:
+        return _json_response({"ok": False, "error": str(exc), "vencido": True}, 409)
+    if p.origen != origen:
+        return _json_response({"ok": False, "error": "La validación no corresponde a esta acción: validá de nuevo.",
+                               "vencido": True}, 409)
+    env = _cambio_entorno()
+    info = _container_rapido()
+    corriendo = bool(info.get("running")) if info and info.get("status") != "not_found" else None
+    plan, plan_hash = cambio_key.armar_plan(env, p, corriendo)
+    params = cambio_key.params_audit(p, env.testnet)
+    if body.get("confirmar") is not True or body.get("plan_hash") != plan_hash:
+        if body.get("confirmar"):
+            texto = ("El plan ya no corresponde: cambió la key vigente, el archivo o el estado de passivbot desde que se "
+                     "armó. Revisalo de nuevo.")
+            _audit_cambio("credenciales", params, "rechazado", "plan_hash viejo o ausente")
+        else:
+            texto = plan["texto"]
+            _audit_cambio("credenciales", params, "requiere_confirmacion", plan["titulo"])
+        return _json_response({"ok": False, "requiere_confirmacion": True, "error": texto, "plan": plan,
+                               "plan_hash": plan_hash, "pendiente_id": p.id}, 409)
+    fallo = _reautenticar(body.get("password"))
+    if fallo is not None:
+        status, texto = fallo
+        _audit_cambio("credenciales", params, "rechazado", texto)
+        return _json_response({"ok": False, "error": texto, "reauth": True}, status)
+    try:
+        p = est["pendientes"].tomar(p.id, usuario)  # un solo uso
+    except cambio_key.PendienteError as exc:
+        return _json_response({"ok": False, "error": str(exc), "vencido": True}, 409)
+
+    def validate():
+        settings = bot_control.Settings()
+        settings.require_enabled()
+        return settings, None
+
+    def work(_store, settings, _extra, rep):
+        return cambio_key.aplicar(env, settings, p, usuario, rep)
+
+    def despues(job, payload):
+        return cambio_key.esperar_consumidores(env, job, payload)
+
+    return _run_bot_action("credenciales", params, validate, work, despues=despues,
+                           si_no_arranca=lambda: est["pendientes"].devolver(p))
+
+
+@app.route("/api/bot/credenciales", methods=["POST"])
+@csrf_protect
+def credenciales_aplicar():
+    """``{pendiente_id}`` → 409 con el plan; ``{pendiente_id, plan_hash, password, confirmar: true}`` → job (202)."""
+    no = _cambio_404()
+    if no is not None:
+        return no
+    motivo = _cambio_motivo()
+    if motivo:
+        return _json_response({"ok": False, "error": motivo}, 409)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _json_response({"ok": False, "error": "Se espera un objeto JSON."}, 400)
+    return _cambio_confirmar(body, "nueva")
+
+
+@app.route("/api/bot/credenciales/volver", methods=["POST"])
+@csrf_protect
+def credenciales_volver():
+    """Volver a la key del último respaldo (≤ 7 días, distinta de la actual): ``{}`` la valida con Binance y responde el
+    plan (409, con ``pendiente_id``); después, el mismo flujo de confirmación con contraseña."""
+    no = _cambio_404()
+    if no is not None:
+        return no
+    motivo = _cambio_motivo()
+    if motivo:
+        return _json_response({"ok": False, "error": motivo}, 409)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _json_response({"ok": False, "error": "Se espera un objeto JSON."}, 400)
+    if body.get("pendiente_id"):
+        return _cambio_confirmar(body, "volver")
+    usuario = session.get("username") or "?"
+    env = _cambio_entorno()
+    estado = env.proveedor.estado()
+    r = cambio_key.respaldo_anterior(env.dir_respaldo, estado.get("usuario") or credenciales.USUARIO_DEFECTO,
+                                     estado.get("key_id"))
+    if not r:
+        return _json_response({"ok": False, "error": "No hay un respaldo de los últimos 7 días con otra key."}, 409)
+    est = _cambio_estado()
+    espera = est["limite"].intentar(usuario)
+    if espera is not None:
+        texto = (f"Hasta {cambio_key.VALIDACIONES_MAX} validaciones cada 15 minutos: probá de nuevo en "
+                 f"{max(1, espera // 60)} min.")
+        # Params propios y enmascarados: nunca ``r``, que trae key y secret del respaldo.
+        p429 = {"key": r["key"], "entorno": "demo" if env.testnet else "real", "volver": True}
+        _audit_cambio("credenciales_validar", p429, "rechazado", texto)
+        telegram_notify.notify_bot_action("credenciales_validar", p429, "error", {"error": texto}, usuario)
+        return _json_response({"ok": False, "error": texto}, 429)
+    # Como en /validar: antes de llegar a Binance, que los logs tapen key y secret del respaldo (después de un
+    # reinicio del panel nadie los registró).
+    logs.register_secret(r["api_key"])
+    logs.register_secret(r["api_secret"])
+    try:
+        original = cambio_key.leer_archivo(env.dir_secretos)
+    except OSError as exc:
+        return _json_response({"ok": False, "error": f"No se pudo leer el archivo de credenciales "
+                                                     f"({exc.__class__.__name__})."}, 409)
+    res = cambio_key.validar(env, r["api_key"], r["api_secret"])
+    params = {"key": r["key"], "cuenta": "misma" if res.ok else "sin_verificar",
+              "entorno": "demo" if env.testnet else "real", "volver": True}
+    if not res.ok:
+        _audit_cambio("credenciales_validar", params, "rechazado", res.motivo or "")
+        telegram_notify.notify_bot_action("credenciales_validar", params, "error", {"error": res.motivo}, usuario)
+        return _json_response({"ok": False, "key": r["key"], "chequeos": res.chequeos, "error": res.motivo}, 422)
+    p = est["pendientes"].crear(usuario=usuario, api_key=r["api_key"], api_secret=r["api_secret"],
+                                key_id=r["key_id"], enmascarada=r["key"], huella=res.huella,
+                                archivo_sha=cambio_key.sha(original), origen="volver", hedge=res.hedge,
+                                permisos=res.permisos, chequeos=res.chequeos, huella_clave_id=res.huella_clave_id)
+    _audit_cambio("credenciales_validar", params, "ok", "respaldo validado: misma cuenta")
+    telegram_notify.notify_bot_action("credenciales_validar", params, "ok", {}, usuario)
+    out = _cambio_confirmar({"pendiente_id": p.id}, "volver")
+    data = json.loads(out.get_data(as_text=True))
+    data["chequeos"] = res.chequeos
+    data["key"] = r["key"]
+    return _json_response(data, out.status_code)
+
+
+@app.route("/bot", methods=["GET"])
+def bot_page():
+    st, _http = bot_status_payload(docker_timeout=BOT_STATUS_RAPIDO_S)
+    c = st.get("container") or {}
+    desde = bot_control.parse_docker_time(st.get("started_at")) if c.get("running") else None
+    ultima = ultima_accion()
+    if ultima:
+        ultima["rango"] = f"{_fecha_iso_utc(ultima.get('inicio'))} → {_fecha_iso_utc(ultima.get('fin'))[6:]}" \
+            if ultima.get("fin") else _fecha_iso_utc(ultima.get("inicio"))
+        ultima["duracion"] = _duracion(ultima.get("inicio"), ultima.get("fin")) if ultima.get("fin") else ""
+    historial = acciones.historial(_bot_store().audit_path)
+    try:
+        conexion_ctx = conexion_binance(st)
+    except Exception:  # noqa: BLE001 - un archivo roto no tira la página
+        current_app.logger.exception("No se pudo armar la conexión con Binance")
+        conexion_ctx = None
+    return render_template("bot.html", coin_list=get_coins(), custom=current_app.config["CUSTOM"], bot_status=st,
+                           conexion=conexion_ctx,
+                           desde=_fecha_utc(desde),
+                           hace=_hace((datetime.now().astimezone() - desde).total_seconds()) if desde else "",
+                           latidos=latidos(), ultima=ultima, historial=historial,
+                           chequeos_ciclo=_chequeos_ciclo((st.get("estrategia") or {}).get("pares_long")))
+
+
+@app.route("/api/bot/acciones", methods=["GET"])
+def bot_acciones():
+    """Historial de acciones del panel, paginado y en palabras (``?desde=0&limite=12&filtro=todas``). Nunca devuelve
+    ``remote_addr`` ni los parámetros crudos (``futuresboard.acciones``)."""
+    try:
+        desde = int(request.args.get("desde", "0"))
+        limite = int(request.args.get("limite", str(acciones.LIMITE_DEFECTO)))
+        data = acciones.historial(_bot_store().audit_path, desde=desde, limite=limite,
+                                  filtro=request.args.get("filtro", "todas"))
+    except ValueError as exc:
+        return _json_response({"ok": False, "error": str(exc)}, 400)
+    return _json_response(data)
+
+
+# --------------------------------------------------------------------------------------
+# Estrategia: vista con chequeos por par (spec bot-estrategia § 3.2 y § 4)
+# --------------------------------------------------------------------------------------
+
+_Q_CANDIDATOS = re.compile(r"^[A-Z0-9]{1,20}$")
+MAX_CANDIDATOS = 10
+
+
+def _balance_estrategia() -> dict:
+    """Balance para dimensionar (``estrategia.balance_dimensionar``, que también usa el job sin contexto de Flask)."""
+    return estrategia.balance_dimensionar(current_app.config["DATABASE"], _bot_store().data_dir)
+
+
+def _contexto_estrategia(cfg: dict, path, balance: float | None, manif: dict | None = None) -> estrategia.Contexto:
+    return estrategia.Contexto.armar(cfg, path, testnet=bool(current_app.config.get("BINANCE_TESTNET")),
+                                     base_operativa=current_app.config.get("API_BASE_URL"), balance=balance,
+                                     manif=manif)
+
+
+def _leer_forager() -> tuple:
+    settings = bot_control.Settings()
+    path = settings.require_config()
+    return settings, path, bot_control.read_forager_config(path)
+
+
+def _ahora_por_par(vigente: dict) -> dict:
+    """Posición (unidades y % del balance) y órdenes abiertas por par, de la base del scraper (``pares_ahora``)."""
+    pa = pares_ahora(vigente, exposicion_scraper())
+    return {p["symbol"]: {k: p[k] for k in ("posicion", "nocional", "pct_balance", "compras", "ventas", "estado")}
+            for p in pa["pares"]}
+
+
+@app.route("/api/bot/estrategia", methods=["GET"])
+def bot_estrategia():
+    """Estrategia vigente con derivados, pares con sus chequeos, lugares, avanzado y ``base_hash`` (spec § 4).
+
+    Consulta la API pública de Binance (caché de ``binance_publico``, con tope de tiempo): por eso no la llama la página
+    al armarse, sino el JS de Estrategia."""
+    try:
+        _settings, path, cfg = _leer_forager()
+    except bot_control.BotControlError as exc:
+        return _json_response({"ok": False, "error": str(exc)}, exc.status_code)
+    balance = _balance_estrategia()
+    manif = manifiesto.leer(path, _container_rapido())
+    ctx = _contexto_estrategia(cfg, path, balance["para_dimensionar"], manif)
+    vigente = bot_control.resumen_estrategia(cfg)
+    rescate_cfg, _err = rescate.load_config(_bot_store().data_dir)
+    detalle = perfiles.detectar_detalle(cfg, rescate_cfg, manif)
+    vigente["perfil"], vigente["perfil_motivo"] = detalle["perfil"], detalle["motivo"]
+    vigente["long_mode"], vigente["short_mode"] = cfg.get("long_mode"), cfg.get("short_mode")
+    expo = estrategia.leer_exposicion(current_app.config["DATABASE"])
+    ahora = _ahora_por_par(vigente)
+    pares = estrategia.chequear_varios(vigente["pares_long"], ctx, lw=vigente["lw"])
+    for p in pares:
+        p["ahora"] = ahora.get(p["symbol"]) or {"posicion": 0.0, "nocional": 0.0, "pct_balance": None, "compras": 0,
+                                                "ventas": 0, "estado": "libre"}
+    fuera = [{"symbol": s, **a} for s, a in ahora.items() if s not in vigente["pares_long"] and a["estado"] != "libre"]
+    nocional = sum(a["nocional"] for a in ahora.values())
+    lug = estrategia.lugares(vigente["pares_long"], expo, cfg.get("symbols_to_ignore"))
+    return _json_response({
+        "ok": True,
+        "vigente": vigente,
+        "base_hash": bot_control.estrategia_hash(cfg),
+        "endpoint": ctx.operativo.nombre,
+        "manifiesto": {k: manif.get(k) for k in ("estado", "usable", "motivo", "generado", "revision")},
+        "balance": balance,
+        "leverage": cfg.get("leverage"),
+        "max_min_cost": cfg.get("max_min_cost"),
+        "derivados": estrategia.derivados(cfg.get("twe_long"), vigente["n_longs"], balance["para_dimensionar"],
+                                          cfg.get("leverage"), nocional),
+        "lugares": {**lug, "error": expo.get("error")},
+        # Para recalcular los lugares del borrador en el navegador (el servidor los vuelve a validar al aplicar).
+        "exposicion": {"con_posicion": sorted(expo.get("posiciones") or {}),
+                       "con_ordenes": sorted(expo.get("ordenes") or {}),
+                       "ignorar": [s for s in cfg.get("symbols_to_ignore") or [] if isinstance(s, str)]},
+        "ciclo_min": cfg.get("update_interval_minutes") or 15,
+        "pares": pares,
+        "fuera_de_lista": fuera,
+        "avanzado": estrategia.avanzado(cfg, manif),
+        "max_pares": estrategia.MAX_PARES,
+        "pares_medidos": list(estrategia.PARES_MEDIDOS),
+        "twe": {"min": str(bot_control.TWE_MANUAL_MIN), "max": str(bot_control.TWE_MANUAL_MAX),
+                "paso": str(bot_control.TWE_MANUAL_PASO), "advertencia": str(bot_control.TWE_ADVERTENCIA)},
+    })
+
+
+@app.route("/api/bot/estrategia/candidatos", methods=["GET"])
+def bot_estrategia_candidatos():
+    """Hasta 10 pares del endpoint que opera (y del manifiesto) que contienen ``q``, con sus chequeos (spec § 4).
+
+    ``lw`` (opcional): la del borrador, para la 1.ª compra. Si Binance no responde: 200 con ``error`` y sin resultados."""
+    q = (request.args.get("q") or "").strip().upper()
+    if not _Q_CANDIDATOS.match(q):
+        return _json_response({"ok": False, "error": "Buscá con letras y números (ej.: SOL)."}, 400)
+    lw = None
+    if request.args.get("lw"):
+        try:
+            lw = float(request.args["lw"])
+            if not 0 < lw <= 16:
+                raise ValueError
+        except ValueError:
+            return _json_response({"ok": False, "error": "lw inválido."}, 400)
+    try:
+        _settings, path, cfg = _leer_forager()
+    except bot_control.BotControlError as exc:
+        return _json_response({"ok": False, "error": str(exc)}, exc.status_code)
+    manif = manifiesto.leer(path, _container_rapido())
+    ctx = _contexto_estrategia(cfg, path, _balance_estrategia()["para_dimensionar"], manif)
+    try:
+        universo = {s for s in ctx.operativo.simbolos() if s.endswith("USDT")}
+    except binance_publico.SinRespuesta as exc:
+        return _json_response({"ok": True, "q": q, "resultados": [],
+                               "error": f"No se pudo consultar Binance: {exc}. Reintentá en un rato."})
+    universo |= set(((manif.get("datos") or {}).get("symbols") or {}) if manif.get("usable") else ())
+
+    def orden(s):
+        return (0 if s in (q, f"{q}USDT") else (1 if s.startswith(q) else 2), s)
+
+    candidatos = sorted((s for s in universo if q in s), key=orden)[:MAX_CANDIDATOS]
+    if lw is None:
+        lw = bot_control.resumen_estrategia(cfg)["lw"]
+    aprobados = bot_control.resumen_estrategia(cfg)["pares_long"]
+    resultados = estrategia.chequear_varios(candidatos, ctx, lw=lw)
+    for r in resultados:
+        r["ya_esta"] = r["symbol"] in aprobados
+    return _json_response({"ok": True, "q": q, "lw": lw, "endpoint": ctx.operativo.nombre, "resultados": resultados,
+                           "manifiesto": {k: manif.get(k) for k in ("estado", "usable", "motivo")}, "error": None})
+
+
+def _armador_estrategia(objetivo: dict, origen: str = "estrategia", titulo: str = "Revisar y aplicar la estrategia",
+                        estricto: bool = False):
+    """Función que arma el plan (``estrategia.armar_plan``) con lo que hay en ese momento. Captura acá lo que sale de la
+    app (rutas, Demo o real) porque el job la vuelve a llamar desde su hilo, con el lock y sin contexto de Flask."""
+    data_dir = _bot_store().data_dir
+    db_path = current_app.config["DATABASE"]
+    intervalo = scraper.intervalo_web(current_app.config)
+    testnet = bool(current_app.config.get("BINANCE_TESTNET"))
+    base = current_app.config.get("API_BASE_URL")
+    nombres = {k: v["nombre"] for k, v in perfiles.PERFILES.items()}
+
+    def armar(en_job: bool = False) -> dict:
+        settings = bot_control.Settings()
+        settings.require_enabled()
+        path = settings.require_config()
+        docker = bot_control.DockerClient(settings.docker_url)
+        info = bot_control._inspect_existing(docker, settings.container)
+        try:
+            crudo = path.read_bytes()
+        except OSError as exc:
+            raise bot_control.ConfigError(f"No se pudo leer la config de forager: {exc}") from exc
+        cfg = bot_control.read_forager_config(path)
+        manif = manifiesto.leer(path, info)
+        balance = estrategia.balance_dimensionar(db_path, data_dir)
+        ctx = estrategia.Contexto.armar(cfg, path, testnet, base, balance["para_dimensionar"], manif=manif)
+        rescate_cfg, _err = rescate.load_config(data_dir)
+        expo = estrategia.leer_exposicion(db_path)
+        expo["viejo"] = estrategia.base_vieja(db_path, intervalo)  # en el plan y otra vez en el job, con el lock
+        entrada = estrategia.Entrada(
+            cfg=cfg, archivo_sha=hashlib.sha256(crudo).hexdigest(), objetivo=objetivo, ctx=ctx,
+            expo=expo, rescate_cfg=rescate_cfg, running=bool(info.get("running")),
+            container=settings.container, detectar=lambda c: perfiles.detectar(c, rescate_cfg, manif),
+            nombres_perfil=nombres,
+            warmup_s=bot_control.forager_warmup_seconds(), bloqueo_rescate=rescate.start_bloqueado(data_dir),
+            origen=origen, titulo=titulo, estricto=estricto, estimar_rotacion=not en_job)
+        return estrategia.armar_plan(entrada)
+
+    return armar
+
+
+def _estrategia_plan_o_job(objetivo: dict, params: dict, armar, origen: str = "estrategia",
+                           extra_version: dict | None = None):
+    """Plan (409 con ``requiere_confirmacion``, el diff, los avisos y ``plan_hash``) o, con ``confirmar`` y el mismo
+    ``plan_hash``, el job (202) con el mismo lock que START, perfil y stop (spec § 3.3)."""
+    try:
+        plan = armar()
+    except estrategia.EstrategiaError as exc:
+        _rescate_audit("estrategia", params, "rechazado", str(exc))
+        return _json_response({"ok": False, "error": "No se puede aplicar: " + " ".join(exc.bloqueos),
+                               "bloqueos": exc.bloqueos, "plan": exc.plan}, exc.status_code)
+    except bot_control.BotControlError as exc:
+        _rescate_audit("estrategia", params, "rechazado", str(exc))
+        return _json_response({**exc.payload, "ok": False, "error": str(exc)}, exc.status_code)
+    if not objetivo.get("confirmar") or objetivo.get("plan_hash") != plan["plan_hash"]:
+        if objetivo.get("confirmar"):
+            texto = ("El plan ya no corresponde: cambió la estrategia, las posiciones o el estado del bot desde que se "
+                     "armó. Revisalo de nuevo.\n\n" + plan["texto"])
+            _rescate_audit("estrategia", params, "rechazado", "plan_hash viejo o ausente")
+        else:
+            texto = plan["texto"]
+            _rescate_audit("estrategia", params, "requiere_confirmacion", plan["resumen"])
+        return _json_response({"ok": False, "requiere_confirmacion": True, "error": texto, "plan": plan,
+                               "plan_hash": plan["plan_hash"]}, 409)
+    esperado = plan["plan_hash"]
+    usuario = session.get("username") or "?"
+
+    def validate():
+        settings = bot_control.Settings()
+        settings.require_enabled()
+        return settings, None
+
+    def work(store, settings, _extra, rep):
+        return estrategia.aplicar(settings, store, armar, esperado, usuario, origen=origen, reporter=rep,
+                                  extra_version=extra_version)
+
+    return _run_bot_action("estrategia", params, validate, work)
+
+
+@app.route("/api/bot/estrategia", methods=["POST"])
+@csrf_protect
+def bot_estrategia_aplicar():
+    """Cambiar TWE, pares a la vez y pares (spec § 3.3): ``{twe_long, n_longs, pares, base_hash}`` responde el plan
+    (409); ``{..., confirmar: true, plan_hash}`` lanza el job. Escribe también ``approved_symbols_short`` (= long) y
+    ``twe_short`` 1; no toca los modos."""
+    body = request.get_json(silent=True)
+    params = {k: body.get(k) for k in ("twe_long", "n_longs", "pares")} if isinstance(body, dict) else {}
+    try:
+        objetivo = estrategia.validar_objetivo(body)
+    except ValueError as exc:
+        _rescate_audit("estrategia", params, "rechazado", str(exc))
+        return _json_response({"ok": False, "error": str(exc)}, 400)
+    params = estrategia.params_audit(objetivo)
+    return _estrategia_plan_o_job(objetivo, params, _armador_estrategia(objetivo))
+
+
+@app.route("/api/bot/estrategia/rotacion", methods=["GET"])
+def bot_estrategia_rotacion():
+    """Qué elegiría forager hoy con ``pares`` (separados por coma) y ``n`` lugares (S1): réplica de sort_symbols con
+    las velas de ahora, en el endpoint que opera y, en Demo, también en Binance real. Estimación."""
+    pares = [p for p in (request.args.get("pares") or "").split(",") if p]
+    try:
+        n = int(request.args.get("n", ""))
+        if not 1 <= n <= estrategia.MAX_PARES or not 1 <= len(pares) <= estrategia.MAX_PARES:
+            raise ValueError
+        if len(set(pares)) != len(pares) or not all(estrategia.FORMATO.match(p) for p in pares):
+            raise ValueError
+    except ValueError:
+        return _json_response({"ok": False, "error": "pares o n inválidos."}, 400)
+    try:
+        _settings, path, cfg = _leer_forager()
+    except bot_control.BotControlError as exc:
+        return _json_response({"ok": False, "error": str(exc)}, exc.status_code)
+    ctx = _contexto_estrategia(cfg, path, None, {"usable": False})
+    expo = estrategia.leer_exposicion(current_app.config["DATABASE"])
+    if expo.get("error"):
+        return _json_response({"ok": False, "error": expo["error"]}, 503)
+    return _json_response({"ok": True, **estrategia.estimar_rotacion(ctx, pares, n, expo)})
+
+
+@app.route("/api/bot/estrategia/versiones", methods=["GET"])
+def bot_estrategia_versiones():
+    """Versiones de la estrategia con cuándo, quién, qué cambió y la diferencia con la vigente (spec § 2.4 paso 6)."""
+    try:
+        _settings, path, _cfg = _leer_forager()
+    except bot_control.BotControlError as exc:
+        return _json_response({"ok": False, "error": str(exc)}, exc.status_code)
+    nombres = {k: v["nombre"] for k, v in perfiles.PERFILES.items()}
+    data = estrategia.listar_versiones(path, _bot_store().data_dir, _bot_store().audit_path, nombres)
+    return _json_response({"ok": True, **data})
+
+
+@app.route("/api/bot/estrategia/volver", methods=["POST"])
+@csrf_protect
+def bot_estrategia_volver():
+    """Volver a una versión: ``{backup, base_hash}`` arma el mismo plan que un cambio de estrategia con los valores de
+    estrategia de ese backup (TWE, pares a la vez y pares; nada más) y repite confirmación y job. Bloquea si un par de
+    esa versión ya no pasa los chequeos o si viola la regla de exposición con las posiciones de ahora (spec § 3.3)."""
+    body = request.get_json(silent=True)
+    params: dict = {"volver": body.get("backup") if isinstance(body, dict) else None}
+    try:
+        if not isinstance(body, dict):
+            raise ValueError("Body inválido: se esperaba un objeto JSON.")
+        desconocidos = sorted(set(body) - {"backup", "base_hash", "confirmar", "plan_hash"})
+        if desconocidos:
+            raise ValueError(f"Campos desconocidos: {', '.join(desconocidos)}.")
+        _settings, path, _cfg = _leer_forager()
+        if not estrategia.backup_valido(path, body.get("backup")):
+            raise ValueError("backup inválido: tiene que ser un backup con fecha de new.json.")
+    except ValueError as exc:
+        _rescate_audit("estrategia", params, "rechazado", str(exc))
+        return _json_response({"ok": False, "error": str(exc)}, 400)
+    except bot_control.BotControlError as exc:
+        return _json_response({"ok": False, "error": str(exc)}, exc.status_code)
+    nombre = body["backup"]
+    try:
+        version = estrategia.leer_backup(path, nombre)
+        n_longs, _n_shorts = bot_control.n_pares(version)
+        objetivo = estrategia.validar_objetivo({
+            "twe_long": version.get("twe_long"), "n_longs": n_longs,
+            "pares": version.get("approved_symbols_long") if isinstance(version.get("approved_symbols_long"), list)
+            else None, "base_hash": body.get("base_hash"), "confirmar": body.get("confirmar", False),
+            "plan_hash": body.get("plan_hash")})
+    except estrategia.EstrategiaError as exc:
+        _rescate_audit("estrategia", params, "rechazado", str(exc))
+        return _json_response({"ok": False, "error": "No se puede volver: " + " ".join(exc.bloqueos),
+                               "bloqueos": exc.bloqueos}, 409)
+    except ValueError as exc:
+        texto = f"Esa versión no se puede restaurar con Estrategia: {exc}"
+        _rescate_audit("estrategia", params, "rechazado", texto)
+        return _json_response({"ok": False, "error": texto, "bloqueos": [texto]}, 409)
+    params = {"volver": nombre, **estrategia.params_audit(objetivo)}
+    sello = estrategia._sello(nombre)
+    titulo = f"Volver a la versión del {sello:%d/%m %H:%M} UTC" if sello else "Volver a una versión"
+    armar = _armador_estrategia(objetivo, origen="volver", titulo=titulo, estricto=True)
+    return _estrategia_plan_o_job(objetivo, params, armar, origen="volver",
+                                  extra_version={"accion": "volver", "volver_a": nombre})
+
+
+@app.route("/estrategia", methods=["GET"])
+def estrategia_page():
+    """Estrategia: lo vigente en solo lectura, más Perfil y TWE manual (los mismos endpoints que tenía la rueda).
+
+    La edición de pares y pares a la vez (borrador, chequeos, versiones) entra en ``data-estrategia-editor``: la
+    agrega el flujo de ``POST /api/bot/estrategia`` (spec § 3.3), que todavía no existe."""
+    st, _http = bot_status_payload(docker_timeout=BOT_STATUS_RAPIDO_S)
+    vigente, error = _estrategia_vigente()
+    return render_template("estrategia.html", coin_list=get_coins(), custom=current_app.config["CUSTOM"],
+                           bot_status=st, vigente=vigente, error_vigente=error, perfiles=perfiles.catalogo()["perfiles"],
+                           twe_manual={"min": str(bot_control.TWE_MANUAL_MIN), "max": str(bot_control.TWE_MANUAL_MAX),
+                                       "paso": str(bot_control.TWE_MANUAL_PASO)})
 
 
 def _check_rescate_start(data_dir: pathlib.Path) -> None:
@@ -1558,6 +2609,8 @@ def bot_start():
     (si no, 409 con ``requiere_confirmacion``)."""
     body = request.get_json(silent=True)
     body = body if isinstance(body, dict) else {}
+    if "reanudar" in body:
+        return _bot_reanudar(body)
     manual = "twe_long" in body
     riesgo = body.get("riesgo")
     params = {"twe_long": body.get("twe_long")} if manual else {"riesgo": riesgo}
@@ -1588,12 +2641,78 @@ def bot_start():
         settings.require_enabled()
         return settings, None
 
+    usuario = session.get("username") or "?"
+
     def work(store, settings, _extra, rep):
         # Se vuelve a chequear dentro del job, ya con el lock de acciones tomado.
         _check_rescate_start(store.data_dir)
-        return bot_control.start_bot(settings, store, riesgo, reporter=rep, twe_long=twe)
+        return bot_control.start_bot(settings, store, riesgo, reporter=rep, twe_long=twe, usuario=usuario)
 
     return _run_bot_action("start", params, validate, work)
+
+
+def _bot_reanudar(body: dict):
+    """Iniciar / Reanudar / Reiniciar con la estrategia guardada: ``{"reanudar": true}`` (camino ``mantener_twe``:
+    modos a normal, sin tocar TWE ni pares). Spec bot-estrategia § 2.2 y § 4.
+
+    Detenido (o con la config pendiente de reinicio): primero ``409 {requiere_confirmacion, plan, plan_hash}`` con lo
+    que va a operar y qué cambió desde el último arranque; arranca con ``{"reanudar": true, "confirmar": true,
+    "plan_hash": ...}``. Corriendo con la config en efecto (Reanudar desde parada gradual, Reiniciar): de un toque.
+    Dentro del job, con el lock, se vuelve a armar el plan: si cambió algo, 409 y no arranca."""
+    params: dict = {"reanudar": True}
+    try:
+        if body.get("reanudar") is not True:
+            raise ValueError("reanudar tiene que ser true.")
+        if "riesgo" in body or "twe_long" in body:
+            raise ValueError("reanudar arranca con la estrategia guardada: no se manda riesgo ni twe_long.")
+        confirmar = body.get("confirmar", False)
+        if not isinstance(confirmar, bool):
+            raise ValueError("confirmar tiene que ser true o false.")
+        enviado = body.get("plan_hash")
+        if enviado is not None and not isinstance(enviado, str):
+            raise ValueError("plan_hash tiene que ser texto.")
+    except ValueError as exc:
+        _rescate_audit("start", params, "rechazado", str(exc))
+        return _json_response({"ok": False, "error": str(exc)}, 400)
+    settings = bot_control.Settings()
+    try:
+        _check_rescate_start(_bot_store().data_dir)
+        settings.require_enabled()
+        plan = bot_control.plan_reanudar(settings, _bot_store())
+    except bot_control.BotControlError as exc:
+        _rescate_audit("start", params, "rechazado", str(exc))
+        return _json_response({**exc.payload, "ok": False, "error": str(exc)}, exc.status_code)
+    params["como"] = plan["como"]
+    # Con confirmar (o un plan_hash), el hash tiene que ser el del plan de ahora aunque este estado no pida plan: si el
+    # bot arrancó mientras el modal de Iniciar estaba abierto, un hash viejo lanzaba un Reiniciar que nadie confirmó
+    # (revisión, hallazgo 21). El hash incluye "como": pasar de iniciar a reiniciar lo invalida. Reanudar y Reiniciar
+    # de un toque no mandan confirmar.
+    confirma_un_plan = confirmar or enviado is not None
+    if (plan["requiere_plan"] or confirma_un_plan) and (not confirmar or enviado != plan["plan_hash"]):
+        if confirmar:
+            texto = ("El resumen ya no corresponde: cambió la estrategia o el estado del bot desde que se armó. "
+                     "Revisalo de nuevo.\n\n" + plan["texto"])
+            _rescate_audit("start", params, "rechazado", "plan_hash viejo o ausente")
+        else:
+            texto = plan["texto"]
+            _rescate_audit("start", params, "requiere_confirmacion", plan["texto"])
+        return _json_response({"ok": False, "requiere_confirmacion": True, "error": texto, "plan": plan,
+                               "plan_hash": plan["plan_hash"]}, 409)
+    esperado = plan["plan_hash"]
+    usuario = session.get("username") or "?"
+
+    def work(store, settings, _extra, rep):
+        _check_rescate_start(store.data_dir)
+        actual = bot_control.plan_reanudar(settings, store)
+        if actual["plan_hash"] != esperado:
+            err = bot_control.BotControlError("La estrategia o el estado del bot cambió desde el resumen: no se arrancó. "
+                                              "Pedí Iniciar de nuevo para ver lo que va a operar.")
+            err.status_code = 409
+            raise err
+        return bot_control.start_bot(settings, store, None, reporter=rep, mantener_twe=True, usuario=usuario,
+                                     origen=actual["como"])
+
+    return _run_bot_action("start", params, lambda: (settings, None), work)
 
 
 @app.route("/api/bot/perfil", methods=["POST"])
@@ -1613,9 +2732,11 @@ def bot_perfil():
         return _json_response({"ok": False, "error": str(exc)}, 400)
     nombre = parsed["perfil"]
     data_dir = _bot_store().data_dir
+    db_path = current_app.config["DATABASE"]
+    intervalo = scraper.intervalo_web(current_app.config)
     if not parsed["confirmar"]:
         try:
-            plan = perfiles.plan(bot_control.Settings(), data_dir, nombre)
+            plan = perfiles.plan(bot_control.Settings(), data_dir, nombre, db_path=db_path, intervalo_scraper=intervalo)
         except ValueError as exc:
             _rescate_audit("perfil", params, "rechazado", str(exc))
             return _json_response({"ok": False, "error": str(exc)}, 400)
@@ -1633,7 +2754,8 @@ def bot_perfil():
         return settings, usuario
 
     def work(store, settings, user, rep):
-        return perfiles.aplicar(settings, store, nombre, user, reporter=rep)
+        return perfiles.aplicar(settings, store, nombre, user, reporter=rep, db_path=db_path,
+                                intervalo_scraper=intervalo)
 
     return _run_bot_action("perfil", params, validate, work)
 
@@ -1683,8 +2805,9 @@ def _binance_futures_client() -> bot_control.BinanceFuturesClient:
         err = bot_control.BotControlError("Apagar con cierre de posiciones solo está soportado para Binance Futures.")
         err.status_code = 409
         raise err
-    return bot_control.BinanceFuturesClient(cfg.get("API_BASE_URL") or "", cfg.get("API_KEY") or "",
-                                            cfg.get("API_SECRET") or "",
+    # La key sale del proveedor del proceso (credenciales.py): se relee antes de cada pedido si cambió el archivo.
+    return bot_control.BinanceFuturesClient(cfg.get("API_BASE_URL") or "",
+                                            credenciales=credenciales.de_app(current_app._get_current_object()),
                                             algo_optional=bool(cfg.get("BINANCE_TESTNET")))
 
 

@@ -1048,6 +1048,15 @@ class C3Watcher:
             self._reanudar(state, c3, cfg, capital, "reinicio", "passivbot en ejecución después de un START automático "
                            "que había dado error (cuenta como reinicio automático)", self._now_ms())
             return True
+        forager = self._leer_forager() or {}
+        if forager.get("long_mode") == bot_control.MODE_GRACEFUL_STOP:
+            # Arrancó por fuera del panel (docker compose up) con los modos que dejó el Apagar: no abre pares y C3 ya
+            # no lo va a reiniciar solo. Solo cambia el aviso (revisión, hallazgo 20).
+            self._reanudar(state, c3, cfg, capital, "reinicio_manual",
+                           "passivbot volvió a correr por fuera del panel en parada gradual (no abre pares). C3 re-ancló "
+                           "la base y no lo va a reiniciar solo: usá Reanudar desde el panel", self._now_ms(),
+                           contar=False, icono="⚠️")
+            return True
         self._reanudar(state, c3, cfg, capital, "reinicio_manual", "passivbot en ejecución otra vez (START a mano)",
                        self._now_ms(), contar=False)
         return True
@@ -1103,16 +1112,25 @@ class C3Watcher:
             if simulado:
                 return {"descripcion": "la config de forager tal como quedó (sin leerla: modo dry_run)"}
             return {"error": "no se pudo leer la config de forager (falta FUTURESBOARD_FORAGER_CONFIG)."}
+        if al_corte and al_corte.get("estrategia_hash") and actual.get("estrategia_hash") != al_corte["estrategia_hash"]:
+            cambios = bot_control.cambios_estrategia(al_corte.get("estrategia"), actual.get("estrategia") or {})
+            que = ", ".join(c["titulo"].lower() for c in cambios) or "pares, pares a la vez o TWE"
+            return {"error": (f"la estrategia de forager cambió desde el corte ({que}): no se reinicia solo. "
+                              "Revisala y usá Iniciar desde el panel, que muestra qué cambió.")}
         if al_corte and (str(al_corte.get("twe_long")) != str(actual.get("twe_long"))
                          or str(al_corte.get("twe_short")) != str(actual.get("twe_short"))):
             return {"error": (f"la config de forager cambió desde el corte (twe {al_corte.get('twe_long')}/"
                               f"{al_corte.get('twe_short')} -> {actual.get('twe_long')}/{actual.get('twe_short')}).")}
         preset = actual.get("preset")
+        # El hash leído acá (sin el lock de acciones) viaja en el plan: make_start lo vuelve a comparar con el lock
+        # tomado, por si un job de Estrategia o Volver escribió otra estrategia mientras C3 esperaba el lock.
         if preset in bot_control.RISK_PRESETS:
-            return {"riesgo": preset, "mantener_twe": False, "descripcion": f"el preset {preset}"}
+            return {"riesgo": preset, "mantener_twe": False, "descripcion": f"el preset {preset}",
+                    "estrategia_hash": actual.get("estrategia_hash")}
         if preset == "personalizado":
             return {"riesgo": None, "mantener_twe": True,
-                    "descripcion": f"la config personalizada (twe {actual.get('twe_long')}/{actual.get('twe_short')})"}
+                    "descripcion": f"la config personalizada (twe {actual.get('twe_long')}/{actual.get('twe_short')})",
+                    "estrategia_hash": actual.get("estrategia_hash")}
         return {"error": f"preset de forager {preset!r}: no se puede reiniciar solo."}
 
     def _reiniciar(self, state: Dict[str, Any], c3: Dict[str, Any], cfg: Dict[str, Any], corte: Dict[str, Any],
@@ -1176,7 +1194,7 @@ class C3Watcher:
         self._notify(f"❌ <b>C3</b>: {esc(texto)}")
 
     def _reanudar(self, state: Dict[str, Any], c3: Dict[str, Any], cfg: Dict[str, Any], capital: Decimal,
-                  tipo: str, titulo: str, now_ms: int, contar: bool = True) -> None:
+                  tipo: str, titulo: str, now_ms: int, contar: bool = True, icono: str = "▶️") -> None:
         corte = c3.get("corte") or {}
         modo = corte.get("modo") or self.mode
         if contar:
@@ -1190,7 +1208,7 @@ class C3Watcher:
                  f"(tope {_pct_txt(pct)}%).")
         self._historial(c3, tipo, texto, modo, capital=money(capital), piso=money(piso), corte=corte.get("id"))
         self._event(state, texto, modo)
-        self._notify(f"▶️ <b>C3</b>: {esc(texto)}", modo == MODE_DRY_RUN)
+        self._notify(f"{icono} <b>C3</b>: {esc(texto)}", modo == MODE_DRY_RUN)
 
     # -- índice de rebote ---------------------------------------------------------------
     def _indice_nuevo(self, now_ms: int) -> Dict[str, Any]:
@@ -1287,8 +1305,12 @@ class C3Watcher:
             long_mode = bot_control.normalize_mode(cfg.get("long_mode"), "long_mode")
         except bot_control.InvalidModeError:
             long_mode = str(cfg.get("long_mode"))
+        # estrategia_hash: twe_*, n_longs y approved_symbols_* (sin los modos, que el Apagar de C3 cambia a
+        # graceful_stop): si cambia en el corte, el reinicio automático no la aplica sin que nadie la vea.
         return {"preset": bot_control.detect_preset(cfg), "twe_long": cfg.get("twe_long"),
-                "twe_short": cfg.get("twe_short"), "long_mode": long_mode}
+                "twe_short": cfg.get("twe_short"), "long_mode": long_mode,
+                "estrategia_hash": bot_control.estrategia_hash(cfg),
+                "estrategia": bot_control.resumen_estrategia(cfg)}
 
     def _leer_forager(self) -> Optional[Dict[str, Any]]:
         if self._forager is None:
@@ -1331,12 +1353,25 @@ def make_start(data_dir: pathlib.Path, bot_settings: bot_control.Settings,
             bloqueo = rescate.start_bloqueado(pathlib.Path(data_dir))
             if bloqueo:
                 return "bloqueado", {"ok": False, "error": bloqueo}
+            esperado = plan.get("estrategia_hash")
+            if esperado:
+                # Con el lock tomado: si la estrategia cambió desde que C3 armó el plan, no arranca. "bloqueado" no
+                # gasta un intento; en el tick siguiente _plan_start ve el cambio y deja el reinicio en manual, con el
+                # aviso (revisión, hallazgos 13 y 16).
+                try:
+                    actual = bot_control.estrategia_hash(bot_control.read_forager_config(bot_settings.require_config()))
+                except (bot_control.BotControlError, OSError) as exc:
+                    return "error", {"ok": False, "error": f"no se pudo releer la config de forager ({exc})."}
+                if actual != esperado:
+                    return "bloqueado", {"ok": False, "error": "la estrategia de forager cambió mientras C3 esperaba "
+                                                               "el lock: no se reinicia solo."}
             client = docker or bot_control.DockerClient(bot_settings.docker_url)
             try:
                 if client.inspect(bot_settings.container).get("running"):
                     return "ya_corriendo", {"ok": True, "docker_action": "ninguna"}
                 payload = bot_control.start_bot(bot_settings, store, plan.get("riesgo"), docker=client,
-                                                mantener_twe=bool(plan.get("mantener_twe")))
+                                                mantener_twe=bool(plan.get("mantener_twe")),
+                                                usuario=USUARIO_START, origen="c3_reinicio")
                 bot_control.verify_running(bot_settings, docker=client)
                 outcome = "ok"
             except bot_control.BotControlError as exc:

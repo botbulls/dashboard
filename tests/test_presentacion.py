@@ -74,7 +74,8 @@ def test_franja_de_estado_primero_en_la_home(client):  # noqa: F811
     html = _get(client, "/")
     franja = html.index('class="bb-franja"')
     # Estado del bot y último pedido: botones con texto (no solo ícono), antes que los KPIs y el rescate.
-    assert re.search(r'<button id="botStatus" type="button" class="badge bot-status-badge[^"]*"', html)
+    # El estado del bot es un link a Bot (spec bot-estrategia § 2.2: antes abría un modal).
+    assert re.search(r'<a id="botStatus" class="badge bot-status-badge[^"]*" href="/bot"', html)
     assert '<span class="bot-status-text">' in html
     assert re.search(r'<button type="button" class="last-order-badge"', html)
     assert "Último pedido" in html
@@ -98,13 +99,6 @@ def test_confirmacion_con_casilla_y_boton_en_el_pie_fijo(client):  # noqa: F811
     pie = modal.split('class="modal-footer', 1)[1]
     assert "Operás bajo tu propio riesgo." in pie and "Herramienta, no asesor." in pie
     assert 'data-bot-confirm="check-wrap"' in pie and 'id="botActionConfirmAccept"' in pie
-
-
-def test_advertencia_de_twe_conserva_las_clases_que_togglea_el_js(client):  # noqa: F811
-    html = _get(client, "/")
-    assert '<span class="d-none" id="botTweAdvertencia" data-bot-panel="twe-advertencia" role="alert"></span>' in html
-    css = (STATIC / "styles" / "bb.css").read_text(encoding="utf-8")
-    assert "#botTweAdvertencia.text-warning" in css and "#botTweAdvertencia.text-danger" in css
 
 
 
@@ -148,7 +142,8 @@ def test_tarjetas_de_la_home_con_errores_y_reinicio_de_c3_a_la_vista(app):  # no
 
 # ---------------------------------------------------------------- hooks (restricción 3)
 
-PAGINAS = ["/", "/positions", "/history", "/projection", "/rescate", "/settings", "/coins/BTCUSDT"]
+PAGINAS = ["/", "/positions", "/history", "/projection", "/rescate", "/settings", "/coins/BTCUSDT", "/bot",
+           "/estrategia"]
 
 
 @pytest.mark.parametrize("url", PAGINAS)
@@ -156,19 +151,19 @@ def test_hooks_del_shell_en_todas_las_paginas(client, con_datos, url):  # noqa: 
     html = _get(client, url)
     for hook in ('id="sidebar"', 'id="sidebarToggle"', 'id="sidebarToggleIcon"', 'id="mainContent"',
                  'id="sidebarOverlay"', 'id="activecoins-collapse"', 'id="inactivecoins-collapse"',
-                 'id="themeToggleMobile"', 'id="menu_admin"', 'class="icono"', 'name="respuesta"',
+                 'id="themeToggleMobile"', 'data-bot-aviso', 'data-bot-punto',
                  'id="botActionConfirmModal"', 'id="botActionConfirmCheck"', 'id="botActionConfirmAccept"',
-                 'id="botJobModal"', 'id="botPerfilSelect"', 'id="botRiesgoSelect"', 'id="botTweAdvertencia"'):
+                 'id="botJobModal"'):
         assert hook in html, (url, hook)
+    # Sin la rueda flotante (spec bot-estrategia § 2.1): sus controles viven en Bot y Estrategia.
+    for viejo in ('id="menu_admin"', 'class="icono"', 'name="respuesta"', 'id="botRiesgoSelect"'):
+        assert viejo not in html, (url, viejo)
     # Una sola hamburguesa, en la barra de base.html (antes cada página tenía la suya y Proyección ninguna).
     assert html.count('id="mobileMenuToggle"') == 1, url
     assert len(re.findall(r'class="[^"]*theme-switcher[^"]*"', html)) == 1
     assert len(re.findall(r'data-theme-value="(auto|light|dark)"', html)) == 3
-    for k in ("start", "perfil", "twe", "graceful", "apagar"):
-        assert f'data-bot-accion="{k}"' in html
     for k in ("titulo", "texto", "check-wrap", "check-label"):
         assert f'data-bot-confirm="{k}"' in html
-    assert 'id="botTweInput" name="twe_long" type="number" min="0.5" max="8" step="0.25"' in html
     # Lo que leen los scripts de captura: <head> una vez, </body> una vez, la meta del CSRF con name antes que content.
     assert html.count("<head>") == 1 and html.count("</body>") == 1
     assert re.search(r'<meta name="csrf-token" content="[^"]*">', html)
@@ -187,13 +182,14 @@ def test_menu_del_celu_retiene_el_foco(client):  # noqa: F811
 
 @pytest.mark.parametrize("url,seccion", [("/", "Inicio"), ("/positions", "Posiciones"), ("/history", "Historial"),
                                          ("/rescate", "Rescate (colchón)"), ("/projection", "Proyección"),
-                                         ("/settings", "Ajustes de la cuenta")])
+                                         ("/settings", "Ajustes de la cuenta"), ("/bot", "Bot"),
+                                         ("/estrategia", "Estrategia")])
 def test_sidebar_con_links_reales_y_seccion_activa(client, con_datos, url, seccion):  # noqa: F811
     html = _get(client, url)
     nav = html.split('aria-label="Secciones"', 1)[1].split("</nav>", 1)[0] + html.split('class="bb-sidebar__pie"', 1)[1]
     activos = re.findall(r'<a class="bb-nav__item" href="[^"]+" aria-current="page" title="([^"]+)"', nav)
     assert activos == [seccion]
-    for destino in ("/positions", "/history", "/rescate", "/projection"):
+    for destino in ("/positions", "/history", "/rescate", "/projection", "/bot", "/estrategia"):
         assert f'href="{destino}"' in nav
 
 
@@ -228,7 +224,7 @@ def test_menu_del_celu_con_boton_de_cerrar(client, con_datos):  # noqa: F811
 
 @pytest.mark.parametrize("url,hooks", [
     ("/", ['id="lineChart"', 'id="barChart"', "function graphClickEvent", 'name="daterange"', 'name="daterangeform"',
-           'id="lastOrderModal"', 'id="botStatusModal"', 'id="graficoDiario"']),
+           'id="lastOrderModal"', 'data-vivo-bloque="control_bot"', 'id="graficoDiario"']),
     ("/positions", ['id="orders"', "positions_datatable"]),
     ("/history", ['id="orders"', 'id="oldfiles"']),
     ("/projection", ['id="hype"', 'id="lineChart"']),
@@ -314,3 +310,15 @@ def test_cdns_con_version_fija(client):  # noqa: F811
 def test_sin_recarga_automatica_de_la_pagina(client, con_datos, url):  # noqa: F811
     # La página no se recarga entera cada X segundos (molestaba y cerraba lo que estuvieras mirando).
     assert 'http-equiv="refresh"' not in _get(client, url)
+
+
+@pytest.mark.parametrize("url", ["/", "/login"])
+def test_scripts_de_cdn_con_integrity(client, url):  # noqa: F811
+    # H16 (spec bot-estrategia § 8, decisión 4): todo <script> de un CDN lleva integrity (SRI) y crossorigin
+    # "anonymous", así un CDN comprometido no puede servir otro archivo.
+    html = client.get(url).get_data(as_text=True)
+    scripts = re.findall(r'<script\b[^>]*\bsrc="https://[^"]+"[^>]*>', html)
+    assert scripts
+    for tag in scripts:
+        assert re.search(r'\bintegrity="sha(384|512)-[A-Za-z0-9+/=]{40,}"', tag), tag
+        assert 'crossorigin="anonymous"' in tag, tag

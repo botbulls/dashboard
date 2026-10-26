@@ -57,6 +57,9 @@ class FakeDocker:
         self.fail_action = None      # codigo HTTP con el que fallan start/restart/stop
         self.timeout_action = False  # start/restart/stop sin respuesta (timeout)
         self.started_at = None
+        self.finished_at = None
+        self.restart_count = None    # RestartCount (nivel superior del inspect, no en State)
+        self.image = None            # Config.Image
 
     def request(self, method, url, **kwargs):
         import requests
@@ -69,7 +72,14 @@ class FakeDocker:
             state = {"Status": status, "Running": self.running}
             if self.started_at:
                 state["StartedAt"] = self.started_at
-            return FakeResponse(200, {"State": state})
+            if self.finished_at:
+                state["FinishedAt"] = self.finished_at
+            data = {"State": state}
+            if self.restart_count is not None:
+                data["RestartCount"] = self.restart_count
+            if self.image:
+                data["Config"] = {"Image": self.image}
+            return FakeResponse(200, data)
         if self.timeout_action:
             raise requests.ReadTimeout("timeout")
         if self.fail_action:
@@ -331,7 +341,8 @@ def audit_lines(app):
 @pytest.mark.parametrize(
     "method,url",
     [("get", "/api/bot/status"), ("post", "/api/bot/start"), ("post", "/api/bot/stop"),
-     ("get", "/api/bot/jobs/activo"), ("get", "/api/bot/jobs/0123456789abcdef")],
+     ("get", "/api/bot/jobs/activo"), ("get", "/api/bot/jobs/0123456789abcdef"), ("get", "/bot"),
+     ("get", "/estrategia"), ("get", "/api/bot/acciones")],
 )
 def test_auth_required(app, env, docker, method, url):
     resp = getattr(app.test_client(), method)(url)
@@ -434,7 +445,10 @@ def test_stop_apagar(client, app, env, docker, binance):
     assert data["resumen"]["completo"] is True
     assert data["resumen"]["rondas"] == 0  # no había nada abierto
     assert docker.actions() == ["stop"]
-    assert env.read_text() == FORAGER_HJSON  # apagar no toca la config
+    # Apagar solo deja forager en parada gradual (spec bot-estrategia § 3.4); la estrategia no cambia.
+    cfg = hjson.loads(env.read_text())
+    assert (cfg["long_mode"], cfg["short_mode"]) == ("graceful_stop", "graceful_stop")
+    assert {k: v for k, v in cfg.items() if not k.endswith("_mode")} == hjson.loads(FORAGER_HJSON)
     assert audit_lines(app)[-1]["params"] == {"modo": "apagar"}
 
 
@@ -532,7 +546,7 @@ def test_home_renders_without_env(client, monkeypatch):
     with mock.patch("futuresboard.blueprint.requests.get", side_effect=Exception("offline")):
         resp = client.get("/")
     assert resp.status_code == 200
-    assert b'id="menu_admin"' in resp.data
+    assert b'id="botJobModal"' in resp.data and b'id="menu_admin"' not in resp.data
     assert b"slctdaeo" not in resp.data
     assert b"guardian" not in resp.data.lower()
 

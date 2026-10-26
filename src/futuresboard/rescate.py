@@ -72,6 +72,7 @@ from urllib.parse import urlencode
 import requests
 
 from futuresboard import bot_control
+from futuresboard import credenciales as credenciales_mod
 from futuresboard import jobs
 from futuresboard import telegram_notify
 from futuresboard.telegram_notify import esc
@@ -835,25 +836,31 @@ def _field_opcional(data: Dict[str, Any], key: str) -> Optional[Decimal]:
 class RescateBinance:
     """Cliente REST mínimo. Firma igual que ``bot_control.BinanceFuturesClient`` (HMAC-SHA256 del query)."""
 
-    def __init__(self, futures_url: str, spot_url: str, api_key: str, api_secret: str,
-                 session: Optional[requests.Session] = None) -> None:
-        if not futures_url or not spot_url or not api_key or not api_secret:
+    def __init__(self, futures_url: str, spot_url: str, api_key: str = "", api_secret: str = "",
+                 session: Optional[requests.Session] = None, credenciales: Optional[Any] = None) -> None:
+        # Key y secret se piden en cada request (``futuresboard.credenciales``): un cambio de key llega sin recrear el
+        # cliente. Con strings sueltos (tests, scripts) es una key fija.
+        self._cred = credenciales if credenciales is not None else credenciales_mod.Fijas(api_key, api_secret)
+        if not futures_url or not spot_url or not self._cred.disponible():
             raise RescateError("Faltan API_KEY, API_SECRET o las URLs de Binance.")
         self.futures_url = futures_url.rstrip("/")
         self.spot_url = spot_url.rstrip("/")
-        self._api_key = api_key
-        self._api_secret = api_secret.encode("utf-8")
         self.http = session or requests.Session()
 
     def _request(self, method: str, base: str, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+        try:
+            cred = self._cred.actuales()  # una sola lectura: firma y header con la misma key
+        except credenciales_mod.SinCredenciales as exc:
+            # http_status 0: el pedido no salió. Una transferencia así es un rechazo claro, no un resultado incierto.
+            raise bot_control.BinanceError(f"Sin credenciales de Binance: {exc}", http_status=0) from exc
         query_params = dict(params or {})
         query_params["recvWindow"] = RECV_WINDOW
         query_params["timestamp"] = int(time.time() * 1000)
         query = urlencode(query_params)
-        signature = hmac.new(self._api_secret, query.encode("utf-8"), hashlib.sha256).hexdigest()
+        signature = hmac.new(cred.api_secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
         url = f"{base}{path}?{query}&signature={signature}"
         try:
-            resp = self.http.request(method, url, headers={"X-MBX-APIKEY": self._api_key},
+            resp = self.http.request(method, url, headers={"X-MBX-APIKEY": cred.api_key},
                                      timeout=HTTP_TIMEOUT_SECONDS)
         except requests.RequestException as exc:
             raise bot_control.BinanceError(f"Sin respuesta de Binance en {method} {path} ({exc.__class__.__name__}).") from exc
@@ -870,6 +877,7 @@ class RescateBinance:
         if data is None:
             raise bot_control.BinanceError(f"Binance respondió {resp.status_code} sin JSON válido en {method} {path}.",
                                            http_status=resp.status_code)
+        self._cred.firma_ok(cred)
         return data
 
     def _read(self, base: str, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
@@ -1225,8 +1233,13 @@ class RescateService:
                  apagar: Optional[Callable[[], Tuple[str, Dict[str, Any]]]] = None,
                  apagar_disponible: Optional[bool] = None,
                  send: Optional[Callable[[str], bool]] = None,
-                 clock: Callable[[], float] = time.time, c3: Optional[Any] = None) -> None:
+                 clock: Callable[[], float] = time.time, c3: Optional[Any] = None,
+                 credenciales: Optional[Any] = None) -> None:
         self.data_dir = pathlib.Path(data_dir)
+        # Proveedor de la API key del proceso (futuresboard.credenciales): todos los clientes del rescate firman con
+        # él; el servicio solo lo mira para su latido y para volver a verificar permisos cuando cambia la key.
+        self.credenciales = credenciales
+        self._key_id_visto: Optional[str] = None
         self.settings = settings
         self.mode = settings.mode
         self.binance = binance
@@ -1353,6 +1366,25 @@ class RescateService:
         }
 
     # -- ciclo ------------------------------------------------------------------------
+    def _estado_key(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Relee la key si cambió el archivo (spec bot-estrategia § 10.3). Con una key nueva, los permisos se vuelven
+        a verificar (antes había que reiniciar el servicio)."""
+        if self.credenciales is None:
+            return {}
+        try:
+            estado = self.credenciales.latido()
+        except Exception:  # noqa: BLE001 - defensivo: la key nunca tira el ciclo
+            log.exception("No se pudo leer el estado de las credenciales.")
+            return {}
+        kid = estado.get("key_id")
+        if kid and kid != self._key_id_visto:
+            if self._key_id_visto is not None:
+                self._restricciones = None
+                self._event(state, "credenciales", f"La API key cambió ({self._key_id_visto} -> {kid}): se vuelven a "
+                                                   "verificar sus permisos.")
+            self._key_id_visto = kid
+        return estado
+
     def tick(self) -> Dict[str, Any]:
         with file_lock(self.data_dir / STATE_LOCK_NAME):
             state, err = load_state(self.data_dir)
@@ -1360,6 +1392,7 @@ class RescateService:
                 self._alert("estado", err)
                 return {"ok": False, "error": err}
             self._clear("estado", "Estado del rescate legible otra vez.")
+            key = self._estado_key(state)
             cfg, cfg_err = load_config(self.data_dir)
             if cfg_err:
                 self._alert("config", cfg_err)
@@ -1376,12 +1409,23 @@ class RescateService:
                                      "intervalo": self.settings.interval, "testnet": self.testnet,
                                      "upnl_modo": self.settings.upnl_mode,
                                      "retiro_modo": self.settings.retiro_mode}
+                if self.credenciales is not None:
+                    # key_id y última firma OK, del proveedor (la key con la que firman todos los clientes del
+                    # rescate, también el Apagar del tope y el de C3). Nunca la key.
+                    key = {**key, **self._latido_key()}
+                    state["servicio"].update({k: key.get(k) for k in ("key_id", "key_ok_at", "key_error")})
                 save_state(self.data_dir, state)
             if self.c3 is not None:
                 self._tick_c3(state, cfg)
             if error_rescate is not None:
                 raise error_rescate
             return {"ok": True}
+
+    def _latido_key(self) -> Dict[str, Any]:
+        try:
+            return self.credenciales.latido()
+        except Exception:  # noqa: BLE001
+            return {}
 
     def _tick_c3(self, state: Dict[str, Any], cfg: Dict[str, Any]) -> None:
         """Paso de C3. Un error no tira el ciclo, y en ese caso NO se escribe el latido (dead-man)."""
@@ -2655,20 +2699,23 @@ def build_service(settings: RescateSettings, config: Any) -> RescateService:
     from futuresboard.config import BINANCE_FUTURES_MAINNET_URL
     from futuresboard.config import state_dir
 
-    logs.register_secret(config.API_KEY)
-    logs.register_secret(config.API_SECRET)
+    logs.register_secret(getattr(config, "API_KEY", None))
+    logs.register_secret(getattr(config, "API_SECRET", None))
     data_dir = state_dir(config)
     exchange = getattr(config.EXCHANGE, "value", config.EXCHANGE) or ""
     testnet = bool(config.BINANCE_TESTNET)
+    # Un proveedor para todo el proceso (spec bot-estrategia § 10.3): lectura y transferencias, el Apagar del tope, el
+    # de C3 y las velas piden la key en cada request, así nunca queda uno firmando con la vieja.
+    cred = credenciales_mod.para_config(config)
     binance = RescateBinance(config.API_BASE_URL or "", spot_base_url(testnet, settings.spot_url_override),
-                             config.API_KEY or "", config.API_SECRET or "")
+                             credenciales=cred)
     bot_settings = bot_control.Settings()
     apagar = None
     apagar_c3 = start_c3 = contenedor = forager = klines = None
     if bot_settings.enabled:
         try:
-            futures_client = bot_control.BinanceFuturesClient(config.API_BASE_URL or "", config.API_KEY or "",
-                                                              config.API_SECRET or "", algo_optional=testnet)
+            futures_client = bot_control.BinanceFuturesClient(config.API_BASE_URL or "", credenciales=cred,
+                                                              algo_optional=testnet)
             apagar = make_apagar(data_dir, bot_settings, futures_client)
             apagar_c3 = make_apagar(data_dir, bot_settings, futures_client, usuario=c3.USUARIO_APAGAR,
                                     origen="c3_corte")
@@ -2689,7 +2736,7 @@ def build_service(settings: RescateSettings, config: Any) -> RescateService:
     try:
         # Velas públicas para el índice de rebote de C3 (en testnet, las de Demo, como el resto del dashboard).
         publico = (config.API_BASE_URL or "") if testnet else BINANCE_FUTURES_MAINNET_URL
-        klines = bot_control.BinanceFuturesClient(publico, config.API_KEY or "", config.API_SECRET or "").klines
+        klines = bot_control.BinanceFuturesClient(publico, credenciales=cred).klines
     except bot_control.BotControlError as exc:
         log.error("Velas de Binance no disponibles para C3: %s", exc)
     c3_settings = c3.C3Settings()
@@ -2701,7 +2748,7 @@ def build_service(settings: RescateSettings, config: Any) -> RescateService:
                            testnet=testnet, apagar=apagar_c3, start=start_c3, contenedor=contenedor,
                            forager=forager, klines=klines)
     return RescateService(data_dir, settings, binance, testnet=testnet, exchange=str(exchange), apagar=apagar,
-                          c3=watcher)
+                          c3=watcher, credenciales=cred)
 
 
 def _simular(settings: RescateSettings, config: Any, tipo: str, monto: Optional[str]) -> int:

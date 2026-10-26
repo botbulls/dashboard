@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+{#- Página propia del cambio de API key (spec bot-estrategia § 10.4, paso 0): sin base.html, sin sidebar y sin scripts de
+    terceros. Todo se sirve local y la respuesta lleva CSP default-src 'self' (blueprint.CSP_CREDENCIALES), así que acá
+    no hay <script> ni style="…" en línea. Los campos de key y secret van FUERA de un <form>, con name neutros y
+    type="text" (el secret, tapado con -webkit-text-security): el navegador y los gestores no ofrecen guardarlos. -#}
+{%- macro ico(nombre, extra='') -%}<i class="bb-ico{{ ' ' ~ extra if extra }}" aria-hidden="true"><svg><use href="#{{ nombre }}"></use></svg></i>{%- endmacro %}
+<html lang="es-AR" data-theme="auto" data-default-theme="{{ session.get('theme_default', 'auto') }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#FFFFFF">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#15181D">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<meta name="csrf-token" content="{{ csrf_token() }}">
+<title>{{ 'Volver a la API key anterior' if volver else 'Cambiar la API key' }} · BotBulls</title>
+<link rel="icon" href="{{ estatico('img/favicon.png') }}">
+<script src="{{ estatico('js/credenciales_tema.js') }}"></script>
+<link rel="stylesheet" href="{{ estatico('styles/credenciales.css') }}">
+<link rel="stylesheet" href="{{ estatico('styles/bb.css') }}">
+</head>
+<body class="bb bb-sola" data-credenciales data-volver="{{ '1' if volver else '' }}"
+      data-url-validar="{{ url_for('main.credenciales_validar') }}" data-url-aplicar="{{ url_for('main.credenciales_aplicar') }}"
+      data-url-volver="{{ url_for('main.credenciales_volver') }}" data-url-jobs="{{ url_for('main.bot_job', job_id='__ID__') }}"
+      data-entorno="{{ 'Binance Demo' if testnet else 'Binance real' }}">
+{% include "_logo_sprite.html" %}
+{% include "_iconos_credenciales.html" %}
+<a class="bb-saltar" href="#contenido">Saltar al contenido</a>
+<header class="bb-sola__barra">
+  <a href="{{ url_for('main.index_page') }}" aria-label="BotBulls, ir al inicio"><svg class="bb-logo" viewBox="0 0 82.586 10.583" aria-hidden="true" focusable="false"><use href="#bbLogo"></use></svg></a>
+  <span class="bb-sola__donde"><a href="{{ url_for('main.bot_page') }}">Bot</a> <span aria-hidden="true">›</span> Credenciales</span>
+  {%- if testnet %}
+  <span class="badge bb-badge bb-badge--testnet">{{ ico('i-demo') }} <span class="bb-sola__largo">Binance </span>Demo</span>
+  {%- else %}
+  <span class="badge bb-badge bb-badge--real">Binance real</span>
+  {%- endif %}
+  <button class="bb-icono-btn" type="button" id="bbTemaSola" aria-label="Tema. Tocá para cambiar" title="Tema">{{ ico('i-tema') }}</button>
+</header>
+<main class="bb-sola__main" id="contenido">
+  <a class="bb-volver" href="{{ url_for('main.bot_page') }}">{{ ico('i-atras') }} Volver a Bot</a>
+  <h1>{{ 'Volver a la API key anterior' if volver else 'Cambiar la API key de Binance' }}</h1>
+  <ol class="bb-pasos-cambio bb-cred-pasos" aria-label="Pasos" data-cred-indicadores>
+    <li class="is-actual" aria-current="step" data-indicador="1"><span class="bb-pasos-cambio__num" aria-hidden="true">1</span>{{ ico('i-check') }}<span><span class="bb-sr" data-hecho hidden>Hecho: </span>{{ 'Validar la anterior' if volver else 'Pegar y validar' }}</span></li>
+    <li data-indicador="2"><span class="bb-pasos-cambio__num" aria-hidden="true">2</span>{{ ico('i-check') }}<span><span class="bb-sr" data-hecho hidden>Hecho: </span>Revisar y confirmar</span></li>
+    <li data-indicador="3"><span class="bb-pasos-cambio__num" aria-hidden="true">3</span>{{ ico('i-check') }}<span><span class="bb-sr" data-hecho hidden>Hecho: </span>Aplicar</span></li>
+  </ol>
+  {%- if motivo %}
+  <p class="bb-alerta bb-alerta--aviso" role="note">{{ ico('i-aviso') }}<span>{{ motivo }}</span></p>
+  {%- elif volver is not none and not volver.key %}
+  <p class="bb-alerta bb-alerta--aviso" role="note">{{ ico('i-aviso') }}<span>No hay un respaldo de los últimos 7 días con otra key: no hay a qué volver.</span></p>
+  {%- else %}
+
+  <section class="card bb-sola__tarjeta" data-paso="1" aria-label="Paso 1">
+    <div class="card-body">
+    {%- if volver %}
+      <div class="bb-modal-seccion">
+        <h3>Key anterior</h3>
+        <div class="bb-key-recibida">
+          <dl>
+            <div><dt>API key</dt><dd><code class="bb-key"><span class="bb-sr">API key que empieza con </span>{{ volver.key[:4] }}<span aria-hidden="true">…</span><span class="bb-sr"> y termina con </span>{{ volver.key[-4:] }}</code></dd></div>
+            <div><dt>Respaldo</dt><dd>{{ volver.fecha }} UTC</dd></div>
+            <div><dt>Ahora</dt><dd>{{ key_actual or '—' }}</dd></div>
+          </dl>
+        </div>
+        <p class="bb-campo__ayuda">Es la key que había antes del último cambio, del respaldo que guarda el panel (7 días). Se valida con Binance igual que una nueva: misma cuenta, hedge mode y permiso de operar.</p>
+      </div>
+    {%- else %}
+      <div class="bb-modal-seccion">
+        <h3>Antes, en Binance</h3>
+        <ol class="bb-pasos-plan">
+          <li>Creá la key nueva en la <strong>misma cuenta</strong> de {{ 'Binance Demo' if testnet else 'Binance' }} que usa este bot (key HMAC: 64 letras y números).</li>
+          <li>Para Binance real: lectura y futuros; sin retiros ni transferencia interna; restringida a la IP del servidor; transferencia universal solo si el rescate opera en real.</li>
+          <li>No borres la key vieja todavía: el bot la usa hasta que termine el cambio.</li>
+        </ol>
+      </div>
+      <div class="bb-modal-seccion">
+        <h3>Key nueva</h3>
+        <div class="bb-key-campos">
+          <div class="bb-campo"><label for="bbApiKey">API key</label><input id="bbApiKey" name="bb_k1" class="form-control bb-input-clave" type="text" inputmode="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="bbKeyAyuda"></div>
+          <div class="bb-campo"><label for="bbApiSecret">Secret</label><input id="bbApiSecret" name="bb_k2" class="form-control bb-input-clave bb-input-secreto" type="text" inputmode="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-bwignore data-form-type="other" aria-describedby="bbKeyAyuda"></div>
+        </div>
+        <p class="bb-campo__ayuda" id="bbKeyAyuda">Pegá las dos. Los campos no están en un formulario y el navegador no ofrece guardarlos. Se borran apenas responde la validación. Hasta {{ max_validaciones }} validaciones cada 15 minutos.</p>
+      </div>
+    {%- endif %}
+      <div class="bb-modal-seccion" data-cred-resultado hidden>
+        <h3 data-cred-resultado-titulo></h3>
+        <ul class="bb-chequeos bb-chequeos--lista" data-cred-chequeos aria-label="Resultado de la validación"></ul>
+        <div class="bb-alerta bb-alerta--peligro" role="alert" data-cred-otra-cuenta hidden>{{ ico('i-error') }}<div><strong>El panel no cambia de cuenta.</strong><span>Si la key tenía que ser de esta misma cuenta, revisá en Binance dónde la creaste. Pasar a otra cuenta es otra operación: cerrar todo en la actual y empezar el historial de nuevo.</span></div></div>
+      </div>
+      <p class="bb-alerta bb-alerta--peligro bb-cred-error" role="alert" data-cred-error hidden>{{ ico('i-error') }}<span data-texto></span></p>
+    </div>
+    <div class="card-footer bb-confirmacion__pie bb-sola__pie">
+      <p class="bb-confirmacion__riesgo" data-cred-pie>{{ 'Todavía no se guardó nada. Validar no cambia la key: solo la prueba con Binance.' if volver else 'Todavía no se guardó nada. En el paso siguiente revisás el cambio y confirmás con tu contraseña.' }}</p>
+      <div class="bb-confirmacion__botones"><a class="btn btn-outline-secondary" href="{{ url_for('main.bot_page') }}">Volver a Bot</a><button type="button" class="btn btn-primary" data-cred-validar{% if not volver %} disabled{% endif %}>{{ 'Validar y revisar' if volver else 'Validar con Binance' }}</button></div>
+    </div>
+  </section>
+
+  <section class="card bb-sola__tarjeta" data-paso="2" aria-label="Paso 2" hidden>
+    <div class="card-body">
+      <div class="bb-modal-seccion">
+        <h3>{{ 'Key anterior' if volver else 'Key nueva' }}</h3>
+        <div class="bb-key-recibida">
+          <dl>
+            <div><dt>API key</dt><dd><code class="bb-key" data-cred-key></code></dd></div>
+            <div><dt>Secret</dt><dd>recibido · no se muestra</dd></div>
+          </dl>
+          {%- if not volver %}<button type="button" class="btn btn-sm btn-outline-secondary" data-cred-otra>Pegar otra</button>{% endif %}
+        </div>
+        <p class="bb-campo__ayuda">{{ 'El servidor la guarda 5 minutos, solo para el paso siguiente.' if volver else 'El navegador ya borró lo que pegaste. El servidor la guarda 5 minutos, solo para el paso siguiente.' }}</p>
+      </div>
+      <div class="bb-modal-seccion">
+        <h3>Validación con {{ 'Binance Demo' if testnet else 'Binance real' }}</h3>
+        <ul class="bb-chequeos bb-chequeos--lista" data-cred-chequeos2 aria-label="Resultado de la validación"></ul>
+      </div>
+      <div class="bb-modal-seccion">
+        <h3>Qué cambia</h3>
+        <table class="bb-diff">
+          <thead><tr><th scope="col">Qué</th><th scope="col">Ahora</th><th scope="col">Después</th></tr></thead>
+          <tbody data-cred-diff></tbody>
+        </table>
+      </div>
+      <div class="bb-modal-seccion"><h3>Antes de aplicar</h3><ul class="bb-avisos" data-cred-avisos></ul></div>
+      <div class="bb-modal-seccion"><h3>Cómo se aplica</h3><ol class="bb-pasos-plan" data-cred-plan-pasos></ol></div>
+    </div>
+    <div class="card-footer bb-confirmacion__pie bb-sola__pie">
+      <div class="bb-campo bb-reauth"><label for="bbReauth">Tu contraseña del panel</label><input id="bbReauth" class="form-control" type="password" autocomplete="current-password" aria-describedby="bbReauthAyuda"><p class="bb-campo__ayuda" id="bbReauthAyuda">La del login. 5 fallos bloquean 15 min y avisan por Telegram.</p></div>
+      <div class="form-check"><input class="form-check-input" type="checkbox" id="bbConfirmarCheck"><label class="form-check-label" for="bbConfirmarCheck" data-cred-casilla>Entiendo que passivbot se reinicia y que la key vieja sigue activa en Binance hasta que yo la borre.</label></div>
+      <p class="bb-alerta bb-alerta--peligro bb-cred-error" role="alert" data-cred-error2 hidden>{{ ico('i-error') }}<span data-texto></span></p>
+      <div class="bb-confirmacion__botones"><a class="btn btn-outline-secondary" href="{{ url_for('main.bot_page') }}">Cancelar</a><button type="button" class="btn btn-warning" id="bbConfirmarAplicar" disabled>{{ 'Volver a esta key' if volver else 'Cambiar API key' }}</button></div>
+    </div>
+  </section>
+
+  <section class="card bb-sola__tarjeta" data-paso="3" aria-label="Paso 3" hidden>
+    <div class="card-body">
+      <div class="bb-modal-seccion">
+        <h3 data-cred-job-titulo>Aplicando…</h3>
+        <ol class="bb-cred-progreso" data-cred-progreso aria-live="polite"></ol>
+      </div>
+      <div data-cred-job-resultado></div>
+    </div>
+    <div class="card-footer bb-confirmacion__pie bb-sola__pie">
+      <p class="bb-confirmacion__riesgo">La espera a los 4 corre sin el lock de acciones: un Apagar no tiene que esperarla.</p>
+      <div class="bb-confirmacion__botones"><a class="btn btn-primary" href="{{ url_for('main.bot_page') }}">Ir a Bot</a></div>
+    </div>
+  </section>
+  {%- endif %}
+</main>
+<footer class="bb-pie bb-sola__pie-pagina">
+  <p role="note">BotBulls es una herramienta de automatización. No brinda asesoramiento financiero ni garantiza resultados. Operar futuros implica riesgo de pérdida total del capital.</p>
+</footer>
+<script src="{{ estatico('js/credenciales.js') }}" defer></script>
+</body>
+</html>

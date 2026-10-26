@@ -543,7 +543,7 @@ def test_js_en_vivo_contrato():
     assert "visibilitychange" in js and "document.hidden" in js
     assert "redirect: 'manual'" in js and "opaqueredirect" in js
     assert "location.protocol === 'file:'" in js  # las capturas abren el HTML guardado: no pide nada
-    assert ".modal.show" in js and "menu_admin" in js
+    assert ".modal.show" in js and "[data-bot-controles]" in js and "menu_admin" not in js
     assert "prefers-reduced-motion" in js
     # Una respuesta vieja no pisa a una más nueva; la calculadora recalcula; "hace 89 s" -> "hace 2 min" no es otro
     # aviso; al reemplazar un bloque entero, los avisos que ya estaban no se vuelven a anunciar.
@@ -557,6 +557,7 @@ def test_js_en_vivo_contrato():
 def test_home_actualiza_graficos_sin_recrearlos(client, con_datos):  # noqa: F811
     html = _get(client, "/").get_data(as_text=True)
     assert "window.BB.vivoGraficos = function (g)" in html and "c.update('none')" in html
-    # El poll propio del estado del bot (30 s) se apaga cuando en_vivo.js está activo: no se le pide a Docker dos veces.
-    assert "if (!vivoActivo) intervalo = setInterval(updateBotStatus, 30000);" in html
-    assert "window.addEventListener('fb-vivo-activo'" in html
+    # El estado del bot (franja y control rápido) llega como bloques de /api/vivo/inicio: Inicio no tiene un poll propio
+    # contra Docker (spec bot-estrategia § 2.2).
+    assert "setInterval(updateBotStatus" not in html and "updateBotStatus" not in html
+    assert 'data-vivo-bloque="franja_bot"' in html and 'data-vivo-bloque="control_bot"' in html

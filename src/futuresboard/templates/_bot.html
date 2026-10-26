@@ -1,0 +1,124 @@
+{#- Estado del bot en el shell (spec bot-estrategia § 2.1): píldora fuera de Inicio y punto en el ítem Bot del menú.
+    Cuatro estados (bot_control.estado_del_bot): operando, parada gradual, detenido (neutro) y detenido con posiciones
+    u órdenes sin bot (rojo). Más "detenido con la exposición sin verificar" (ámbar): base del scraper ilegible o vieja. static/js/bot_acciones.js los vuelve a pintar con el mismo texto cuando llega el estado
+    (evento fb-bot-status); sin estado al render, la píldora dice "Bot" y el JS lo pide. -#}
+
+{% macro texto_expuesto(expo) -%}
+{%- set p = (expo or {}).get('posiciones') or 0 -%}
+{%- set o = (expo or {}).get('ordenes') or 0 -%}
+{%- if p -%}Sin bot · {{ p }} {{ 'posición' if p == 1 else 'posiciones' }}{%- else -%}Sin bot · {{ o }} {{ 'orden' if o == 1 else 'órdenes' }}{%- endif -%}
+{%- endmacro %}
+
+{% macro pildora(st) -%}
+{%- set e = (st or {}).get('estado_bot') -%}
+{%- set d = {
+    'operando': ('Operando', 'is-operando', 'fas fa-check-circle'),
+    'gradual': ('Parada gradual', 'is-gradual', 'fas fa-exclamation-triangle'),
+    'detenido': ('Detenido', 'is-parado', 'fas fa-stop-circle'),
+    'expuesto': (texto_expuesto((st or {}).get('exposicion')), 'is-detenido', 'fas fa-times-circle'),
+    'sin_verificar': ('Detenido · sin verificar', 'is-gradual', 'fas fa-question-circle'),
+    'sin_datos': ('Bot sin datos', 'is-parado', 'fas fa-question-circle'),
+}.get(e, ('Bot', 'is-parado', 'fas fa-robot')) -%}
+<a class="bb-pildora-bot {{ d[1] }}" href="{{ url_for('main.bot_page') }}" data-bot-pildora{% if e %} data-bot-estado="{{ e }}"{% endif %} title="Ir a Bot"><i class="{{ d[2] }}" aria-hidden="true"></i><span><span class="bb-sr">Bot: </span><span data-bot-pildora-texto>{{ d[0] }}</span></span></a>
+{%- endmacro %}
+
+{% macro punto(st) -%}
+{%- set e = (st or {}).get('estado_bot') -%}
+{%- set d = {
+    'operando': ('ok', 'operando'),
+    'gradual': ('aviso', 'en parada gradual'),
+    'detenido': ('gris', 'detenido, sin posiciones ni órdenes'),
+    'expuesto': ('peligro', 'detenido con posiciones u órdenes sin bot'),
+    'sin_verificar': ('aviso', 'detenido, sin verificar si hay posiciones u órdenes'),
+    'sin_datos': ('gris', 'sin datos del estado'),
+}.get(e, ('gris', 'cargando el estado')) -%}
+<span class="bb-punto bb-punto--{{ d[0] }}" data-bot-punto{% if e %} data-bot-estado="{{ e }}"{% endif %} aria-hidden="true"></span><span class="bb-sr" data-bot-punto-texto>bot {{ d[1] }}</span>
+{%- endmacro %}
+
+{#- Estado en badge (franja de Inicio y tarjeta de Bot): texto, clase e ícono. -#}
+{% macro _badge(st) -%}
+{%- set e = (st or {}).get('estado_bot') -%}
+{%- set expo = (st or {}).get('exposicion') or {} -%}
+{{- {
+    'operando': ('Operando', 'bg-success', 'fas fa-check-circle'),
+    'gradual': ('Parada gradual', 'bg-warning', 'fas fa-exclamation-triangle'),
+    'detenido': ('Detenido', 'bg-secondary', 'fas fa-stop-circle'),
+    'expuesto': ('Detenido · ' ~ (texto_expuesto(expo)|replace('Sin bot · ', '')) ~ ' sin bot', 'bg-danger', 'fas fa-times-circle'),
+    'sin_verificar': ('Detenido · exposición sin verificar', 'bg-warning', 'fas fa-question-circle'),
+    'sin_datos': ('Sin datos', 'bg-secondary', 'fas fa-question-circle'),
+}.get(e, ('Cargando…', 'bg-secondary', 'fas fa-circle-notch fa-spin'))|join('|') -}}
+{%- endmacro %}
+
+{#- Estado en la franja de Inicio: link a Bot (antes abría un modal); /api/vivo/inicio lo rearma (franja_bot). -#}
+{% macro franja_estado(st) -%}
+{%- set d = _badge(st).split('|') -%}
+<a id="botStatus" class="badge bot-status-badge {{ d[1] }}" href="{{ url_for('main.bot_page') }}" title="Ver el bot" data-vivo-bloque="franja_bot">
+    <i class="{{ d[2] }}" aria-hidden="true"></i> <span class="bot-status-text">{{ d[0] }}</span>
+</a>
+{%- endmacro %}
+
+{% macro insignia(st) -%}
+{%- set d = _badge(st).split('|') -%}
+<span class="badge bot-status-badge {{ d[1] }}"><i class="{{ d[2] }}" aria-hidden="true"></i> {{ d[0] }}</span>
+{%- endmacro %}
+
+{#- Control rápido de Inicio (spec § 2.2). ``k`` sale de blueprint.contexto_control (lo usan la página y
+    /api/vivo/inicio, que reemplaza el bloque entero). Los botones dependen del estado; Iniciar y Reanudar arrancan con
+    la estrategia guardada (POST /api/bot/start {"reanudar": true}). En el celu, un botón peligroso nunca queda pegado
+    a Iniciar / Reanudar (bb-control__botones--separados). -#}
+{% macro control(k) -%}
+{%- set e = k.estado -%}
+{%- set expo = k.expo or {} -%}
+<section data-vivo-bloque="control_bot" class="card bb-control{% if e == 'expuesto' %} bb-control--expuesto{% elif e == 'sin_verificar' %} bb-control--sin-verificar{% endif %}" aria-labelledby="bbTituloControl">
+    <h2 class="bb-sr" id="bbTituloControl">Control rápido del bot</h2>
+    <div class="bb-control__resumen">
+        {%- if not k.enabled %}
+        <div class="bb-control__linea1"><span>Panel del bot no configurado</span></div>
+        <div class="bb-control__linea2">{{ k.error or 'Falta configurar el acceso a Docker del panel.' }}</div>
+        {%- elif e == 'sin_datos' %}
+        <div class="bb-control__linea1"><span>No se pudo leer el estado del bot</span><a href="{{ url_for('main.bot_page') }}">Ver en Bot</a></div>
+        <div class="bb-control__linea2">{{ k.error or 'Docker no respondió.' }} Sin estado no se ofrecen acciones: se reintenta en la próxima actualización.</div>
+        {%- elif e == 'expuesto' %}
+        <div class="bb-control__linea1"><span class="bb-control__alerta">Detenido con {{ expo.posiciones }} {{ 'posición' if expo.posiciones == 1 else 'posiciones' }} y {{ expo.ordenes }} {{ 'orden' if expo.ordenes == 1 else 'órdenes' }} sin bot</span><a href="{{ url_for('main.bot_page') }}">Ver en Bot</a></div>
+        <div class="bb-control__linea2">
+            {%- for p in expo.detalle or [] %}{{ p.symbol|replace('USDT', '') }} <span class="bb-num" data-value="{{ p.cantidad }}">{{ p.cantidad|num }}</span> · {% endfor -%}
+            PnL no realizado <span class="bb-num is-{{ expo.upnl|tendencia or 'cero' }}" data-value="{{ expo.upnl }}">{{ expo.upnl|usd(dec=2, signo=True) }}</span>
+            {%- if k.detenido_desde %} · detenido desde {{ k.detenido_desde }}{% endif %}</div>
+        {%- elif e == 'sin_verificar' %}
+        <div class="bb-control__linea1"><span class="bb-control__alerta">Detenido · exposición sin verificar</span><a href="{{ url_for('main.bot_page') }}">Ver en Bot</a></div>
+        <div class="bb-control__linea2">No se pudo verificar si hay posiciones u órdenes ({{ 'base del scraper ilegible' if expo.error else ('datos del scraper de hace ' ~ expo.edad if expo.edad else 'sin registro de una vuelta OK del scraper') }}){% if k.detenido_desde %} · detenido desde {{ k.detenido_desde }}{% endif %}</div>
+        {%- elif e == 'detenido' %}
+        <div class="bb-control__linea1"><span>Detenido</span><span class="bb-control__linea2">estrategia guardada: {{ k.perfil }} · TWE {{ k.twe|num }} · {{ k.n_longs }} pares a la vez</span></div>
+        <div class="bb-control__linea2">Sin posiciones ni órdenes abiertas · <a href="{{ url_for('main.estrategia_page') }}">Revisar la estrategia antes de iniciar</a></div>
+        {%- else %}
+        <div class="bb-control__linea1"><span>{{ k.perfil }} · TWE {{ k.twe|num }} · {{ k.n_longs }} pares a la vez</span><a href="{{ url_for('main.estrategia_page') }}">Ver estrategia</a></div>
+        <div class="bb-control__linea2">{{ k.pares or 'todos los pares' }}{% if k.desde %} · {{ 'en parada gradual' if e == 'gradual' else 'operando' }} desde el {{ k.desde }}{% if k.hace %} (hace {{ k.hace }}){% endif %}{% endif %}{% if k.ultima %} · última acción: {{ k.ultima }}{% endif %}</div>
+        {%- endif %}
+    </div>
+    {%- if k.enabled and e != 'sin_datos' %}
+    {%- set bloqueado = ' data-bot-bloqueado disabled' if k.bloqueo else '' %}
+    <div class="bb-control__botones{% if e in ('gradual', 'expuesto', 'sin_verificar') %} bb-control__botones--separados{% endif %}">
+        {%- if e == 'operando' %}
+        <button type="button" class="btn btn-outline-secondary" data-bot-accion="graceful"><i class="fas fa-pause" aria-hidden="true"></i> Parada gradual</button>
+        <button type="button" class="btn btn-danger" data-bot-accion="apagar"><i class="fas fa-power-off" aria-hidden="true"></i> Apagar…</button>
+        {%- elif e == 'gradual' %}
+        <button type="button" class="btn btn-primary" data-bot-accion="reanudar"{{ bloqueado|safe }}><i class="fas fa-play" aria-hidden="true"></i> Reanudar</button>
+        <button type="button" class="btn btn-danger" data-bot-accion="apagar"><i class="fas fa-power-off" aria-hidden="true"></i> Apagar…</button>
+        {%- elif e == 'detenido' %}
+        <button type="button" class="btn btn-primary" data-bot-accion="iniciar"{{ bloqueado|safe }}><i class="fas fa-play" aria-hidden="true"></i> Iniciar…</button>
+        {%- elif e in ('expuesto', 'sin_verificar') %}
+        <button type="button" class="btn btn-outline-secondary" data-bot-accion="iniciar"{{ bloqueado|safe }}><i class="fas fa-play" aria-hidden="true"></i> Iniciar…</button>
+        <button type="button" class="btn btn-danger" data-bot-accion="cerrar_todo"><i class="fas fa-power-off" aria-hidden="true"></i> Cerrar todo…</button>
+        {%- endif %}
+    </div>
+    {%- endif %}
+    <p class="bb-control__nota">
+        {%- if k.bloqueo %}<strong>START bloqueado:</strong> {{ k.bloqueo }} <a href="{{ url_for('main.rescate_page') }}">Ir a Rescate</a>
+        {%- elif e == 'operando' %}Con el bot detenido aparece Iniciar; en parada gradual, Reanudar. Los dos usan la estrategia guardada. <a href="{{ url_for('main.bot_page') }}">Más en Bot</a>
+        {%- elif e == 'gradual' %}No abre pares nuevos; las posiciones abiertas siguen hasta cerrarse. Reanudar vuelve a operar con la estrategia guardada, de un toque. <a href="{{ url_for('main.bot_page') }}">Más en Bot</a>
+        {%- elif e == 'detenido' %}Iniciar abre un resumen de lo que va a operar (perfil, TWE, pares y qué cambió desde el último arranque) y recién ahí arranca passivbot en modo normal. No cambia la estrategia ni el rescate. <a href="{{ url_for('main.bot_page') }}">Más en Bot</a>
+        {%- elif e == 'sin_verificar' %}Si hay algo abierto, nadie lo gestiona. Revisá el scraper en Bot → Latidos o mirá Binance. <strong>Cerrar todo</strong> es el Apagar de siempre (cancela todas las órdenes y cierra a mercado, con casilla) y funciona con passivbot detenido.
+        {%- elif e == 'expuesto' %}Nadie gestiona estas posiciones: no hay cierres ni promedios. <strong>Iniciar</strong> las retoma con la estrategia guardada; <strong>Cerrar todo</strong> es el Apagar de siempre (cancela todas las órdenes y cierra a mercado, con casilla) y funciona con passivbot detenido.
+        {%- else %}Herramienta, no asesor: no garantiza resultados. <a href="{{ url_for('main.bot_page') }}">Ver Bot</a>{% endif %}</p>
+</section>
+{%- endmacro %}

@@ -70,3 +70,13 @@ def on_starting(server):  # pragma: no cover - lo ejecuta gunicorn
             "futuresboard requiere workers=1 y sin preload (scraper y rate limit en proceso); "
             f"recibido workers={server.cfg.workers} preload={server.cfg.preload_app}."
         )
+
+
+def post_worker_init(worker):
+    """Ya con la app cargada en el worker: el hilo de los chequeos de forager por ciclo (spec bot-estrategia § 2.3).
+
+    Va acá y no en ``init_app`` ni en ``wsgi.py`` para que los tests (que arman la app o importan el wsgi) no lo
+    arranquen. Con 1 worker hay un solo hilo."""
+    from futuresboard import chequeos_forager
+
+    chequeos_forager.arrancar(worker.wsgi)
