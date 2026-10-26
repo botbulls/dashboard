@@ -914,6 +914,10 @@ a.bb-moneda { transition: background-color var(--bb-dur) var(--bb-ease); }
   .bb-opcion__numeros { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .bb-grilla { gap: var(--bb-s3); }
   .bb-grilla > *, .bb-grilla > .bb-ancho-6 { grid-column: 1 / -1; }
+  /* Valores largos (imagen, contenedor) envuelven en vez de aplastar la etiqueta. */
+  .bb-dato-lista li { grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); }
+  .bb-dato-lista li > :last-child { overflow-wrap: anywhere; }
+  .bb-grilla .bb-motivo a { display: inline-flex; align-items: center; min-height: var(--bb-tap); }
   .bb-control { grid-template-columns: minmax(0, 1fr); padding: var(--bb-s3); }
   .bb-control__botones { justify-content: stretch; }
   .bb-control__botones .btn { flex: 1 1 0; }

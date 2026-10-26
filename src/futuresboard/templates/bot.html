@@ -27,8 +27,10 @@
                     <li><span>Contenedor</span><span>{{ c.get('name') or '—' }} · {{ c.get('status') or 'sin datos' }}</span></li>
                     <li><span>Desde</span><span>{% if desde %}{{ desde }} · hace {{ hace }}{% else %}{{ 'detenido' if c.get('status') and not c.get('running') else '—' }}{% endif %}{% if st.get('restart_count') is not none %} · {{ st.get('restart_count') }} {{ 'reinicio' if st.get('restart_count') == 1 else 'reinicios' }}{% endif %}</span></li>
                     <li><span>Config de forager</span><span>{% if st.get('config_pending') %}pendiente de reinicio{% elif c.get('running') %}en efecto{% else %}se aplica al iniciar{% endif %}</span></li>
-                    <li><span>Imagen</span><span>{{ c.get('image') or '—' }}</span></li>
-                    <li><span>Parada gradual</span><span>{{ 'disponible (forager lee long_mode / short_mode)' if st.get('modes_supported') else 'no disponible (forager no lee los modos)' }}</span></li>
+                    {%- if c.get('image') %}
+                    <li><span>Imagen</span><span>{{ c.get('image') }}</span></li>
+                    {%- endif %}
+                    <li><span>Parada gradual</span><span>{{ 'disponible (forager lee los modos)' if st.get('modes_supported') else 'no disponible (forager no lee los modos)' }}</span></li>
                 </ul>
                 {% if st.get('error') or st.get('message') %}<p class="bb-alerta bb-alerta--aviso" role="note"><i class="fas fa-exclamation-triangle" aria-hidden="true"></i><span>{{ st.get('error') or st.get('message') }}</span></p>{% endif %}
             </div>
@@ -70,7 +72,7 @@
             <span class="bb-tarjeta__etiqueta">C3 (stop con reinicio)</span>
             {%- set c3e = l.c3.estado %}
             <span class="bb-estado-grande"><span class="bb-punto bb-punto--{{ {'operando': 'ok', 'parado': 'peligro', 'bloqueado': 'peligro', 'en_confirmacion': 'aviso', 'sin_observacion': 'aviso', 'base_pendiente': 'aviso'}.get(c3e, 'gris') }}" aria-hidden="true"></span><strong>{{ {'operando': 'Vigilando', 'parado': 'Parado', 'bloqueado': 'Bloqueado', 'en_confirmacion': 'En confirmación', 'sin_observacion': 'Sin observar', 'base_pendiente': 'Base pendiente', 'off': 'Apagado', 'deshabilitado': 'Apagado'}.get(c3e, 'Sin datos') }}</strong></span>
-            <span class="bb-motivo">{% if l.c3.parado and l.c3.corte %}cortó el {{ l.c3.corte[8:10] }}/{{ l.c3.corte[5:7] }} {{ l.c3.corte[11:16] }} UTC{% else %}se configura en <a href="{{ url_for('main.rescate_page') }}#c3">Rescate</a>{% endif %}</span></div><div class="card-footer">{{ 'el servicio late' if l.c3.servicio_vivo else 'sin latido del servicio' }}</div></div>
+            <span class="bb-motivo">{% if l.c3.parado and l.c3.corte %}cortó el {{ l.c3.corte[8:10] }}/{{ l.c3.corte[5:7] }} {{ l.c3.corte[11:16] }} UTC{% else %}<span>se configura en <a href="{{ url_for('main.rescate_page') }}#c3">Rescate</a></span>{% endif %}</span></div><div class="card-footer">{{ 'el servicio late' if l.c3.servicio_vivo else 'sin latido del servicio' }}</div></div>
         <div class="card" data-latido="acciones"><div class="card-body" style="display:grid;gap:6px">
             <span class="bb-tarjeta__etiqueta">Acciones del panel</span>
             <span class="bb-estado-grande"><span class="bb-punto bb-punto--{{ 'aviso' if l.acciones.estado == 'en_curso' else 'ok' }}" aria-hidden="true"></span><strong>{{ 'En curso' if l.acciones.estado == 'en_curso' else 'Libre' }}</strong></span>
@@ -131,7 +133,7 @@
             {%- endif %}
         </div>
     </div>
-    <p class="bb-motivo"><i class="fas fa-lock" aria-hidden="true"></i> Los modos manual, tp_only y panic por lado existen en forager pero el panel no los ofrece. Para cambiar perfil o TWE, <a href="{{ url_for('main.estrategia_page') }}">Estrategia</a>.</p>
+    <p class="bb-motivo"><i class="fas fa-lock" aria-hidden="true"></i> <span>Los modos manual, tp_only y panic por lado existen en forager pero el panel no los ofrece. Para cambiar perfil o TWE, <a href="{{ url_for('main.estrategia_page') }}">Estrategia</a>.</span></p>
 </section>
 
 <section class="bb-seccion" id="bbUltimaAccion" aria-labelledby="bbTituloUltima">
