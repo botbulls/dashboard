@@ -72,6 +72,11 @@ Browser ──(sesión + CSRF)──> dashboard (Flask)
 | GET | `/api/bot/estrategia/versiones` | – | Versiones de la estrategia (backups de `new.json` agrupados: los que solo cambian modos van con la anterior), con cuándo, quién, qué cambió y la diferencia con la vigente. |
 | POST | `/api/bot/estrategia/volver` | `{"backup", "base_hash"}` (+ `"confirmar": true, "plan_hash"`) | Volver a una versión: el mismo plan, confirmación y job que un cambio de estrategia, con TWE, pares a la vez y pares de ese backup (nada más). Bloquea si un par de esa versión ya no pasa los chequeos o si viola la regla de exposición. |
 | POST | `/api/bot/estrategia` | `{"twe_long", "n_longs", "pares", "base_hash"}` (+ `"confirmar": true, "plan_hash"`) | Cambio de estrategia: sin `confirmar`, 409 con el plan (diff, avisos, `plan_hash`) o con los `bloqueos`; con `confirmar`, el job. Escribe también `approved_symbols_short` (= long) y `twe_short` 1; no toca los modos. Reinicia passivbot si corre; detenido, escribe y no arranca. Ver [Estrategia](#estrategia-pares-y-pares-a-la-vez). |
+| GET | `/bot/credenciales` | – | Página propia del cambio de API key (CSP, solo JS local). 404 con `FUTURESBOARD_CREDENCIALES_WEB` apagado. |
+| GET | `/api/bot/credenciales` | – | Bot → "Conexión con Binance": entorno, key enmascarada (4 + 4), cuenta verificada, hedge, quién y cuándo, permisos (real) y quién la usa. Nunca key, secret ni uid. La primera vez guarda la línea de base (huella del uid). |
+| POST | `/api/bot/credenciales/validar` | `{"api_key", "api_secret"}` | Chequeos con Binance (§ 10.2): 200 con `pendiente_id` (5 min, un uso) o 422 con el motivo. 429 pasadas 5 validaciones en 15 min. |
+| POST | `/api/bot/credenciales` | `{"pendiente_id"}` (+ `"plan_hash", "password", "confirmar": true`) | Sin confirmar, 409 con el plan; con la contraseña del panel (limitador del login), el job (202). Pendiente vencido o usado: 409. |
+| POST | `/api/bot/credenciales/volver` | `{}` (después igual que arriba) | Volver a la key del último respaldo (7 días): la valida y responde el plan. |
 
 Presets (históricos del guardian): bajo 4/1, medio 6/2, alto 8/3 (`twe_long`/`twe_short`).
 
@@ -262,6 +267,26 @@ Diseño completo en `diseno/bot-estrategia/spec.md` (§ 2.4 y § 3). En corto:
   forager sobre los aprobados cada `update_interval_minutes`, deja el resultado en `chequeos_forager.json` (Bot → Pares
   ahora) y avisa por Telegram solo cuando un par cambia de estado. Binance caído es "sin datos": no avisa.
 
+## API key de Binance: `/secretos` y cambio desde el panel
+
+Diseño completo en `diseno/bot-estrategia/spec.md` § 10. En corto:
+
+- **Una sola fuente** (`futuresboard/credenciales.py`): `/secretos/api-keys.json` (formato de passivbot, usuario `user`
+  de `new.json`). Panel, scraper y rescate tienen un proveedor por proceso que relee el archivo si cambia
+  `(st_ino, st_mtime_ns, st_size)`. **Todos** los clientes de Binance piden key y secret en cada request (también el
+  Apagar del tope, el de C3 y las velas). Con el archivo inválido siguen con la última key válida y lo dicen en el latido.
+  Sin el directorio `/secretos` (migración), la key sale de `config.json`.
+- **Latidos**: `scraper_latido.json` y `rescate_state.servicio` llevan `key_id` (12 hex del sha256 de la API key, nunca
+  del secret) y `key_ok_at` (última firma OK). Bot → "Conexión con Binance" los compara con la key del archivo; passivbot
+  cuenta cuando crea una orden después de arrancar.
+- **Cambio desde la web** (`futuresboard/cambio_key.py`), detrás de `FUTURESBOARD_CREDENCIALES_WEB`: página propia
+  `/bot/credenciales` (sin `base.html` ni scripts de terceros, con CSP), validación con Binance (formato HMAC, misma
+  cuenta por la huella del uid, hedge mode, la sonda del permiso de operar, permisos en real), re-auth con la contraseña
+  del panel (limitador del login), 5 validaciones cada 15 min, pendiente de 5 min y un uso, job con el lock (respaldo
+  600 en `/secretos-respaldo`, escritura atómica, restart de passivbot; si Docker lo rechaza se restaura copiando el
+  respaldo) y espera a los consumidores sin el lock. Ninguna respuesta, log, historial ni Telegram lleva la key entera,
+  el secret ni el uid.
+
 ## Variables de entorno
 
 | Variable | Default | Descripción |
@@ -272,10 +297,15 @@ Diseño completo en `diseno/bot-estrategia/spec.md` (§ 2.4 y § 3). En corto:
 | `FUTURESBOARD_FORAGER_SUPPORTS_MODES` | `0` | Habilita Graceful stop. Activar solo con forager parcheado (ver arriba). |
 | `FUTURESBOARD_CHEQUEOS_FORAGER` | `1` | `0` apaga el hilo de los chequeos de forager por ciclo (Bot → Pares ahora y avisos por Telegram). |
 | `FUTURESBOARD_SECRET_KEY` | efímera + warning | Fijarla para que las sesiones (y el token CSRF) sobrevivan reinicios. Ver [login.md](login.md) para cookies, usuarios y rate limit. |
+| `FUTURESBOARD_SECRETOS_DIR` | `/secretos` | Directorio de `api-keys.json`. Si no existe, la key sale de `config.json`. |
+| `FUTURESBOARD_SECRETOS_RESPALDO_DIR` | `/secretos-respaldo` | Respaldos del cambio de key (solo el panel lo monta). |
+| `FUTURESBOARD_PASSIVBOT_USER` | `binance_01` | Usuario de `api-keys.json` si no se puede leer `new.json` (el scraper no monta `/forager`). |
+| `FUTURESBOARD_CREDENCIALES_WEB` | `0` | `1` habilita cambiar la API key desde el panel. Apagado, la página y los POST responden 404. En prod, solo con DALE. |
+| `FUTURESBOARD_CREDENCIALES_ESPERA_SECONDS` | `150` | Cuánto espera el job a que los 4 tomen la key nueva (sin el lock, cancelable). |
 
-Apagar no agrega variables: usa `API_KEY` / `API_SECRET` / `API_BASE_URL` / `EXCHANGE` de
-`config.json` y el modo de prueba existente (`FUTURESBOARD_BINANCE_TESTNET`). La API key
-necesita permiso de **trading de futuros** (antes el dashboard solo leía).
+Apagar usa la key de `/secretos/api-keys.json` (o `API_KEY` / `API_SECRET` de `config.json` mientras no exista el
+directorio), `API_BASE_URL` / `EXCHANGE` de `config.json` y el modo de prueba existente
+(`FUTURESBOARD_BINANCE_TESTNET`). La API key necesita permiso de **trading de futuros** (antes el dashboard solo leía).
 
 Se eliminan `FUTURESBOARD_ADMIN_URL`, `FUTURESBOARD_BOT_URL`, `FUTURESBOARD_BOT_SERVICE_NAME`
 y `FUTURESBOARD_BOT_SERVICE_PORT`.

@@ -30,6 +30,7 @@ from typing_extensions import TypedDict
 from futuresboard import acciones
 from futuresboard import binance_publico
 from futuresboard import bot_control
+from futuresboard import cambio_key
 from futuresboard import c3
 from futuresboard import chequeos_forager
 from futuresboard import conexion
@@ -44,6 +45,7 @@ from futuresboard import scraper
 from futuresboard import telegram_notify
 from futuresboard import db
 from futuresboard import formato
+from futuresboard import logs
 from futuresboard.config import BINANCE_FUTURES_MAINNET_URL
 from futuresboard.config import state_dir
 
@@ -1500,26 +1502,35 @@ def _reject(action: str, params: dict, status: int, payload: dict, outcome: str)
     return _json_response(payload, status)
 
 
-def _run_bot_action(action: str, params: dict, validate, work):
+def _run_bot_action(action: str, params: dict, validate, work, despues=None, si_no_arranca=None):
     """Valida de forma síncrona y lanza la acción como job (202 + job_id).
 
     ``validate()`` no hace I/O contra Docker ni Binance: enum, panel habilitado, modos y
     credenciales. Sus errores responden 400/403/409/503 en el momento, sin crear job.
     ``work(store, settings, extra, reporter)`` corre en el hilo del job.
+    ``despues(job, payload)``: paso sin el lock y cancelable (``jobs.launch``). ``si_no_arranca()``: se llama si el job
+    no se creó (validación o una acción en curso), por ejemplo para devolver un pendiente de un solo uso.
     """
     try:
         settings, extra = validate()
     except ValueError as exc:
+        if si_no_arranca is not None:
+            si_no_arranca()
         return _reject(action, params, 400, {"ok": False, "error": str(exc)}, "rechazado")
     except bot_control.BotControlError as exc:
+        if si_no_arranca is not None:
+            si_no_arranca()
         return _reject(action, params, exc.status_code, {**exc.payload, "ok": False, "error": str(exc)}, "error")
 
     store = _bot_store()
     ctx = jobs.JobContext(store, settings, session.get("username") or "?", request.remote_addr,
                           current_app.logger)
     try:
-        job = jobs.launch(_bot_jobs(), action, params, ctx, lambda rep: work(store, settings, extra, rep))
+        job = jobs.launch(_bot_jobs(), action, params, ctx, lambda rep: work(store, settings, extra, rep),
+                          despues=despues)
     except jobs.ActiveJobError as exc:
+        if si_no_arranca is not None:
+            si_no_arranca()
         return _json_response(
             {"ok": False, "error": "Ya hay una acción del panel en curso: esperá a que termine.",
              "job_id": exc.job_id},
@@ -1683,7 +1694,7 @@ def _fecha_utc(momento: datetime | None) -> str:
 
 
 _TITULOS_ACCION = {"start": "inicio", "graceful": "parada gradual", "apagar": "apagar", "perfil": "perfil",
-                   "estrategia": "estrategia"}
+                   "estrategia": "estrategia", "credenciales": "cambio de API key"}
 _ESTADOS_JOB = {"ok": "ok", "error": "con error", "interrumpido": "interrumpida", "en_curso": "en curso"}
 
 
@@ -1706,6 +1717,9 @@ def ultima_accion() -> dict | None:
         titulo = f"perfil {nombre}"
     elif accion == "estrategia":
         titulo = "volver a una versión" if params.get("volver") else "estrategia"
+    elif accion == "credenciales":
+        titulo = ("volver a la API key anterior" if params.get("volver") else "cambio de API key") + \
+            (f" ({params.get('key')})" if params.get("key") else "")
     return {**{k: v for k, v in data.items() if k != "pid"}, "titulo": titulo,
             "estado_texto": _ESTADOS_JOB.get(data.get("estado"), str(data.get("estado")))}
 
@@ -1840,7 +1854,357 @@ def conexion_binance(st: dict) -> dict:
         meta=credenciales.leer_meta(data_dir), scraper_latido=latido_scr, scraper_vivo=scr_vivo,
         scraper_intervalo=intervalo, rescate_servicio=servicio, rescate_vivo=res_vivo,
         container=st.get("container"), ultima_orden_ms=_ultima_orden_ms(), ahora=ahora,
-        key_enmascarada=prov.enmascarada())
+        key_enmascarada=prov.enmascarada(), web=_cambio_web(prov))
+
+
+# --------------------------------------------------------------------------------------
+# Cambiar la API key desde el panel (spec bot-estrategia § 10.4 a § 10.7; futuresboard.cambio_key)
+# --------------------------------------------------------------------------------------
+
+# La página de la key no usa base.html ni scripts de terceros: todo local y esta CSP (§ 10.4, paso 0).
+CSP_CREDENCIALES = ("default-src 'self'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; "
+                    "base-uri 'none'")
+CAMBIO_EXTENSION = "futuresboard_cambio_key"
+
+
+def _cambio_estado() -> dict:
+    """Pendientes y límite de validaciones del proceso (gunicorn corre 1 worker). ``cliente``: fábrica de clientes de
+    Binance para validar (los tests ponen uno falso)."""
+    app_ = current_app._get_current_object()
+    est = app_.extensions.get(CAMBIO_EXTENSION)
+    if est is None:
+        est = app_.extensions.setdefault(CAMBIO_EXTENSION, {"pendientes": cambio_key.Pendientes(),
+                                                            "limite": cambio_key.Limitador(), "cliente": None})
+    return est
+
+
+def _cambio_motivo(prov=None) -> str | None:
+    """Por qué no se puede cambiar la key desde la web (None: se puede)."""
+    if not cambio_key.web_habilitada():
+        return (f"Apagado: se prende con {cambio_key.ENV_WEB}=1 en el entorno del panel (en dev para probar; en prod, "
+                "solo con DALE).")
+    prov = prov or credenciales.de_app(current_app._get_current_object())
+    if not prov.modo_secretos():
+        return ("Falta el directorio de credenciales (/secretos): la key todavía sale de config.json y el panel no "
+                "tiene dónde escribirla.")
+    if str(current_app.config.get("EXCHANGE") or "").lower() != "binance":
+        return "Solo para Binance Futures."
+    return None
+
+
+def _cambio_web(prov) -> dict:
+    motivo = _cambio_motivo(prov)
+    web = {"habilitada": motivo is None, "motivo": motivo, "url": None, "volver": None}
+    if motivo is None:
+        web["url"] = url_for("main.credenciales_page")
+        try:
+            r = cambio_key.respaldo_anterior(credenciales.directorio_respaldo(),
+                                             prov.estado().get("usuario") or credenciales.USUARIO_DEFECTO,
+                                             prov.estado().get("key_id"))
+        except Exception:  # noqa: BLE001
+            r = None
+        if r:
+            web["volver"] = {"key": r["key"], "fecha": conexion.fecha(r["fecha"]), "url": web["url"] + "?volver=1"}
+    return web
+
+
+def _cambio_entorno() -> cambio_key.Entorno:
+    cfg = current_app.config
+    testnet = bool(cfg.get("BINANCE_TESTNET"))
+    prov = credenciales.de_app(current_app._get_current_object())
+    data_dir = _bot_store().data_dir
+    try:
+        servicio = (rescate.load_state(data_dir)[0] or {}).get("servicio") or {}
+    except Exception:  # noqa: BLE001
+        servicio = {}
+    return cambio_key.Entorno(
+        testnet=testnet, futures_url=cfg.get("API_BASE_URL") or "",
+        spot_url=rescate.spot_base_url(testnet, os.environ.get(rescate.ENV_SPOT_URL, "").strip().rstrip("/")),
+        proveedor=prov, data_dir=data_dir, db_path=str(cfg["DATABASE"]), dir_secretos=prov.dir,
+        dir_respaldo=credenciales.directorio_respaldo(),
+        rescate_real=isinstance(servicio, dict) and servicio.get("modo") == "real",
+        cliente=_cambio_estado().get("cliente"))
+
+
+def _cambio_404():
+    """Con FUTURESBOARD_CREDENCIALES_WEB apagado, la página y los POST no existen."""
+    if not cambio_key.web_habilitada():
+        return _json_response({"ok": False, "error": "No existe."}, 404)
+    return None
+
+
+def _audit_cambio(action: str, params: dict, outcome: str, detail: str) -> None:
+    try:
+        _bot_store().audit(session.get("username") or "?", action, params, outcome, detail, request.remote_addr)
+    except OSError:
+        current_app.logger.exception("No se pudo escribir el log de auditoria")
+
+
+def _reautenticar(password) -> tuple[int, str] | None:
+    """La contraseña del panel, contra ``users`` (como /settings), con el MISMO limitador del login por usuario e IP
+    (``auth._reserve_attempt``: 5 fallos en 15 min). Cada fallo avisa por Telegram. None = ok."""
+    from werkzeug.security import check_password_hash
+
+    from futuresboard import auth
+
+    usuario = session.get("username") or ""
+    ip = auth._client_ip()
+    clave = (usuario.lower(), ip)
+    if auth._reserve_attempt(clave) is None:
+        current_app.logger.warning("Re-autenticación bloqueada por rate limit: usuario=%r ip=%s", usuario, ip)
+        return 429, "Demasiados intentos fallidos con la contraseña: probá de nuevo en unos minutos."
+    with db.connect(current_app.config["DATABASE"]) as conn:
+        row = conn.execute("SELECT password_hash FROM users WHERE username = ?", (usuario,)).fetchone()
+    valida = (bool(row) and isinstance(password, str) and bool(password)
+              and check_password_hash(row[0], password)
+              and not check_password_hash(row[0], auth.BLOCKED_DEFAULT_PASSWORD))
+    if valida:
+        auth._clear_failures(clave)
+        return None
+    current_app.logger.warning("Re-autenticación fallida en el cambio de API key: usuario=%r ip=%s", usuario, ip)
+    try:
+        telegram_notify.notify_bot_action("credenciales", {}, "error",
+                                          {"error": "Contraseña del panel incorrecta al confirmar el cambio de API "
+                                                    "key."}, usuario or "?")
+    except Exception:  # pragma: no cover - notify_bot_action no lanza
+        pass
+    return 403, "Contraseña incorrecta."
+
+
+def _container_rapido() -> dict | None:
+    settings = bot_control.Settings()
+    if not settings.enabled:
+        return None
+    try:
+        return bot_control.DockerClient(settings.docker_url, timeout=BOT_STATUS_RAPIDO_S).inspect(settings.container)
+    except bot_control.BotControlError:
+        return None
+
+
+@app.route("/bot/credenciales", methods=["GET"])
+def credenciales_page():
+    """Página propia del cambio de key: template mínimo sin base.html, solo JS y CSS locales, campos fuera de un
+    ``<form>`` y la CSP de § 10.4. Con el flag apagado, 404."""
+    if not cambio_key.web_habilitada():
+        return not_found(None)
+    prov = credenciales.de_app(current_app._get_current_object())
+    motivo = _cambio_motivo(prov)
+    if motivo is None:
+        # La primera vez, la línea de base de la key actual (huella del uid): Bot pasa a decir "UID verificado".
+        try:
+            cambio_key.asegurar_linea_base(_cambio_entorno())
+        except Exception:  # noqa: BLE001 - abrir la página nunca falla por Binance
+            current_app.logger.exception("No se pudo guardar la línea de base de la API key")
+    volver = None
+    if motivo is None and request.args.get("volver") == "1":
+        r = cambio_key.respaldo_anterior(credenciales.directorio_respaldo(),
+                                         prov.estado().get("usuario") or credenciales.USUARIO_DEFECTO,
+                                         prov.estado().get("key_id"))
+        volver = {"key": r["key"], "fecha": conexion.fecha(r["fecha"])} if r else {"key": None, "fecha": None}
+    testnet = bool(current_app.config.get("BINANCE_TESTNET"))
+    html = render_template("credenciales.html", motivo=motivo, volver=volver, testnet=testnet,
+                           key_actual=prov.enmascarada(), usuario=prov.estado().get("usuario") or "—",
+                           max_validaciones=cambio_key.VALIDACIONES_MAX)
+    resp = Response(html, mimetype="text/html")
+    resp.headers["Content-Security-Policy"] = CSP_CREDENCIALES
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    return resp
+
+
+@app.route("/api/bot/credenciales", methods=["GET"])
+def credenciales_ver():
+    """Bot → "Conexión con Binance" en JSON. Nunca devuelve key, secret ni uid. Con el cambio desde la web prendido, la
+    primera vez guarda la línea de base (huella del uid de la key actual, validada en ese momento)."""
+    prov = credenciales.de_app(current_app._get_current_object())
+    if _cambio_motivo(prov) is None:
+        try:
+            cambio_key.asegurar_linea_base(_cambio_entorno())
+        except Exception:  # noqa: BLE001 - ver la conexión nunca falla por Binance
+            current_app.logger.exception("No se pudo guardar la línea de base de la API key")
+    data = conexion_binance({"container": _container_rapido()})
+    return _json_response({"ok": True, **data})
+
+
+@app.route("/api/bot/credenciales/validar", methods=["POST"])
+@csrf_protect
+def credenciales_validar():
+    """``{api_key, api_secret}`` → chequeos de § 10.2 y, si pasa, ``pendiente_id`` (5 min, un uso). Nunca repite lo que
+    llegó: la key vuelve enmascarada y el secret no vuelve."""
+    no = _cambio_404()
+    if no is not None:
+        return no
+    motivo = _cambio_motivo()
+    if motivo:
+        return _json_response({"ok": False, "error": motivo}, 409)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _json_response({"ok": False, "error": "Se espera un objeto JSON con api_key y api_secret."}, 400)
+    api_key, api_secret = body.get("api_key"), body.get("api_secret")
+    del body
+    usuario = session.get("username") or "?"
+    try:
+        cambio_key.validar_formato(api_key, api_secret)
+    except ValueError as exc:
+        _audit_cambio("credenciales_validar", {"key": None}, "rechazado", str(exc))
+        return _json_response({"ok": False, "error": str(exc),
+                               "chequeos": [{"clave": "formato", "estado": cambio_key.BLOQUEA, "texto": str(exc)}]}, 400)
+    # Apenas llegan y con formato válido: desde acá cualquier log que los nombre sale tapado.
+    logs.register_secret(api_key)
+    logs.register_secret(api_secret)
+    enmascarada = credenciales.enmascarar(api_key)
+    est = _cambio_estado()
+    espera = est["limite"].intentar(usuario)
+    if espera is not None:
+        texto = (f"Hasta {cambio_key.VALIDACIONES_MAX} validaciones cada 15 minutos: probá de nuevo en "
+                 f"{max(1, espera // 60)} min.")
+        _audit_cambio("credenciales_validar", {"key": enmascarada}, "rechazado", texto)
+        return _json_response({"ok": False, "error": texto}, 429)
+    env = _cambio_entorno()
+    try:
+        original = cambio_key.leer_archivo(env.dir_secretos)
+    except OSError as exc:
+        return _json_response({"ok": False, "error": f"No se pudo leer el archivo de credenciales "
+                                                     f"({exc.__class__.__name__})."}, 409)
+    res = cambio_key.validar(env, api_key, api_secret)
+    params = {"key": enmascarada, "cuenta": "otra" if res.otra_cuenta else ("misma" if res.ok else "sin_verificar"),
+              "entorno": "demo" if env.testnet else "real"}
+    if not res.ok:
+        _audit_cambio("credenciales_validar", params, "rechazado", res.motivo or "")
+        telegram_notify.notify_bot_action("credenciales_validar", params, "error", {"error": res.motivo}, usuario)
+        return _json_response({"ok": False, "key": enmascarada, "chequeos": res.chequeos, "error": res.motivo,
+                               "otra_cuenta": res.otra_cuenta}, 422)
+    p = est["pendientes"].crear(usuario=usuario, api_key=api_key, api_secret=api_secret,
+                                key_id=credenciales.key_id(api_key), enmascarada=enmascarada, huella=res.huella,
+                                archivo_sha=cambio_key.sha(original), hedge=res.hedge, permisos=res.permisos,
+                                chequeos=res.chequeos)
+    _audit_cambio("credenciales_validar", params, "ok", "validada: misma cuenta")
+    telegram_notify.notify_bot_action("credenciales_validar", params, "ok", {}, usuario)
+    return _json_response({"ok": True, "pendiente_id": p.id, "key": enmascarada, "chequeos": res.chequeos,
+                           "vence_en_s": cambio_key.PENDIENTE_TTL_S})
+
+
+def _cambio_confirmar(body, origen: str):
+    """Plan (409) o, con ``confirmar``, el mismo ``plan_hash`` y la contraseña del panel, el job (202) con el mismo
+    lock que START, perfil, stop y estrategia."""
+    usuario = session.get("username") or "?"
+    est = _cambio_estado()
+    try:
+        p = est["pendientes"].ver(body.get("pendiente_id"), usuario)
+    except cambio_key.PendienteError as exc:
+        return _json_response({"ok": False, "error": str(exc), "vencido": True}, 409)
+    if p.origen != origen:
+        return _json_response({"ok": False, "error": "La validación no corresponde a esta acción: validá de nuevo.",
+                               "vencido": True}, 409)
+    env = _cambio_entorno()
+    info = _container_rapido()
+    corriendo = bool(info.get("running")) if info and info.get("status") != "not_found" else None
+    plan, plan_hash = cambio_key.armar_plan(env, p, corriendo)
+    params = cambio_key.params_audit(p, env.testnet)
+    if body.get("confirmar") is not True or body.get("plan_hash") != plan_hash:
+        if body.get("confirmar"):
+            texto = ("El plan ya no corresponde: cambió la key vigente, el archivo o el estado de passivbot desde que se "
+                     "armó. Revisalo de nuevo.")
+            _audit_cambio("credenciales", params, "rechazado", "plan_hash viejo o ausente")
+        else:
+            texto = plan["texto"]
+            _audit_cambio("credenciales", params, "requiere_confirmacion", plan["titulo"])
+        return _json_response({"ok": False, "requiere_confirmacion": True, "error": texto, "plan": plan,
+                               "plan_hash": plan_hash, "pendiente_id": p.id}, 409)
+    fallo = _reautenticar(body.get("password"))
+    if fallo is not None:
+        status, texto = fallo
+        _audit_cambio("credenciales", params, "rechazado", texto)
+        return _json_response({"ok": False, "error": texto, "reauth": True}, status)
+    try:
+        p = est["pendientes"].tomar(p.id, usuario)  # un solo uso
+    except cambio_key.PendienteError as exc:
+        return _json_response({"ok": False, "error": str(exc), "vencido": True}, 409)
+
+    def validate():
+        settings = bot_control.Settings()
+        settings.require_enabled()
+        return settings, None
+
+    def work(_store, settings, _extra, rep):
+        return cambio_key.aplicar(env, settings, p, usuario, rep)
+
+    def despues(job, payload):
+        return cambio_key.esperar_consumidores(env, job, payload)
+
+    return _run_bot_action("credenciales", params, validate, work, despues=despues,
+                           si_no_arranca=lambda: est["pendientes"].devolver(p))
+
+
+@app.route("/api/bot/credenciales", methods=["POST"])
+@csrf_protect
+def credenciales_aplicar():
+    """``{pendiente_id}`` → 409 con el plan; ``{pendiente_id, plan_hash, password, confirmar: true}`` → job (202)."""
+    no = _cambio_404()
+    if no is not None:
+        return no
+    motivo = _cambio_motivo()
+    if motivo:
+        return _json_response({"ok": False, "error": motivo}, 409)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _json_response({"ok": False, "error": "Se espera un objeto JSON."}, 400)
+    return _cambio_confirmar(body, "nueva")
+
+
+@app.route("/api/bot/credenciales/volver", methods=["POST"])
+@csrf_protect
+def credenciales_volver():
+    """Volver a la key del último respaldo (≤ 7 días, distinta de la actual): ``{}`` la valida con Binance y responde el
+    plan (409, con ``pendiente_id``); después, el mismo flujo de confirmación con contraseña."""
+    no = _cambio_404()
+    if no is not None:
+        return no
+    motivo = _cambio_motivo()
+    if motivo:
+        return _json_response({"ok": False, "error": motivo}, 409)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _json_response({"ok": False, "error": "Se espera un objeto JSON."}, 400)
+    if body.get("pendiente_id"):
+        return _cambio_confirmar(body, "volver")
+    usuario = session.get("username") or "?"
+    env = _cambio_entorno()
+    estado = env.proveedor.estado()
+    r = cambio_key.respaldo_anterior(env.dir_respaldo, estado.get("usuario") or credenciales.USUARIO_DEFECTO,
+                                     estado.get("key_id"))
+    if not r:
+        return _json_response({"ok": False, "error": "No hay un respaldo de los últimos 7 días con otra key."}, 409)
+    est = _cambio_estado()
+    espera = est["limite"].intentar(usuario)
+    if espera is not None:
+        texto = (f"Hasta {cambio_key.VALIDACIONES_MAX} validaciones cada 15 minutos: probá de nuevo en "
+                 f"{max(1, espera // 60)} min.")
+        return _json_response({"ok": False, "error": texto}, 429)
+    try:
+        original = cambio_key.leer_archivo(env.dir_secretos)
+    except OSError as exc:
+        return _json_response({"ok": False, "error": f"No se pudo leer el archivo de credenciales "
+                                                     f"({exc.__class__.__name__})."}, 409)
+    res = cambio_key.validar(env, r["api_key"], r["api_secret"])
+    params = {"key": r["key"], "cuenta": "misma" if res.ok else "sin_verificar",
+              "entorno": "demo" if env.testnet else "real", "volver": True}
+    if not res.ok:
+        _audit_cambio("credenciales_validar", params, "rechazado", res.motivo or "")
+        telegram_notify.notify_bot_action("credenciales_validar", params, "error", {"error": res.motivo}, usuario)
+        return _json_response({"ok": False, "key": r["key"], "chequeos": res.chequeos, "error": res.motivo}, 422)
+    p = est["pendientes"].crear(usuario=usuario, api_key=r["api_key"], api_secret=r["api_secret"],
+                                key_id=r["key_id"], enmascarada=r["key"], huella=res.huella,
+                                archivo_sha=cambio_key.sha(original), origen="volver", hedge=res.hedge,
+                                permisos=res.permisos, chequeos=res.chequeos)
+    _audit_cambio("credenciales_validar", params, "ok", "respaldo validado: misma cuenta")
+    out = _cambio_confirmar({"pendiente_id": p.id}, "volver")
+    data = json.loads(out.get_data(as_text=True))
+    data["chequeos"] = res.chequeos
+    data["key"] = r["key"]
+    return _json_response(data, out.status_code)
 
 
 @app.route("/bot", methods=["GET"])

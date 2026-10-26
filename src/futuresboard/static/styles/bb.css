@@ -951,6 +951,8 @@ a.bb-moneda { transition: background-color var(--bb-dur) var(--bb-ease); }
   .bb .bb-input-clave, .bb-reauth input { min-height: var(--bb-tap); font-size: 16px; } /* 16 px: iOS no hace zoom al enfocar */
   .bb-reauth { max-width: none; }
   .bb-key-accion .btn, .bb-key-recibida .btn { min-height: var(--bb-tap); width: 100%; }
+  .bb-key-accion > .bb-key-botones { width: 100%; flex-direction: column; }
+  .bb-key-botones .btn { flex: none; }
   .bb-key-recibida { padding: var(--bb-s3); }
 }
 
@@ -961,6 +963,7 @@ a.bb-moneda { transition: background-color var(--bb-dur) var(--bb-ease); }
 .bb-control__alerta { color: var(--bb-loss); }
 
 /* A2: la key se cambia en una página propia (/bot/credenciales), sin sidebar ni scripts de terceros. */
+.bb-logo-tinta { fill: var(--bb-logo-ink); }
 .bb-sola { min-height: 100vh; background: var(--bb-bg); }
 .bb-sola__barra { display: flex; align-items: center; gap: var(--bb-s3); padding: var(--bb-s2) var(--bb-s5); min-height: 56px; border-bottom: 1px solid var(--bb-border); background: var(--bb-surface); }
 .bb-sola__barra .bb-logo { height: 14px; width: auto; display: block; }

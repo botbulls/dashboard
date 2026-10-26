@@ -161,7 +161,8 @@ def vista(estado: Dict[str, Any], *, modo_secretos: bool, testnet: bool, meta: D
         _passivbot(container, archivo_mtime, modo_secretos, ultima_orden_ms),
         _consumidor("panel", "Panel", "Apagar y cierre a mercado · la relee si cambia",
                     ESTADO_OK if ref else ESTADO_SIN_DATOS,
-                    _firma(estado.get("key_ok_at"), ahora) if ref else "sin key"),
+                    ("con esta key" if not estado.get("key_ok_at") else _firma(estado.get("key_ok_at"), ahora))
+                    if ref else "sin key"),
         _proceso("scraper", "Scraper",
                  f"posiciones, órdenes e ingresos cada {scraper_intervalo or 60} s",
                  scraper_latido.get("key_id"), ref, scraper_latido.get("key_ok_at"), scraper_latido.get("key_error"),

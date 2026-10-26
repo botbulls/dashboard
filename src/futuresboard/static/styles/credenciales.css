@@ -1,0 +1,66 @@
+/* credenciales.css: base de la página /bot/credenciales (cambiar la API key de Binance).
+   La página lleva CSP default-src 'self': no carga Bootstrap, Font Awesome ni la fuente de un CDN (spec bot-estrategia
+   § 10.4, paso 0). Esto reemplaza lo poco de Bootstrap 5 que usan sus componentes; los colores, tamaños y el resto
+   del diseño salen de bb.css, que se carga después. La fuente cae en la del sistema (IBM Plex Sans no se sirve local). */
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body { margin: 0; font-family: var(--bb-font); font-size: var(--bb-fs-14, 14px); line-height: 1.5; -webkit-font-smoothing: antialiased; }
+h1, h2, h3, h4, p, ol, ul, dl, dd { margin-top: 0; }
+p, ol, ul, dl { margin-bottom: 1rem; }
+ol, ul { padding-left: 2rem; }
+small { font-size: .875em; }
+code { font-size: .875em; word-wrap: break-word; }
+table { border-collapse: collapse; caption-side: bottom; }
+th { text-align: inherit; }
+button, input { margin: 0; font-family: inherit; font-size: inherit; line-height: inherit; }
+button { cursor: pointer; text-transform: none; }
+button:disabled { cursor: default; }
+[hidden] { display: none !important; }
+.mb-0 { margin-bottom: 0 !important; }
+.d-none { display: none !important; }
+
+/* Componentes de Bootstrap que usa la página (estructura; el look lo da bb.css). */
+.card { position: relative; display: flex; flex-direction: column; min-width: 0; word-wrap: break-word; background-clip: border-box; }
+.card-body { flex: 1 1 auto; }
+.card-footer:last-child { border-radius: 0 0 var(--bb-r-lg) var(--bb-r-lg); }
+.btn { display: inline-flex; font-weight: 500; line-height: 1.5; text-align: center; text-decoration: none; vertical-align: middle; user-select: none; border: 1px solid transparent; padding: .375rem .75rem; font-size: var(--bb-fs-14, 14px); }
+.btn-sm { padding: .25rem .5rem; font-size: var(--bb-fs-13, 13px); }
+.btn:focus-visible { outline: 0; box-shadow: 0 0 0 3px color-mix(in srgb, var(--bb-focus) 35%, transparent); }
+.form-control { display: block; width: 100%; padding: .375rem .75rem; font-size: 1rem; line-height: 1.5; appearance: none; background-clip: padding-box; }
+.form-check { display: block; min-height: 1.5rem; }
+.form-check-input { appearance: auto; accent-color: var(--bb-ink); cursor: pointer; vertical-align: top; }
+.form-check-label { cursor: pointer; }
+.badge { display: inline-flex; align-items: center; gap: 4px; padding: .35em .65em; font-size: .75em; line-height: 1; white-space: nowrap; vertical-align: baseline; border: 1px solid transparent; }
+
+/* Iconos SVG propios (templates/_iconos_credenciales.html) dentro de <i>: bb.css les da el color y el tamaño. */
+.bb-ico { display: inline-flex; align-items: center; justify-content: center; font-style: normal; line-height: 1; flex: none; }
+.bb-ico svg { width: 1em; height: 1em; display: block; }
+.bb-chequeo .bb-ico { margin-top: 3px; }
+.bb-alerta > .bb-ico { font-size: 16px; }
+.bb-volver .bb-ico, .btn .bb-ico { font-size: 14px; }
+.bb-icono-btn .bb-ico { font-size: 18px; }
+.bb-girando svg { animation: bb-girar 1s linear infinite; }
+@keyframes bb-girar { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .bb-girando svg { animation: none; } }
+
+/* Estados de la página: un solo paso visible a la vez. */
+.bb-cred-error { margin: 0; }
+.bb-cred-pasos li > .bb-ico { display: none; font-size: 14px; }
+.bb-cred-pasos li.is-hecho > .bb-ico { display: inline-flex; }
+.bb-cred-pasos li.is-hecho > .bb-pasos-cambio__num { display: none; }
+.bb-cred-progreso { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--bb-s2, 8px); }
+.bb-cred-progreso li { display: grid; grid-template-columns: 20px minmax(0, 1fr); gap: var(--bb-s2, 8px); align-items: start; }
+.bb-cred-progreso li[data-estado="ok"] .bb-ico { color: var(--bb-gain); }
+.bb-cred-progreso li[data-estado="error"] .bb-ico { color: var(--bb-loss); }
+.bb-cred-progreso li[data-estado="omitido"], .bb-cred-progreso li[data-estado="pendiente"] { color: var(--bb-text-3); }
+.bb-cred-progreso small { display: block; color: var(--bb-text-2); }
+.bb-reauth .form-control { max-width: 360px; }
+.bb-sola__main h3[tabindex="-1"]:focus { outline: none; }  /* el foco va al título del paso para lectores de pantalla */
+
+@media (max-width: 767.98px) {
+  /* En el celu la barra entra en 390 px: el badge dice "Demo" y "Bot › Credenciales" puede ir en dos renglones. */
+  .bb-sola__largo { display: none; }
+  .bb-sola__barra { gap: var(--bb-s2, 8px); }
+  .bb-sola__donde { min-width: 0; }
+}

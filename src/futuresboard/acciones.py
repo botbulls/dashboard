@@ -84,6 +84,12 @@ def titulo(action: Any, params: Any) -> str:
         if "twe_long" in p and "n_longs" in p:
             return f"{cabeza}: TWE {_num(p.get('twe_long'))}, {_num(p.get('n_longs'))} a la vez, {cortos or 'sin pares'}"
         return cabeza
+    if action == "credenciales":
+        cabeza = "Volver a la API key anterior" if p.get("volver") else "Cambiar la API key"
+        return f"{cabeza} ({p.get('key')})" if p.get("key") else cabeza
+    if action == "credenciales_validar":
+        cabeza = "API key anterior: validación" if p.get("volver") else "API key nueva: validación"
+        return f"{cabeza} ({p.get('key')})" if p.get("key") else cabeza
     return _TITULOS_FIJOS.get(action, str(action))
 
 

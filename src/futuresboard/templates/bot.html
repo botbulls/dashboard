@@ -148,7 +148,10 @@
             <div><h3>Cambiar la API key</h3><p>Para rotar la key de esta misma cuenta de Binance: vencida, expuesta o con otra restricción de IP. Se hace en una página aparte, sin scripts externos. Se valida con Binance antes de guardar, pide tu contraseña del panel y reinicia passivbot (~90 s sin gestionar órdenes). No pasa de Demo a real ni a otra cuenta.</p>
             {%- if not cx.web.habilitada %}<span class="bb-motivo"><i class="fas fa-lock" aria-hidden="true"></i> {{ cx.web.motivo }}</span>{% endif %}</div>
             {%- if cx.web.habilitada %}
+            <span class="bb-confirmacion__botones bb-key-botones">
+            {%- if cx.web.volver %}<a class="btn btn-outline-secondary" href="{{ cx.web.volver.url }}" data-bot-volver-key><i class="fas fa-undo" aria-hidden="true"></i> Volver a la anterior ({{ cx.web.volver.key }})…</a>{% endif %}
             <a class="btn btn-outline-secondary" href="{{ cx.web.url }}" data-bot-cambiar-key><i class="fas fa-key" aria-hidden="true"></i> Cambiar API key…</a>
+            </span>
             {%- else %}
             <button type="button" class="btn btn-outline-secondary" disabled aria-disabled="true"><i class="fas fa-key" aria-hidden="true"></i> Cambiar API key…</button>
             {%- endif %}
