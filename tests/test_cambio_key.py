@@ -58,8 +58,9 @@ def iso(ts):
 
 class Cuenta:
     def __init__(self, uid, dual=True, sonda=-4059, restricciones=None, income=("9001", "9002"),
-                 posiciones=(("BTCUSDT", "LONG", "0.004"),), error_futuros=None, timeout=False):
+                 posiciones=(("BTCUSDT", "LONG", "0.004"),), error_futuros=None, timeout=False, balance="5417.55"):
         self.uid, self.dual, self.sonda, self.restricciones = uid, dual, sonda, restricciones
+        self.balance = balance
         self.income, self.posiciones = list(income), list(posiciones)
         self.error_futuros, self.timeout = error_futuros, timeout
 
@@ -92,7 +93,7 @@ class FakeBinanceKeys:
         if ruta == ("GET", "/fapi/v2/account"):
             if c.error_futuros:
                 return FakeResponse(400, {"code": c.error_futuros, "msg": "error"})
-            return FakeResponse(200, {"totalWalletBalance": "5417.55", "positions": [
+            return FakeResponse(200, {"totalWalletBalance": c.balance, "positions": [
                 {"symbol": s, "positionSide": ps, "positionAmt": a} for s, ps, a in c.posiciones]
                 + [{"symbol": "LTCUSDT", "positionSide": "LONG", "positionAmt": "0"}]})
         if ruta == ("GET", "/api/v3/account"):
@@ -312,13 +313,16 @@ def test_misma_key_que_la_actual_bloquea(client, cambio):  # noqa: F811
 
 def test_otra_cuenta_bloquea(client, cambio):  # noqa: F811
     client.get("/api/bot/credenciales")  # línea de base con la key actual (uid 1001)
-    k, s = nueva(cambio, uid=2002)
+    k, s = nueva(cambio, uid=2002, balance="98765.43")
     resp = validar(client, k, s)
     data = resp.get_json()
     assert resp.status_code == 422 and data["otra_cuenta"] is True
     t = textos(data["chequeos"])
     assert "Es otra cuenta" in t and "quedaría sin bot: 1 posición" in t and "KPIs" in t
     assert "2002" not in resp.get_data(as_text=True)
+    # Ni el balance de la cuenta ajena: el panel no es un oráculo de keys robadas (§ 10.6, revisión hallazgo 2).
+    assert "balance" not in t and "98.765" not in resp.get_data(as_text=True)
+    assert "Firma en Binance Demo: la cuenta de futuros responde" in t
     assert not cambio.fake.posts_sonda()
     assert audit_lines(cambio.app)[-1]["params"]["cuenta"] == "otra"
 
@@ -333,11 +337,24 @@ def test_key_vieja_revocada_y_tranid_en_comun_permite(client, cambio):  # noqa: 
 
 def test_sin_huella_key_vieja_revocada_y_sin_tranid_en_comun_bloquea(client, cambio):  # noqa: F811
     del cambio.fake.keys[cambio.k0]
-    k, s = nueva(cambio, uid=1001, income=("5", "6"))
+    k, s = nueva(cambio, uid=1001, income=("5", "6"), balance="98765.43")
     resp = validar(client, k, s)
     assert resp.status_code == 422
     assert "No se puede saber si es la misma cuenta" in resp.get_json()["error"]
     assert "la key actual no responde" in resp.get_json()["error"]
+    assert "balance" not in textos(resp.get_json()["chequeos"]) and "98.765" not in resp.get_data(as_text=True)
+
+
+def test_el_balance_se_muestra_recien_con_la_misma_cuenta(client, cambio):  # noqa: F811
+    client.get("/api/bot/credenciales")
+    resp = validar(client, *nueva(cambio, uid=1001))
+    assert resp.status_code == 200
+    assert "la cuenta de futuros responde · balance 5.417,55 USDT" in textos(resp.get_json()["chequeos"])
+    del cambio.fake.keys[cambio.k0]  # sin huella ni key actual: misma cuenta por tranId
+    cambio_key_meta = cambio.data_dir / credenciales.META_FILE
+    cambio_key_meta.unlink()
+    resp = validar(client, *nueva(cambio, uid=1001, income=("5", "9002")))
+    assert resp.status_code == 200 and "balance 5.417,55 USDT" in textos(resp.get_json()["chequeos"])
 
 
 def test_one_way_bloquea_y_la_sonda_no_corre(client, cambio):  # noqa: F811

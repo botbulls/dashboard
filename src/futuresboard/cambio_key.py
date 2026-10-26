@@ -579,7 +579,10 @@ def validar(env: Entorno, api_key: str, api_secret: str) -> Resultado:
     except ErrorBinance as exc:
         ch["firma"] = _chequeo("firma", BLOQUEA, motivo(exc, env.testnet))
         return fin()
-    ch["firma"] = _chequeo("firma", OK, f"Firma en {env.nombre}: la cuenta de futuros responde{_balance(fut)}")
+    # Sin el balance: se suma recién cuando la cuenta da OK. Con otra cuenta o sin poder saberlo, la respuesta solo dice
+    # "responde" o "no se puede usar" (§ 10.6: el panel no es un oráculo de keys robadas).
+    firma_ok = f"Firma en {env.nombre}: la cuenta de futuros responde"
+    ch["firma"] = _chequeo("firma", OK, firma_ok)
 
     uid = None
     try:
@@ -599,6 +602,7 @@ def validar(env: Entorno, api_key: str, api_secret: str) -> Resultado:
     if base and res.huella:
         if hmac.compare_digest(base, res.huella):
             ch["cuenta"] = _chequeo("cuenta", OK, "Misma cuenta: el UID coincide con el guardado")
+            ch["firma"] = _chequeo("firma", OK, firma_ok + _balance(fut))
         else:
             res.otra_cuenta = True
             ch["cuenta"] = _chequeo("cuenta", BLOQUEA, "Es otra cuenta: el UID no coincide con el guardado")
@@ -619,6 +623,7 @@ def validar(env: Entorno, api_key: str, api_secret: str) -> Resultado:
         if comunes:
             ch["cuenta"] = _chequeo("cuenta", OK, f"Misma cuenta: {len(comunes)} movimientos de Binance coinciden con "
                                                   "el historial del panel (no hay huella del UID para comparar)")
+            ch["firma"] = _chequeo("firma", OK, firma_ok + _balance(fut))
         else:
             ch["cuenta"] = _chequeo("cuenta", BLOQUEA, "No se puede saber si es la misma cuenta: no hay huella del UID "
                                                        f"guardada{'' if actual_ok else ', la key actual no responde'} y "
